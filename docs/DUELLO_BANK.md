@@ -95,6 +95,9 @@ Solana de chaque membre dans le wallet :
   paiement reste désactivé.
 - L'adresse est **validée côté serveur** (base58, 32-44 caractères) avant d'être
   relayée au navigateur — les adresses invalides sont rejetées et non exposées.
+
+- L'adresse est **décodée et validée côté serveur** comme une clé publique
+  Solana base58 de 32 octets avant d'être relayée au navigateur.
 - Le membre fournit son adresse dans l'app Duello ; Duello la propage dans
   `/api/admin/affiliate-wallets`.
 
@@ -106,10 +109,15 @@ Solana de chaque membre dans le wallet :
 2. L'admin choisit le membre et le montant USDC (jusqu'à 6 décimales), coche la
    confirmation.
 3. Switch construit la transaction SPL transfer :
+   - refuse les adresses hors courbe et les comptes existants qui ne sont pas
+     des wallets standards gérés par le System Program ;
    - crée le compte ATA USDC du membre s'il n'existe pas encore (frais SOL payés
      par le wallet Phantom expéditeur) ;
    - signe et diffuse **via Phantom** (`signAndSendTransaction`) ;
-   - confirme la transaction puis affiche le lien Solscan.
+   - confirme la transaction avec le blockhash et sa hauteur d'expiration, puis
+     affiche le lien Solscan. Si la confirmation RPC est indéterminée, la
+     signature reste visible et Switch demande de la vérifier avant tout nouvel
+     envoi afin d'éviter un double paiement.
 
 ### Exigences du wallet admin
 

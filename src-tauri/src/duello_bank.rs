@@ -141,6 +141,10 @@ pub struct DuelloBankWallet {
     pub stripe_status: Option<String>,
     pub stripe_payouts_enabled: Option<bool>,
     pub can_withdraw: Option<bool>,
+    /// Adresse Solana du portefeuille du membre, fournie par Duello
+    /// (champ `solanaAddress` du wallet). Optionnelle tant que le membre
+    /// n'a pas renseigne son adresse de retrait Phantom/USDC.
+    pub solana_address: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -425,6 +429,13 @@ fn parse_wallets(body: &Value) -> Result<Vec<DuelloBankWallet>, DuelloBankError>
             .and_then(|value| value.get("payoutsEnabled"))
             .and_then(Value::as_bool);
         let can_withdraw = object.get("canWithdraw").and_then(Value::as_bool);
+        let solana_address = object
+            .get("solanaAddress")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(validated_solana_address)
+            .transpose()?;
         wallets.push(DuelloBankWallet {
             public_id,
             referral_code,
@@ -437,6 +448,7 @@ fn parse_wallets(body: &Value) -> Result<Vec<DuelloBankWallet>, DuelloBankError>
             stripe_status,
             stripe_payouts_enabled,
             can_withdraw,
+            solana_address,
         });
     }
     wallets.sort_by(|left, right| {
@@ -577,6 +589,26 @@ fn valid_member_id(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
+/// Valide la representation base58 d'une cle publique Solana de 32 octets.
+/// La classification on-chain (wallet System Program, et non compte de
+/// programme) reste faite juste avant l'envoi par le client Solana.
+fn validated_solana_address(value: &str) -> Result<String, DuelloBankError> {
+    if !(32..=44).contains(&value.len()) {
+        return Err(DuelloBankError::unavailable(
+            "L'adresse Solana d'un portefeuille Duello est invalide.",
+        ));
+    }
+    let decoded = bs58::decode(value).into_vec().map_err(|_| {
+        DuelloBankError::unavailable("L'adresse Solana d'un portefeuille Duello est invalide.")
+    })?;
+    if decoded.len() != 32 {
+        return Err(DuelloBankError::unavailable(
+            "L'adresse Solana d'un portefeuille Duello est invalide.",
+        ));
+    }
+    Ok(value.to_string())
+}
+
 fn required_text(value: Option<&Value>, max_chars: usize) -> Option<String> {
     let value = value?.as_str()?.trim();
     let count = value.chars().count();
@@ -691,8 +723,77 @@ mod tests {
         .unwrap();
         assert_eq!(parsed[0].currency, "EUR");
         assert_eq!(parsed[0].stripe_status.as_deref(), Some("ready"));
+        assert_eq!(parsed[0].solana_address, None);
         let serialized = serde_json::to_string(&parsed).unwrap();
         assert!(!serialized.contains("acct_secret"));
         assert!(!serialized.contains("stripeAccountId"));
+    }
+
+    #[test]
+    fn relays_valid_solana_address_and_rejects_invalid_ones() {
+        let valid_address = "So11111111111111111111111111111111111111112";
+        let parsed = parse_wallets(&json!({
+            "wallets": [{
+                "publicId": "member-a1b2",
+                "referralCode": "member-a1b2",
+                "displayName": "Amina Martin",
+                "email": "amina@example.test",
+                "clickCount": 1,
+                "creditedClickCount": 0,
+                "availableMinor": 100,
+                "currency": "eur",
+                "solanaAddress": valid_address
+            }]
+        }))
+        .unwrap();
+        assert_eq!(parsed[0].solana_address.as_deref(), Some(valid_address));
+        assert!(serde_json::to_string(&parsed)
+            .unwrap()
+            .contains(valid_address));
+
+        // Alphabet invalide (0, O, I, l absents du base58), longueur hors borne
+        // ou base58 valide qui ne represente pas exactement 32 octets.
+        assert!(parse_wallets(&json!({
+            "wallets": [{
+                "publicId": "member-a1b2",
+                "referralCode": "member-a1b2",
+                "displayName": "Amina",
+                "email": "amina@example.test",
+                "clickCount": 1,
+                "creditedClickCount": 0,
+                "availableMinor": 1,
+                "currency": "eur",
+                "solanaAddress": "0OIl-not-base58"
+            }]
+        }))
+        .is_err());
+        assert!(parse_wallets(&json!({
+            "wallets": [{
+                "publicId": "member-a1b2",
+                "referralCode": "member-a1b2",
+                "displayName": "Amina",
+                "email": "amina@example.test",
+                "clickCount": 1,
+                "creditedClickCount": 0,
+                "availableMinor": 1,
+                "currency": "eur",
+                "solanaAddress": "22222222222222222222222222222222"
+            }]
+        }))
+        .is_err());
+        assert!(parse_wallets(&json!({
+            "wallets": [{
+                "publicId": "member-a1b2",
+                "referralCode": "member-a1b2",
+                "displayName": "Amina",
+                "email": "amina@example.test",
+                "clickCount": 1,
+                "creditedClickCount": 0,
+                "availableMinor": 1,
+                "currency": "eur",
+                "solanaAddress": "abc"
+            }]
+        }))
+        .is_err());
     }
 }

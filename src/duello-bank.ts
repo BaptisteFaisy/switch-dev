@@ -1,4 +1,16 @@
 import { hasRemoteAuth, invoke, remoteBaseUrl, saveRemoteConfig } from "./platform";
+import {
+  connectPhantom,
+  disconnectPhantom,
+  formatSolanaAddress,
+  formatUsdcMinor,
+  getUsdcBalance,
+  phantomErrorMessage,
+  sendUsdc,
+  waitForTransactionConfirmation,
+  SOLSCAN_ADDRESS_PREFIX,
+  type SendUsdcResult,
+} from "./phantom-pay";
 import "./duello-bank.css";
 
 type DuelloBankWallet = {
@@ -13,6 +25,7 @@ type DuelloBankWallet = {
   stripeStatus: string | null;
   stripePayoutsEnabled: boolean | null;
   canWithdraw: boolean | null;
+  solanaAddress: string | null;
 };
 
 type DuelloBankSnapshot = {
@@ -49,6 +62,18 @@ let pendingReference = "";
 let pendingFingerprint = "";
 let toast = "";
 let toastTimer: number | null = null;
+
+let phantomConnected = false;
+let phantomAddress = "";
+let phantomBalanceMinor: bigint | null = null;
+let payModalOpen = false;
+let payWalletId = "";
+let payAmountDraft = "";
+let payConfirmed = false;
+let payBusy = false;
+let payError = "";
+let payResult: SendUsdcResult | null = null;
+let payConfirmation: "none" | "broadcast" | "confirmed" | "failed" | "unknown" = "none";
 
 const escapeHtml = (value: unknown) =>
   String(value ?? "")
@@ -143,6 +168,51 @@ const resetCreditDraft = () => {
   modalError = "";
   pendingReference = "";
   pendingFingerprint = "";
+};
+
+const resetPayDraft = () => {
+  payWalletId = "";
+  payAmountDraft = "";
+  payConfirmed = false;
+  payError = "";
+  payResult = null;
+  payConfirmation = "none";
+};
+
+const parseUsdcAmountToMinor = (raw: string) => {
+  const compact = raw.trim().replace(/[\s\u00a0\u202f]/g, "").replace(",", ".");
+  if (!/^\d{1,9}(?:\.\d{1,6})?$/.test(compact)) return null;
+  const [units, fraction = ""] = compact.split(".");
+  const minor = BigInt(units) * 1_000_000n + BigInt(fraction.padEnd(6, "0"));
+  if (minor <= 0n || minor > 1_000_000_000_000n) return null;
+  return minor;
+};
+
+const updatePhantomBalance = async () => {
+  if (!phantomAddress) {
+    phantomBalanceMinor = null;
+    return;
+  }
+  try {
+    phantomBalanceMinor = (await getUsdcBalance(phantomAddress)).minor;
+  } catch {
+    phantomBalanceMinor = null;
+  }
+};
+
+const phantomConnectWidget = () => {
+  if (!phantomConnected || !phantomAddress) {
+    return `<button type="button" class="duello-bank-button secondary" data-connect-phantom><i data-lucide="wallet"></i><span>Connecter Phantom</span></button>`;
+  }
+  return `<span class="duello-bank-phantom-chip" title="${escapeHtml(phantomAddress)}"><i data-lucide="wallet"></i><span>Phantom · ${escapeHtml(formatSolanaAddress(phantomAddress))}</span><small>${phantomBalanceMinor === null ? "solde inconnu" : escapeHtml(formatUsdcMinor(phantomBalanceMinor))}</small></span><button type="button" class="duello-bank-button secondary" data-connect-phantom><i data-lucide="plug-zap"></i><span>Déconnecter</span></button>`;
+};
+
+const phantomFlowStatus = () => {
+  if (!phantomConnected || !phantomAddress) {
+    return `<button type="button" class="duello-bank-flow-action" data-connect-phantom><span>Connecter mon wallet Phantom</span><i data-lucide="wallet"></i></button>`;
+  }
+  const balance = phantomBalanceMinor === null ? "solde USDC inconnu" : `Solde : ${formatUsdcMinor(phantomBalanceMinor)}`;
+  return `<div class="duello-bank-flow-status"><span><i data-lucide="circle-check"></i></span><div><strong>Wallet connecté</strong><small>${escapeHtml(formatSolanaAddress(phantomAddress))} · ${escapeHtml(balance)}</small></div></div>`;
 };
 
 const walletStripeState = (wallet: DuelloBankWallet) => {
@@ -272,7 +342,58 @@ const renderCreditModal = (wallets: DuelloBankWallet[]) => {
   </div>`;
 };
 
-
+const renderPhantomPayModal = (wallets: DuelloBankWallet[]) => {
+  if (!payModalOpen) return "";
+  const wallet = wallets.find((candidate) => candidate.publicId === payWalletId) ?? null;
+  const walletLabel = wallet ? `${wallet.displayName} · ${formatEuroMinor(wallet.availableMinor)}` : "";
+  const balanceText = phantomBalanceMinor === null ? "inconnu" : formatUsdcMinor(phantomBalanceMinor);
+  const resultLabel = payConfirmation === "confirmed"
+    ? "Transaction confirmée"
+    : payConfirmation === "failed"
+      ? "Transaction échouée"
+      : payConfirmation === "unknown"
+        ? "Confirmation à vérifier"
+        : "Transaction diffusée · confirmation en cours";
+  const submitLabel = payBusy
+    ? payResult ? "Confirmation Solana…" : "Signature dans Phantom…"
+    : payConfirmation === "confirmed"
+      ? "USDC confirmés"
+      : payResult
+        ? "Transaction diffusée"
+        : "Envoyer les USDC";
+  return `<div class="duello-bank-modal-backdrop" data-phantom-pay-backdrop>
+    <section class="duello-bank-modal" role="dialog" aria-modal="true" aria-labelledby="phantomPayTitle" aria-describedby="phantomPayConsequence">
+      <button type="button" class="duello-bank-modal-close" data-close-phantom-pay-modal aria-label="Fermer" ${payBusy ? "disabled" : ""}><i data-lucide="x"></i></button>
+      <span class="duello-bank-eyebrow">Solana · USDC</span>
+      <h2 id="phantomPayTitle">Payer le retrait via Phantom</h2>
+      <p id="phantomPayConsequence">Envoie des USDC depuis votre wallet Phantom vers l’adresse Solana du membre. La transaction est signée dans l’extension Phantom : Switch ne voit jamais votre clé privée.</p>
+      ${!phantomConnected || !phantomAddress ? `<div class="duello-bank-form-error" role="alert"><i data-lucide="wallet"></i><span>${escapeHtml(phantomErrorMessage())}</span></div>` : ""}
+      <form data-phantom-pay-form novalidate>
+        <label>
+          <span>Membre</span>
+          <input type="text" value="${escapeHtml(walletLabel)}" disabled />
+        </label>
+        ${wallet?.solanaAddress ? `<div class="duello-bank-address-box"><span>Adresse Solana du membre</span><code>${escapeHtml(wallet.solanaAddress)}</code></div>` : ""}
+        <div class="duello-bank-current-balance"><span>Votre wallet Phantom (expéditeur)</span><strong>${phantomConnected && phantomAddress ? `${escapeHtml(formatSolanaAddress(phantomAddress))} · ${escapeHtml(balanceText)}` : "Non connecté"}</strong></div>
+        <label>
+          <span>Montant en USDC</span>
+          <span class="duello-bank-amount-field"><input name="amountUsdc" type="text" inputmode="decimal" autocomplete="off" maxlength="12" pattern="[0-9]+([.,][0-9]{1,6})?" placeholder="Ex. 25,00" value="${escapeHtml(payAmountDraft)}" required autofocus ${payBusy ? "disabled" : ""} /><b aria-hidden="true">USDC</b></span>
+          <small>De 0,000001 à 1 000 000 USDC, jusqu’à 6 décimales. Le membre reçoit ce montant net.</small>
+        </label>
+        <label class="duello-bank-confirmation">
+          <input name="confirmPay" type="checkbox" value="yes" ${payConfirmed ? "checked" : ""} ${payBusy ? "disabled" : ""} />
+          <span><strong>Je confirme l’envoi de ${payAmountDraft ? escapeHtml(payAmountDraft.trim()) : "ce montant"} USDC vers l’adresse Solana du membre.</strong><small>Cette transaction est irréversible et ne peut pas être annulée depuis Switch.</small></span>
+        </label>
+        ${payResult ? `<div class="duello-bank-reference" role="status"><span>${resultLabel}</span><a href="${escapeHtml(payResult.transactionUrl)}" target="_blank" rel="noopener noreferrer">Voir sur Solscan →</a><code>${escapeHtml(payResult.signature)}</code></div>` : ""}
+        ${payError ? `<div class="duello-bank-form-error" role="alert"><i data-lucide="circle-alert"></i><span>${escapeHtml(payError)}</span></div>` : ""}
+        <div class="duello-bank-modal-actions">
+          <button type="button" class="duello-bank-button secondary" data-close-phantom-pay-modal ${payBusy ? "disabled" : ""}>Fermer</button>
+          <button type="submit" class="duello-bank-button primary" ${payBusy || payResult ? "disabled" : ""}><span>${submitLabel}</span><i data-lucide="${payBusy ? "loader-circle" : "send"}" class="${payBusy ? "is-spinning" : ""}"></i></button>
+        </div>
+      </form>
+    </section>
+  </div>`;
+};
 
 export function renderDuelloBankPanel(): string {
   if (!hasRemoteAuth()) return renderAdminUnlock();
@@ -298,10 +419,11 @@ export function renderDuelloBankPanel(): string {
         <td data-label="Solde Duello"><strong class="duello-bank-money">${escapeHtml(formatEuroMinor(wallet.availableMinor))}</strong><small>Grand livre Duello</small></td>
         <td data-label="Activité"><strong>${escapeHtml(formatCount(wallet.clickCount))} clics</strong><small>${escapeHtml(formatCount(wallet.creditedClickCount))} déjà crédités</small></td>
         <td data-label="Retrait Stripe"><span class="duello-bank-status is-${stripe.tone}"><i data-lucide="${stripe.tone === "ready" ? "circle-check" : "circle-dot"}"></i><span><strong>${escapeHtml(stripe.label)}</strong><small>${escapeHtml(stripe.detail)}</small></span></span></td>
-        <td data-label="Action"><button type="button" class="duello-bank-row-button" data-open-duello-bank-credit data-wallet-id="${escapeHtml(wallet.publicId)}" ${canCreditWallet ? "" : "disabled"}><i data-lucide="plus"></i><span>Créditer</span></button></td>
+        <td data-label="Solana">${wallet.solanaAddress ? `<span class="duello-bank-solana"><a href="${SOLSCAN_ADDRESS_PREFIX}${escapeHtml(wallet.solanaAddress)}" target="_blank" rel="noopener noreferrer">${escapeHtml(formatSolanaAddress(wallet.solanaAddress))}</a></span>` : `<span class="duello-bank-muted">—</span>`}</td>
+        <td data-label="Action"><span class="duello-bank-row-actions"><button type="button" class="duello-bank-row-button" data-open-duello-bank-credit data-wallet-id="${escapeHtml(wallet.publicId)}" ${canCreditWallet ? "" : "disabled"}><i data-lucide="plus"></i><span>Créditer</span></button><button type="button" class="duello-bank-row-button is-phantom" data-open-phantom-pay data-wallet-id="${escapeHtml(wallet.publicId)}" ${wallet.solanaAddress && phantomConnected ? "" : "disabled"} title="${wallet.solanaAddress ? "" : "Adresse Solana non renseignée sur Duello"}"><i data-lucide="send"></i><span>Payer USDC</span></button></span></td>
       </tr>`;
     }).join("")
-    : `<tr><td colspan="5"><div class="duello-bank-empty"><span><i data-lucide="wallet-cards"></i></span><strong>Aucun portefeuille Duello</strong><small>Les membres disposant d’un portefeuille apparaîtront ici.</small></div></td></tr>`;
+    : `<tr><td colspan="6"><div class="duello-bank-empty"><span><i data-lucide="wallet-cards"></i></span><strong>Aucun portefeuille Duello</strong><small>Les membres disposant d’un portefeuille apparaîtront ici.</small></div></td></tr>`;
 
   return `<section class="duello-bank-dashboard" aria-labelledby="duelloBankTitle">
     <header class="duello-bank-hero">
@@ -311,6 +433,7 @@ export function renderDuelloBankPanel(): string {
         <p>Créditez le grand livre des membres Duello, puis gérez séparément les fonds réels de la plateforme dans Stripe.</p>
       </div>
       <div class="duello-bank-hero-actions">
+        ${phantomConnectWidget()}
         ${externalLink(duelloDashboardUrl, "Ouvrir Duello", "external-link", "duello-bank-button secondary")}
         <button type="button" class="duello-bank-button primary" data-open-duello-bank-credit ${canCredit ? "" : "disabled"}><i data-lucide="plus"></i><span>Ajouter un crédit</span></button>
       </div>
@@ -330,6 +453,11 @@ export function renderDuelloBankPanel(): string {
         <div class="duello-bank-flow-heading"><span><i data-lucide="credit-card"></i></span><div><h2>Fonds réels de la plateforme</h2><p>L’approvisionnement et la vérification du solde Stripe se font dans le Dashboard Stripe. Un crédit Duello ne déplace aucun fonds bancaire.</p></div></div>
         ${externalLink(stripeDashboardUrl, "Gérer le solde Stripe", "external-link", "duello-bank-flow-action")}
       </article>
+      <article class="duello-bank-flow is-phantom">
+        <span class="duello-bank-flow-step">Opération 3 · Solana</span>
+        <div class="duello-bank-flow-heading"><span><i data-lucide="wallet"></i></span><div><h2>Paiement de retrait USDC</h2><p>Envoyez des USDC depuis votre wallet Phantom vers l’adresse Solana du membre (fournie par Duello). La transaction est signée dans l’extension, jamais par Switch.</p></div></div>
+        ${phantomFlowStatus()}
+      </article>
     </div>
 
     <div class="duello-bank-metrics" aria-label="Indicateurs Banque Duello">
@@ -340,12 +468,13 @@ export function renderDuelloBankPanel(): string {
 
     <article class="duello-bank-table-card">
       <header><div><span>Grand livre</span><strong>Soldes des membres Duello</strong></div><button type="button" data-refresh-duello-bank title="Actualiser" aria-label="Actualiser la Banque Duello"><i data-lucide="refresh-cw" class="${loading ? "is-spinning" : ""}"></i></button></header>
-      <div class="duello-bank-table-wrap"><table><thead><tr><th>Membre</th><th>Solde Duello</th><th>Activité</th><th>Retrait Stripe</th><th><span class="duello-bank-sr-only">Action</span></th></tr></thead><tbody>${rows}</tbody></table></div>
+      <div class="duello-bank-table-wrap"><table><thead><tr><th>Membre</th><th>Solde Duello</th><th>Activité</th><th>Retrait Stripe</th><th>Solana</th><th><span class="duello-bank-sr-only">Action</span></th></tr></thead><tbody>${rows}</tbody></table></div>
     </article>
 
     <p class="duello-bank-footnote"><i data-lucide="info"></i><span>Le crédit Duello et l’approvisionnement Stripe sont deux opérations indépendantes. Vérifiez le solde réel Stripe avant tout retrait partenaire.</span></p>
 
     ${renderCreditModal(wallets)}
+    ${renderPhantomPayModal(wallets)}
     ${toast ? `<div class="duello-bank-toast" role="status" aria-live="polite"><i data-lucide="circle-check"></i><span>${escapeHtml(toast)}</span></div>` : ""}
   </section>`;
 }
@@ -401,8 +530,25 @@ export function bindDuelloBankPanel({ rerender, renderIcons }: DuelloBankPanelBi
   root.querySelector<HTMLElement>("[data-duello-bank-modal-backdrop]")?.addEventListener("pointerdown", (event) => {
     if (event.target === event.currentTarget) closeModal();
   });
+
+  const closePayModal = () => {
+    if (payBusy) return;
+    payModalOpen = false;
+    resetPayDraft();
+    rerender();
+  };
+
+  root.querySelectorAll<HTMLButtonElement>("[data-close-phantom-pay-modal]").forEach((button) => {
+    button.addEventListener("click", closePayModal);
+  });
+  root.querySelector<HTMLElement>("[data-phantom-pay-backdrop]")?.addEventListener("pointerdown", (event) => {
+    if (event.target === event.currentTarget) closePayModal();
+  });
+
   root.addEventListener("keydown", (event) => {
-    if (event.key === "Escape" && modalOpen) closeModal();
+    if (event.key !== "Escape") return;
+    if (modalOpen) closeModal();
+    else if (payModalOpen) closePayModal();
   });
 
   root.querySelector<HTMLFormElement>("[data-duello-bank-credit-form]")?.addEventListener("submit", (event) => {
@@ -467,6 +613,102 @@ export function bindDuelloBankPanel({ rerender, renderIcons }: DuelloBankPanelBi
       modalError = readableError(cause);
       rerender();
     });
+  });
+
+  root.querySelectorAll<HTMLButtonElement>("[data-connect-phantom]").forEach((button) => {
+    button.addEventListener("click", () => {
+      if (payBusy) return;
+      if (phantomConnected) {
+        void disconnectPhantom().catch(() => undefined);
+        phantomConnected = false;
+        phantomAddress = "";
+        phantomBalanceMinor = null;
+        if (payModalOpen) payError = "Votre wallet Phantom a été déconnecté.";
+        rerender();
+        return;
+      }
+      void connectPhantom()
+        .then((connection) => {
+          phantomConnected = true;
+          phantomAddress = connection.address;
+          return updatePhantomBalance();
+        })
+        .then(() => rerender())
+        .catch((cause) => {
+          showToast(readableError(cause), rerender);
+          rerender();
+        });
+    });
+  });
+
+  root.querySelectorAll<HTMLButtonElement>("[data-open-phantom-pay]").forEach((button) => {
+    button.addEventListener("click", () => {
+      if (!snapshot) return;
+      resetPayDraft();
+      payWalletId = button.dataset.walletId ?? "";
+      payModalOpen = true;
+      rerender();
+    });
+  });
+
+  root.querySelector<HTMLFormElement>("[data-phantom-pay-form]")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    if (payBusy || payResult || !snapshot) return;
+
+    const form = new FormData(event.currentTarget as HTMLFormElement);
+    payAmountDraft = String(form.get("amountUsdc") ?? "");
+    payConfirmed = form.get("confirmPay") === "yes";
+    payError = "";
+
+    const wallet = snapshot.wallets.find((candidate) => candidate.publicId === payWalletId) ?? null;
+    const amountMinor = parseUsdcAmountToMinor(payAmountDraft);
+    if (!phantomConnected || !phantomAddress) {
+      payError = "Connectez d’abord votre wallet Phantom.";
+    } else if (!wallet?.solanaAddress) {
+      payError = "Ce membre n’a pas d’adresse Solana renseignée sur Duello.";
+    } else if (amountMinor === null) {
+      payError = "Saisissez un montant USDC valide (0,000001 à 1 000 000).";
+    } else if (phantomBalanceMinor !== null && amountMinor > phantomBalanceMinor) {
+      payError = `Solde USDC insuffisant (${formatUsdcMinor(phantomBalanceMinor)} disponibles).`;
+    } else if (!payConfirmed) {
+      payError = "Confirmez explicitement cet envoi USDC.";
+    }
+
+    if (payError || !wallet?.solanaAddress || amountMinor === null) {
+      rerender();
+      return;
+    }
+
+    payBusy = true;
+    rerender();
+    void sendUsdc({
+      fromAddress: phantomAddress,
+      toAddress: wallet.solanaAddress,
+      amountMinor,
+    })
+      .then(async (result) => {
+        payResult = result;
+        payConfirmation = "broadcast";
+        rerender();
+        try {
+          await waitForTransactionConfirmation(result);
+          payConfirmation = "confirmed";
+        } catch (cause) {
+          const message = readableError(cause);
+          payConfirmation = /échoué sur la chaine|echoue sur la chaine/i.test(message)
+            ? "failed"
+            : "unknown";
+          payError = `${message} Vérifiez la signature sur Solscan avant toute nouvelle tentative.`;
+        }
+        await updatePhantomBalance();
+        payBusy = false;
+        rerender();
+      })
+      .catch((cause) => {
+        payBusy = false;
+        payError = readableError(cause);
+        rerender();
+      });
   });
 
   renderIcons(root);

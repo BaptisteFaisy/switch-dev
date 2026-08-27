@@ -773,3 +773,106 @@
   }
 }
 
+/* ---- Paiement Phantom (USDC / Solana) ---- */
+.duello-bank-phantom-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border: 1px solid var(--duello-bank-border);
+  border-radius: 10px;
+  background: var(--duello-bank-surface-muted);
+  font-size: 12px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.duello-bank-phantom-chip svg {
+  width: 14px;
+  height: 14px;
+  color: #53c7f0;
+}
+
+.duello-bank-phantom-chip small {
+  color: var(--muted-2, #777);
+  font-weight: 500;
+}
+
+.duello-bank-flow.is-phantom {
+  border-color: rgba(83, 199, 240, 0.35);
+}
+
+.duello-bank-flow.is-phantom .duello-bank-flow-step {
+  background: rgba(83, 199, 240, 0.12);
+  color: #53c7f0;
+}
+
+.duello-bank-flow-status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--duello-bank-border);
+  border-radius: 10px;
+  background: var(--duello-bank-surface-muted);
+}
+
+.duello-bank-flow-status > span {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: rgba(34, 197, 94, 0.15);
+  color: #22c55e;
+}
+
+.duello-bank-flow-status svg { width: 16px; height: 16px; }
+
+.duello-bank-flow-status div {
+  display: grid;
+  gap: 1px;
+}
+
+.duello-bank-flow-status strong { font-size: 12px; }
+.duello-bank-flow-status small { color: var(--muted-2, #777); font-size: 11px; }
+
+.duello-bank-row-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.duello-bank-row-button.is-phantom { color: #53c7f0; }
+.duello-bank-row-button.is-phantom[disabled] { opacity: 0.45; }
+
+.duello-bank-solana a {
+  color: var(--accent, #7aa2f7);
+  font-variant-numeric: tabular-nums;
+  text-decoration: none;
+  font-size: 12px;
+}
+
+.duello-bank-solana a:hover { text-decoration: underline; }
+.duello-bank-muted { color: var(--muted-2, #777); }
+
+.duello-bank-address-box {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--duello-bank-border);
+  border-radius: 10px;
+  background: var(--duello-bank-surface-muted);
+}
+
+.duello-bank-address-box span {
+  font-size: 11px;
+  font-weight: 650;
+  color: var(--muted-2, #777);
+}
+
+.duello-bank-address-box code {
+  font: 500 12px/1.5 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  word-break: break-all;
+  color: var(--fg, #eee);
+}

@@ -66,3 +66,22 @@ test("the panel separates ledger credit from real Stripe funding", async () => {
   assert.match(view, /reference/);
   assert.doesNotMatch(view, /STRIPE_SECRET_KEY|CST_DUELLO_BANK_ADMIN_TOKEN/);
 });
+
+test("Phantom USDC payments validate the wallet and preserve confirmation state", async () => {
+  const payment = await source("src/phantom-pay.ts");
+  const view = await source("src/duello-bank.ts");
+  const backend = await source("src-tauri/src/duello_bank.rs");
+
+  assert.match(payment, /PublicKey\.isOnCurve/);
+  assert.match(payment, /SystemProgram\.programId/);
+  assert.match(payment, /createAssociatedTokenAccountInstruction/);
+  assert.match(payment, /createTransferCheckedInstruction/);
+  assert.match(payment, /lastValidBlockHeight/);
+  assert.match(payment, /confirmTransaction/);
+  assert.match(backend, /bs58::decode/);
+  assert.match(backend, /decoded\.len\(\) != 32/);
+  assert.match(view, /payConfirmation = "broadcast"/);
+  assert.match(view, /payConfirmation = "confirmed"/);
+  assert.match(view, /Vérifiez la signature sur Solscan avant toute nouvelle tentative/);
+  assert.doesNotMatch(view, /payResult \? "USDC envoyés"/);
+});
