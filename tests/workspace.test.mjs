@@ -212,8 +212,11 @@ test("un home de compte ne peut pas devenir un environnement projet", () => {
   );
 });
 
-test("un VPS ignore les chemins locaux Windows", () => {
-  assert.equal(remoteEnvironmentPath("C:\\Users\\jeanp\\projet"), null);
+test("un environnement distant accepte les chemins absolus Unix et Windows", () => {
+  assert.equal(
+    remoteEnvironmentPath("C:\\Users\\jeanp\\projet"),
+    "C:\\Users\\jeanp\\projet",
+  );
   assert.equal(remoteEnvironmentPath("%USERPROFILE%\\projet"), null);
   assert.equal(remoteEnvironmentPath("/srv/cst/workspaces/projet"), "/srv/cst/workspaces/projet");
 });

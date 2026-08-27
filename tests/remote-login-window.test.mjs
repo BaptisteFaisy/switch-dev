@@ -79,6 +79,11 @@ test("le parseur reconnait la sortie reelle du CLI meme avec des sequences termi
 
   const completed = popupModule.parseRemoteCodexLoginOutput("Successfully logged in");
   assert.equal(completed.success, true);
+
+  const cursorSeparated = popupModule.parseRemoteCodexLoginOutput(
+    "Enter this one-time code: GALF-0YAWS\u001b[14;1HContinue in your browser",
+  );
+  assert.equal(cursorSeparated.userCode, "GALF-0YAWS");
 });
 
 test("le code est copie des qu'il est recu pendant que l'onglet OpenAI est ouvert", () => {
