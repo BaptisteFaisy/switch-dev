@@ -256,6 +256,7 @@ import {
   orchestrationOrchestratorAccountId,
   orchestrationPhaseLabel,
   orchestrationProgress,
+  orchestrationRequestedProjectDir,
   orchestrationStatusLabel,
   orchestrationTaskStatusLabel,
   orchestrationWorkerAccountId,
@@ -266,6 +267,7 @@ import {
   type OrchestrationAccountRole,
   type OrchestrationSnapshot,
   type OrchestrationTask,
+  type OrchestrationTeamMessage,
 } from "./chat/orchestration";
 import {
   activeChatTurnBelongsToPane,
@@ -6451,7 +6453,7 @@ const automaticOrchestrationRoutingSkill = (mode: ChatMode): ChatAgentSkillPromp
 
 Le mode d'orchestration automatique est explicitement actif pour ce tour (mode courant : ${mode}). Avant toute modification ou réponse de fond, évalue si la demande bénéficie réellement d'un orchestrateur et de chats workers isolés.
 
-Choisis l'orchestration seulement pour une réalisation dans un dépôt Git qui est assez complexe pour être décomposée en plusieurs missions cohérentes, lorsque le parallélisme, les revues croisées et une validation d'intégration apportent un gain net. Une demande explicite d'équipe multi-agent est un signal fort.
+Choisis l'orchestration pour toute tâche de réalisation dans un dépôt Git qui peut être découpée en plusieurs missions cohérentes. Cherche le nombre maximal de missions réellement utiles, jusqu'à 5, afin d'exploiter l'équipe sans créer de remplissage. Une demande explicite d'équipe multi-agent est un signal fort.
 
 N'oriente pas vers l'orchestration une question, une explication, une demande de statut, une revue seule, une petite correction locale, une tâche essentiellement séquentielle, une demande ambiguë qui exige d'abord une réponse utilisateur, ni un tour en mode Planifier ou Question. Dans ces cas, traite normalement la demande sans parler de ce routage.
 
@@ -6459,8 +6461,8 @@ Si l'orchestration est justifiée :
 - ne commence pas le travail et ne modifie aucun fichier ;
 - n'utilise pas toi-même de sous-agents : l'application va créer l'équipe ;
 - réponds uniquement par une ligne JSON compacte, sans Markdown ni texte autour, sous cette forme exacte :
-${AUTOMATIC_ORCHESTRATION_MARKER} {"decision":"orchestrate","workerCount":3,"reason":"raison courte"}
-- choisis entre 1 et 12 workers, généralement 2 à 4, selon le nombre réel de missions utiles.
+${AUTOMATIC_ORCHESTRATION_MARKER} {"decision":"orchestrate","workerCount":5,"reason":"raison courte"}
+- choisis entre 1 et 5 workers et prends le maximum de missions indépendantes réellement utiles.
 
 Sinon, accomplis directement la demande comme dans un chat normal et n'émets jamais le marqueur ${AUTOMATIC_ORCHESTRATION_MARKER}`,
 });
@@ -11375,9 +11377,9 @@ const createExpertChatPane = (
     pendingWorkspace:
       discussionFolderPath(discussion) ?? capturedWorkspace ?? currentWorkspace(),
     autonomousAgentId: persisted.autonomousAgentId ?? null,
-    // Le mode orchestrateur est le nouveau defaut global. Les anciennes
-    // preferences `false` sont volontairement migrees ; seuls les chats deja
-    // pilotes par une orchestration et les agents autonomes restent exclus.
+    // Le mode orchestrateur est le nouveau defaut global. Un choix explicite
+    // `false` reste durable ; seuls les chats deja pilotes par une orchestration
+    // et les agents autonomes restent exclus du lancement automatique.
     automaticOrchestrationEnabled: automaticOrchestrationEnabledByDefault({
       surface: "classic-chat",
       orchestrationRole: persisted.orchestrationRole,
@@ -11720,6 +11722,25 @@ const expertChatAutonomousOption = (
       : "Créer un agent autonome à partir de ce chat sans fermer la conversation.",
     tone: "paused",
     disabled: busy,
+  };
+};
+
+const expertChatAutomaticOrchestrationOption = (
+  pane: ExpertChatPane,
+): NonNullable<Parameters<typeof renderChatPanel>[1]>["automaticOrchestration"] => {
+  if (
+    pane.orchestrationRole
+    || autonomousAgentForPane(pane)
+    || (pane.autonomousAgentId && !autonomousAgentsLoaded)
+  ) {
+    return undefined;
+  }
+  return {
+    enabled: pane.automaticOrchestrationEnabled,
+    detail: pane.automaticOrchestrationEnabled
+      ? "Actif par défaut : une tâche est découpée en un maximum de 5 missions utiles, avec ce chat comme orchestrateur."
+      : "Mode direct : ce chat traite seul les prochaines demandes.",
+    disabled: pane.automaticOrchestrationLaunching,
   };
 };
 
@@ -12165,6 +12186,7 @@ const renderExpertChatPane = (pane: ExpertChatPane): string =>
     fullscreen: pane.key === expertChatFullscreenKey,
     autonomous: expertChatAutonomousOption(pane),
     orchestration: expertChatOrchestrationOption(pane),
+    automaticOrchestration: expertChatAutomaticOrchestrationOption(pane),
     accountTransition: expertChatAccountTransitions.get(pane.key),
   });
 
@@ -12548,7 +12570,7 @@ const launchAutomaticOrchestration = async (
     pane.orchestrationId = created.id;
     pane.orchestrationRole = "orchestrator";
     pane.orchestrationTaskId = null;
-    pane.pendingWorkspace = created.projectDir;
+    pane.pendingWorkspace = orchestrationRequestedProjectDir(created);
     pane.draft = "";
     pane.queuedSubmissions = [];
     orchestrationWorkerCount = created.workerCount;
@@ -13402,13 +13424,14 @@ const syncOrchestrationChatPanes = (): {
   boundRunIds.forEach((runId) => {
     const run = runsById.get(runId);
     if (!run) return;
+    const groupProjectDir = orchestrationRequestedProjectDir(run);
     const taskIds = new Set(run.tasks.map((task) => task.id));
 
     expertChatPanes
       .filter((pane) => pane.orchestrationId === run.id)
       .forEach((pane) => {
-        if (pane.pendingWorkspace !== run.projectDir) {
-          pane.pendingWorkspace = run.projectDir;
+        if (pane.pendingWorkspace !== groupProjectDir) {
+          pane.pendingWorkspace = groupProjectDir;
           changed = true;
         }
         if (pane.orchestrationRole === "orchestrator") {
@@ -13449,7 +13472,7 @@ const syncOrchestrationChatPanes = (): {
         pane = createExpertChatPane(null, {
           userOpened: false,
           accountId: orchestrationWorkerAccountId(run, task),
-          pendingWorkspace: run.projectDir,
+          pendingWorkspace: groupProjectDir,
           mode: "build",
           orchestrationId: run.id,
           orchestrationRole: "worker",
@@ -13999,6 +14022,16 @@ const bindExpertChatPaneUi = (pane: ExpertChatPane, root: HTMLElement) => {
     .forEach((button) => {
       button.addEventListener("click", () => openAutonomousChatEditor(pane));
     });
+  root.querySelector<HTMLButtonElement>("[data-chat-action='toggle-automatic-orchestration']")?.addEventListener("click", () => {
+    if (pane.automaticOrchestrationLaunching || pane.orchestrationRole) return;
+    pane.automaticOrchestrationEnabled = !pane.automaticOrchestrationEnabled;
+    persistExpertChats();
+    statusText = pane.automaticOrchestrationEnabled
+      ? "Mode orchestrateur actif : les tâches peuvent être réparties entre 5 sous-chats"
+      : "Mode orchestrateur inactif : ce chat travaillera seul";
+    refreshExpertChatPane(pane);
+    focusExpertChatPrompt(pane);
+  });
   root.querySelector<HTMLButtonElement>("[data-chat-action='orchestrate']")?.addEventListener("click", () => {
     openOrchestrationConversion(pane);
   });
@@ -19862,17 +19895,17 @@ const renderAutonomousAgentCard = (agent: AutonomousAgentSnapshot): string => {
 const normalizeAutonomousLaunchWorkerAccounts = (fallbackAccountId: string): string[] => {
   autonomousLaunchWorkerAccountIds = Array.from(
     { length: autonomousLaunchWorkerCount },
-    (_, index) => autonomousLaunchWorkerAccountIds[index] || fallbackAccountId,
+    () => fallbackAccountId,
   );
   return autonomousLaunchWorkerAccountIds;
 };
 
 const renderAutonomousLaunchWorkerAccounts = (fallbackAccountId: string): string =>
   normalizeAutonomousLaunchWorkerAccounts(fallbackAccountId)
-    .map((workerAccountId, index) => `<label class="orchestration-create-worker">
-      <span><b>W${index + 1}</b><span><strong>Worker ${index + 1}</strong><small>Adresse indépendante</small></span></span>
-      <select data-autonomous-launch-worker="${index}" aria-label="Adresse e-mail ou compte du worker ${index + 1}">${orchestrationAccountOptions(workerAccountId)}</select>
-    </label>`)
+    .map((_workerAccountId, index) => `<div class="orchestration-create-worker">
+      <span><b>W${index + 1}</b><span><strong>Worker ${index + 1}</strong><small>${escapeHtml(orchestrationAccountLabel(fallbackAccountId))}</small></span></span>
+      <span class="orchestration-create-worker-shared"><i data-lucide="link"></i>Même compte</span>
+    </div>`)
     .join("");
 
 const renderAutonomousPanel = (): string => {
@@ -20022,13 +20055,13 @@ const renderAutonomousPanel = (): string => {
               <label><span>Compte</span><select id="autonomousAccount" ${accountOptions ? "" : "disabled"}>${accountOptions || `<option value="">Aucun compte</option>`}</select></label>
               <label><span>Lancement</span><select id="autonomousLaunchMode"><option value="autonomous" ${launchOrchestration ? "" : "selected"}>Agent autonome</option><option value="orchestrator" ${launchOrchestration ? "selected" : ""}>Orchestrateur + workers</option></select></label>
               ${launchOrchestration
-                ? `<label><span>Workers</span><span class="orchestration-worker-count"><input id="autonomousLaunchWorkerCount" type="number" min="1" max="12" step="1" required value="${autonomousLaunchWorkerCount}" /><small>${autonomousLaunchWorkerCount + 1} agents au total</small></span></label>`
+                ? `<label><span>Workers</span><span class="orchestration-worker-count"><input id="autonomousLaunchWorkerCount" type="number" min="1" max="${MAX_ORCHESTRATION_WORKER_COUNT}" step="1" required value="${autonomousLaunchWorkerCount}" /><small>${autonomousLaunchWorkerCount + 1} agents au total</small></span></label>`
                 : `<label><span>Déclenchement</span><select id="autonomousTriggerKind"><option value="schedule" ${eventTriggered ? "" : "selected"}>Planning récurrent</option><option value="workspace_change" ${eventTriggered ? "selected" : ""}>Modification du projet</option></select></label>`}
               ${eventTriggered ? `<label><span>Stabilisation</span><span class="autonomous-timeout-input"><input id="autonomousDebounceSeconds" type="number" min="2" max="600" step="1" value="${autonomousDebounceSeconds}" /><small>secondes</small></span></label>` : ""}
               <label><span>Mode</span><select id="autonomousMode"><option value="build" ${autonomousMode === "build" ? "selected" : ""}>Construire et modifier</option><option value="plan" ${autonomousMode === "plan" ? "selected" : ""}>Analyser et planifier</option></select></label>
             </div>
             ${eventTriggered ? `<section class="autonomous-event-config"><header><span><i data-lucide="bell-ring"></i></span><div><strong>Veille du projet</strong></div></header><label><span>Chemins surveillés <small>un par ligne</small></span><textarea id="autonomousWatchPaths" maxlength="8000" required placeholder="src&#10;public&#10;package.json">${escapeHtml(autonomousWatchPathsDraft)}</textarea></label><label class="autonomous-review-toggle autonomous-publish-toggle"><input id="autonomousAllowGitPublish" type="checkbox" ${autonomousAllowGitPublish ? "checked" : ""} /><span><strong>Autoriser le push GitHub et la publication du site</strong><small>Push sans force uniquement.</small></span><i data-lucide="git-branch"></i></label></section>` : ""}
-            ${launchOrchestration ? `<section class="orchestration-create-team autonomous-launch-team"><header><span><strong>Comptes des workers</strong></span><button id="autonomousLaunchWorkersUseOrchestrator" type="button" class="tool-button"><i data-lucide="copy-check"></i><span>Même compte pour tous</span></button></header><div id="autonomousLaunchWorkerAccounts">${renderAutonomousLaunchWorkerAccounts(accountId)}</div></section>` : ""}
+            ${launchOrchestration ? `<section class="orchestration-create-team autonomous-launch-team"><header><span><strong>Comptes des workers</strong><small>Phase de test : même compte que l’orchestrateur.</small></span></header><div id="autonomousLaunchWorkerAccounts">${renderAutonomousLaunchWorkerAccounts(accountId)}</div></section>` : ""}
 
             <details class="autonomous-advanced">
               <summary><span><i data-lucide="shield-check"></i><span><strong>Services et sécurité</strong></span></span><i data-lucide="chevron-down"></i></summary>
@@ -20931,12 +20964,9 @@ const bindAutonomousPanelUi = () => {
     autonomousInitialMemoryDraft = (event.currentTarget as HTMLTextAreaElement).value;
   });
   document.querySelector<HTMLSelectElement>("#autonomousAccount")?.addEventListener("change", (event) => {
-    const previousAccountId = autonomousAccountId;
     autonomousAccountId = (event.currentTarget as HTMLSelectElement).value || null;
     if (autonomousLaunchMode === "orchestrator" && autonomousAccountId) {
-      autonomousLaunchWorkerAccountIds = autonomousLaunchWorkerAccountIds.map((workerAccountId) =>
-        !workerAccountId || workerAccountId === previousAccountId ? autonomousAccountId! : workerAccountId,
-      );
+      normalizeAutonomousLaunchWorkerAccounts(autonomousAccountId);
     }
     render();
   });
@@ -20959,7 +20989,7 @@ const bindAutonomousPanelUi = () => {
   document.querySelector<HTMLInputElement>("#autonomousLaunchWorkerCount")?.addEventListener("input", (event) => {
     const input = event.currentTarget as HTMLInputElement;
     const value = Number(input.value);
-    if (Number.isInteger(value) && value >= 1 && value <= 12) {
+    if (Number.isInteger(value) && value >= 1 && value <= MAX_ORCHESTRATION_WORKER_COUNT) {
       autonomousLaunchWorkerCount = value;
       normalizeAutonomousLaunchWorkerAccounts(autonomousAccountId ?? "");
       const host = document.querySelector<HTMLElement>("#autonomousLaunchWorkerAccounts");
@@ -20969,27 +20999,6 @@ const bindAutonomousPanelUi = () => {
       }
     }
     input.setCustomValidity("");
-  });
-  document.querySelector<HTMLFormElement>("#autonomousCreateForm")?.addEventListener("change", (event) => {
-    const select = event.target instanceof HTMLSelectElement
-      ? event.target.closest<HTMLSelectElement>("[data-autonomous-launch-worker]")
-      : null;
-    if (!select) return;
-    const index = Number(select.dataset.autonomousLaunchWorker);
-    if (Number.isInteger(index) && index >= 0 && index < autonomousLaunchWorkerCount) {
-      autonomousLaunchWorkerAccountIds[index] = select.value;
-    }
-  });
-  document.querySelector<HTMLButtonElement>("#autonomousLaunchWorkersUseOrchestrator")?.addEventListener("click", () => {
-    autonomousLaunchWorkerAccountIds = Array.from(
-      { length: autonomousLaunchWorkerCount },
-      () => autonomousAccountId ?? "",
-    );
-    const host = document.querySelector<HTMLElement>("#autonomousLaunchWorkerAccounts");
-    if (host) {
-      host.innerHTML = renderAutonomousLaunchWorkerAccounts(autonomousAccountId ?? "");
-      renderIcons(host);
-    }
   });
   document.querySelector<HTMLSelectElement>("#autonomousInterval")?.addEventListener("change", (event) => {
     autonomousIntervalSeconds = Number((event.currentTarget as HTMLSelectElement).value) || 15 * 60;
@@ -21522,10 +21531,7 @@ const normalizeOrchestrationWorkerDrafts = (
   workerCount: number,
   fallbackAccountId: string,
 ): string[] => {
-  orchestrationWorkerAccountIds = Array.from({ length: workerCount }, (_, index) => {
-    const current = orchestrationWorkerAccountIds[index];
-    return accountById(current)?.id ?? fallbackAccountId;
-  });
+  orchestrationWorkerAccountIds = Array.from({ length: workerCount }, () => fallbackAccountId);
   return orchestrationWorkerAccountIds;
 };
 
@@ -21609,6 +21615,45 @@ const renderOrchestrationTeam = (run: OrchestrationSnapshot): string => {
   </section>`;
 };
 
+const orchestrationTeamMessageAuthor = (
+  run: OrchestrationSnapshot,
+  message: OrchestrationTeamMessage,
+): string => {
+  if (message.fromRole === "orchestrator") return "Orchestrateur";
+  const task = message.fromTaskId
+    ? run.tasks.find((candidate) => candidate.id === message.fromTaskId)
+    : null;
+  return task ? `Worker ${task.position}` : "Worker";
+};
+
+const orchestrationTeamMessageTarget = (
+  run: OrchestrationSnapshot,
+  message: OrchestrationTeamMessage,
+): string => {
+  if (!message.toTaskIds.length) return "Groupe";
+  return message.toTaskIds
+    .map((taskId) => run.tasks.find((task) => task.id === taskId))
+    .filter((task): task is OrchestrationTask => !!task)
+    .map((task) => `W${task.position}`)
+    .join(", ") || "Groupe";
+};
+
+const renderOrchestrationTeamFeed = (run: OrchestrationSnapshot): string => {
+  const messages = (run.teamMessages ?? []).slice(-12);
+  return `<section class="orchestration-team-feed" aria-label="Conversation du groupe d’agents">
+    <header>
+      <span><i data-lucide="messages-square"></i><span><strong>Conversation du groupe</strong><small>Messages persistés et injectés dans les prochains tours</small></span></span>
+      <b>${run.teamMessages?.length ?? 0}</b>
+    </header>
+    <div class="orchestration-team-feed-list">
+      ${messages.length ? messages.map((message) => `<article class="from-${message.fromRole}">
+        <span class="orchestration-team-feed-avatar"><i data-lucide="${message.fromRole === "orchestrator" ? "brain-circuit" : "bot"}"></i></span>
+        <div><small><b>${escapeHtml(orchestrationTeamMessageAuthor(run, message))}</b><i data-lucide="arrow-right"></i>${escapeHtml(orchestrationTeamMessageTarget(run, message))}<time>${escapeHtml(formatAutonomousTimestamp(message.timestamp))}</time></small><p>${escapeHtml(message.body)}</p></div>
+      </article>`).join("") : `<div class="orchestration-team-feed-empty"><i data-lucide="radio"></i><span><strong>Le canal est prêt</strong><small>Les workers y partageront contrats, dépendances, risques et résultats.</small></span></div>`}
+    </div>
+  </section>`;
+};
+
 const renderOrchestrationTask = (
   run: OrchestrationSnapshot,
   task: OrchestrationTask,
@@ -21663,6 +21708,7 @@ const renderOrchestrationCard = (run: OrchestrationSnapshot): string => {
     ? `<span class="orchestration-delete-confirm"><small>Supprimer les sandboxes ?</small><button type="button" class="tool-button danger" data-orchestration-delete-confirm="${escapeAttr(run.id)}" ${busy ? "disabled" : ""}>Supprimer</button><button type="button" class="tool-button" data-orchestration-delete-cancel>Annuler</button></span>`
     : `<button type="button" class="icon-button danger" data-orchestration-delete="${escapeAttr(run.id)}" title="Supprimer ce chat orchestré" ${busy ? "disabled" : ""}><i data-lucide="trash-2"></i></button>`;
   const workerCount = Math.max(1, run.workerCount || run.tasks.length || 1);
+  const requestedProjectDir = orchestrationRequestedProjectDir(run);
   return `<article class="orchestration-card orchestration-command-center status-${escapeAttr(run.status)} ${running ? "is-running" : ""}">
     <header class="orchestration-card-head">
       <div><span class="orchestration-status"><i></i>${escapeHtml(orchestrationStatusLabel(run.status))}<b>·</b>${escapeHtml(orchestrationPhaseLabel(run.phase))}</span><h3>${escapeHtml(run.name)}</h3></div>
@@ -21671,10 +21717,11 @@ const renderOrchestrationCard = (run: OrchestrationSnapshot): string => {
     <p class="orchestration-objective">${escapeHtml(run.objective)}</p>
     <div class="orchestration-progress" aria-label="${progress.accepted} tâches acceptées sur ${progress.total}"><span><i style="width:${progress.percent}%"></i></span><small><b>${progress.accepted}/${progress.total || "–"}</b> tâches intégrées · ${progress.percent}%</small></div>
     <div class="orchestration-quick-meta">
-      <span title="${escapeAttr(run.projectDir)}"><i data-lucide="folder-open"></i>${escapeHtml(workspaceBaseName(run.projectDir))}</span>
+      <span title="${escapeAttr(requestedProjectDir)}"><i data-lucide="folder-open"></i>${escapeHtml(workspaceBaseName(requestedProjectDir))}</span>
       <span><i data-lucide="users"></i>${workerCount + 1} agents</span>
     </div>
     ${run.lastError ? `<p class="orchestration-error"><i data-lucide="circle-alert"></i><span>${escapeHtml(run.lastError)}</span></p>` : ""}
+    ${renderOrchestrationTeamFeed(run)}
     <section class="orchestration-missions"><header><span><strong>Missions</strong><small>Ouvre une mission pour voir ses preuves et ses revues.</small></span><b>${progress.accepted}/${progress.total || "–"}</b></header><div class="orchestration-task-list">${run.tasks.map((task) => renderOrchestrationTask(run, task)).join("") || `<div class="orchestration-planning"><i data-lucide="list-checks"></i><span><strong>L’orchestrateur prépare les missions</strong><small>Elles apparaîtront ici automatiquement.</small></span></div>`}</div></section>
     ${run.finalSummary ? `<section class="orchestration-final"><i data-lucide="shield-check"></i><div><small>Rendu final</small><p>${escapeHtml(run.finalSummary)}</p></div></section>` : ""}
     <details class="orchestration-run-details" ${deletePending ? "open" : ""}>
@@ -21684,7 +21731,7 @@ const renderOrchestrationCard = (run: OrchestrationSnapshot): string => {
         ${run.planSummary ? `<section class="orchestration-plan-summary"><small>Plan de l’orchestrateur</small><p>${escapeHtml(run.planSummary)}</p></section>` : ""}
         <dl class="orchestration-meta">
           <div><dt>Orchestrateur</dt><dd>${escapeHtml(orchestrationAccountLabel(orchestrationOrchestratorAccountId(run)))}</dd></div>
-          <div><dt>Projet</dt><dd title="${escapeAttr(run.projectDir)}">${escapeHtml(workspaceBaseName(run.projectDir))}</dd></div>
+          <div><dt>Projet</dt><dd title="${escapeAttr(requestedProjectDir)}">${escapeHtml(workspaceBaseName(requestedProjectDir))}</dd></div>
           <div><dt>Validation</dt><dd><code>${escapeHtml(run.testCommand)}</code></dd></div>
           <div><dt>Isolation</dt><dd>${workerCount + 1} environnements</dd></div>
         </dl>
@@ -21699,10 +21746,10 @@ const renderOrchestrationPanel = (): string => {
   const accountId = accountById(orchestrationAccountId)?.id ?? settings?.defaultAccountId ?? settings?.accounts[0]?.id ?? "";
   const accountOptions = orchestrationAccountOptions(accountId);
   const workerAccountIds = normalizeOrchestrationWorkerDrafts(orchestrationWorkerCount, accountId);
-  const workerDrafts = workerAccountIds.map((workerAccountId, index) => `<label class="orchestration-create-worker">
-    <span><b>W${index + 1}</b><span><strong>Worker ${index + 1}</strong><small>Adresse modifiable après création</small></span></span>
-    <select data-orchestration-worker-draft="${index}" aria-label="Adresse e-mail ou compte du worker ${index + 1}" ${accountOptions ? "" : "disabled"}>${orchestrationAccountOptions(workerAccountId)}</select>
-  </label>`).join("");
+  const workerDrafts = workerAccountIds.map((_workerAccountId, index) => `<div class="orchestration-create-worker">
+    <span><b>W${index + 1}</b><span><strong>Worker ${index + 1}</strong><small>${escapeHtml(orchestrationAccountLabel(accountId))}</small></span></span>
+    <span class="orchestration-create-worker-shared"><i data-lucide="link"></i>Même compte</span>
+  </div>`).join("");
   const createOpen = orchestrationCreateOpen
     || (!orchestrationCreatePreferenceSet && orchestrationsLoaded && orchestrations.length === 0);
   const selectedRun = orchestrations.find((run) => run.id === orchestrationSelectedRunId)
@@ -21739,7 +21786,7 @@ const renderOrchestrationPanel = (): string => {
               <label><span>Délai de validation</span><span class="orchestration-timeout"><input id="orchestrationTestTimeout" type="number" min="5" max="1800" value="${orchestrationTestTimeoutSeconds}" /><small>secondes</small></span></label>
             </div>
             <section class="orchestration-create-team">
-              <header><span><strong>Comptes des workers</strong></span><button id="orchestrationWorkersUseOrchestrator" type="button" class="tool-button"><i data-lucide="copy-check"></i><span>Même compte pour tous</span></button></header>
+              <header><span><strong>Comptes des workers</strong><small>Phase de test : tous les sous-agents partagent le compte de l’orchestrateur.</small></span></header>
               <div>${workerDrafts}</div>
             </section>
             <aside><i data-lucide="shield-check"></i><span><strong>Le projet source reste protégé</strong><small>Le rendu est appliqué seulement si le dépôt n’a pas changé pendant le travail.</small></span></aside>
@@ -21805,20 +21852,7 @@ const bindOrchestrationPanelUi = () => {
   });
   document.querySelector<HTMLSelectElement>("#orchestrationAccount")?.addEventListener("change", (event) => {
     orchestrationAccountId = (event.currentTarget as HTMLSelectElement).value || null;
-  });
-  document.querySelectorAll<HTMLSelectElement>("[data-orchestration-worker-draft]").forEach((select) => {
-    select.addEventListener("change", () => {
-      const index = Number(select.dataset.orchestrationWorkerDraft);
-      if (Number.isInteger(index) && index >= 0) {
-        orchestrationWorkerAccountIds[index] = select.value;
-      }
-    });
-  });
-  document.querySelector<HTMLButtonElement>("#orchestrationWorkersUseOrchestrator")?.addEventListener("click", () => {
-    const selected = document.querySelector<HTMLSelectElement>("#orchestrationAccount")?.value
-      || orchestrationAccountId
-      || "";
-    orchestrationWorkerAccountIds = Array.from({ length: orchestrationWorkerCount }, () => selected);
+    normalizeOrchestrationWorkerDrafts(orchestrationWorkerCount, orchestrationAccountId ?? "");
     render();
   });
   document.querySelector<HTMLInputElement>("#orchestrationTestTimeout")?.addEventListener("input", (event) => {
@@ -21863,8 +21897,8 @@ const bindOrchestrationPanelUi = () => {
       return;
     }
     const workerCount = Number(workerCountInput?.value);
-    if (!Number.isInteger(workerCount) || workerCount < 1 || workerCount > 12) {
-      workerCountInput?.setCustomValidity("Choisis entre 1 et 12 workers, sans compter l’orchestrateur.");
+    if (!Number.isInteger(workerCount) || workerCount < 1 || workerCount > MAX_ORCHESTRATION_WORKER_COUNT) {
+      workerCountInput?.setCustomValidity(`Choisis entre 1 et ${MAX_ORCHESTRATION_WORKER_COUNT} workers, sans compter l’orchestrateur.`);
       workerCountInput?.reportValidity();
       return;
     }
@@ -26281,8 +26315,9 @@ const closeAutonomousOrchestrationPromotion = (): void => {
 const normalizeAutonomousPromotionWorkerAccounts = (
   state: AutonomousOrchestrationPromotionState,
 ): string[] => {
-  state.workerAccountIds = Array.from({ length: state.workerCount }, (_, index) =>
-    state.workerAccountIds[index] || state.orchestratorAccountId,
+  state.workerAccountIds = Array.from(
+    { length: state.workerCount },
+    () => state.orchestratorAccountId,
   );
   return state.workerAccountIds;
 };
@@ -26290,10 +26325,10 @@ const normalizeAutonomousPromotionWorkerAccounts = (
 const renderAutonomousPromotionWorkerAccounts = (
   state: AutonomousOrchestrationPromotionState,
 ): string => normalizeAutonomousPromotionWorkerAccounts(state)
-  .map((accountId, index) => `<label class="orchestration-create-worker">
-    <span><b>W${index + 1}</b><span><strong>Worker ${index + 1}</strong><small>Adresse indépendante</small></span></span>
-    <select data-autonomous-orchestration-worker="${index}" aria-label="Adresse e-mail ou compte du worker ${index + 1}" ${state.busy ? "disabled" : ""}>${orchestrationAccountOptions(accountId)}</select>
-  </label>`)
+  .map((_accountId, index) => `<div class="orchestration-create-worker">
+    <span><b>W${index + 1}</b><span><strong>Worker ${index + 1}</strong><small>${escapeHtml(orchestrationAccountLabel(state.orchestratorAccountId))}</small></span></span>
+    <span class="orchestration-create-worker-shared"><i data-lucide="link"></i>Même compte</span>
+  </div>`)
   .join("");
 
 const renderAutonomousOrchestrationPromotionModal = (): string => {
@@ -26333,11 +26368,11 @@ const renderAutonomousOrchestrationPromotionModal = (): string => {
               <div class="orchestration-convert-grid">
                 <label><span>Dépôt Git</span><input id="autonomousOrchestrationProject" required value="${escapeAttr(state.projectDir)}" spellcheck="false" ${state.busy ? "disabled" : ""} /></label>
                 <label><span>Commande de validation</span><input id="autonomousOrchestrationTestCommand" required maxlength="8000" value="${escapeAttr(state.testCommand)}" placeholder="npm test && npm run build" spellcheck="false" ${state.busy ? "disabled" : ""} /></label>
-                <label><span>Workers <small>hors orchestrateur</small></span><span class="orchestration-worker-count"><input id="autonomousOrchestrationWorkerCount" type="number" min="1" max="12" step="1" required value="${state.workerCount}" ${state.busy ? "disabled" : ""} /><small id="autonomousOrchestrationTeamTotal">${state.workerCount + 1} agents au total</small></span></label>
+                <label><span>Workers <small>hors orchestrateur</small></span><span class="orchestration-worker-count"><input id="autonomousOrchestrationWorkerCount" type="number" min="1" max="${MAX_ORCHESTRATION_WORKER_COUNT}" step="1" required value="${state.workerCount}" ${state.busy ? "disabled" : ""} /><small id="autonomousOrchestrationTeamTotal">${state.workerCount + 1} agents au total</small></span></label>
                 <label><span>Timeout des tests</span><span class="orchestration-timeout"><input id="autonomousOrchestrationTimeout" type="number" min="5" max="1800" required value="${state.testTimeoutSeconds}" ${state.busy ? "disabled" : ""} /><small>secondes</small></span></label>
               </div>
               <section class="orchestration-create-team autonomous-orchestration-team">
-                <header><span><small>Affectations initiales</small><strong>Choisir l'adresse de chaque worker</strong></span><button id="autonomousOrchestrationWorkersUseOrchestrator" type="button" class="tool-button" ${state.busy ? "disabled" : ""}><i data-lucide="copy-check"></i><span>Même compte pour tous</span></button></header>
+                <header><span><small>Affectations initiales</small><strong>Même compte que l’orchestrateur pendant le test</strong></span></header>
                 <div id="autonomousOrchestrationWorkerAccounts">${renderAutonomousPromotionWorkerAccounts(state)}</div>
               </section>
               <aside class="orchestration-convert-note"><i data-lucide="shield-check"></i><span><strong>Bascule sans double exécution</strong><small>Le cycle autonome courant est arrêté avant la création. L'agent autonome n'est retiré qu'une fois l'équipe prête ; en cas d'échec, il retrouve son état précédent.</small></span></aside>
@@ -26386,11 +26421,8 @@ const bindAutonomousOrchestrationPromotionUi = (): void => {
     testCommand.setCustomValidity("");
   });
   orchestratorAccount?.addEventListener("change", () => {
-    const previous = state.orchestratorAccountId;
     state.orchestratorAccountId = orchestratorAccount.value;
-    state.workerAccountIds = state.workerAccountIds.map((accountId) =>
-      accountId === previous ? state.orchestratorAccountId : accountId,
-    );
+    normalizeAutonomousPromotionWorkerAccounts(state);
     if (workerAccounts) {
       workerAccounts.innerHTML = renderAutonomousPromotionWorkerAccounts(state);
       renderIcons(workerAccounts);
@@ -26409,7 +26441,7 @@ const bindAutonomousOrchestrationPromotionUi = (): void => {
   });
   workerCountInput?.addEventListener("input", () => {
     const value = Number(workerCountInput.value);
-    if (Number.isInteger(value) && value >= 1 && value <= 12) {
+    if (Number.isInteger(value) && value >= 1 && value <= MAX_ORCHESTRATION_WORKER_COUNT) {
       state.workerCount = value;
       if (workerAccounts) {
         workerAccounts.innerHTML = renderAutonomousPromotionWorkerAccounts(state);
@@ -26418,7 +26450,7 @@ const bindAutonomousOrchestrationPromotionUi = (): void => {
     }
     workerCountInput.setCustomValidity("");
     const total = document.querySelector<HTMLElement>("#autonomousOrchestrationTeamTotal");
-    if (total && Number.isInteger(value) && value >= 1 && value <= 12) {
+    if (total && Number.isInteger(value) && value >= 1 && value <= MAX_ORCHESTRATION_WORKER_COUNT) {
       total.textContent = `${value + 1} agents au total`;
     }
   });
@@ -26427,27 +26459,6 @@ const bindAutonomousOrchestrationPromotionUi = (): void => {
     if (Number.isFinite(value)) state.testTimeoutSeconds = value;
     timeoutInput.setCustomValidity("");
   });
-  form?.addEventListener("change", (event) => {
-    const select = event.target instanceof HTMLSelectElement
-      ? event.target.closest<HTMLSelectElement>("[data-autonomous-orchestration-worker]")
-      : null;
-    if (!select) return;
-    const index = Number(select.dataset.autonomousOrchestrationWorker);
-    if (Number.isInteger(index) && index >= 0 && index < state.workerCount) {
-      state.workerAccountIds[index] = select.value;
-    }
-  });
-  document.querySelector<HTMLButtonElement>("#autonomousOrchestrationWorkersUseOrchestrator")?.addEventListener("click", () => {
-    state.workerAccountIds = Array.from(
-      { length: state.workerCount },
-      () => state.orchestratorAccountId,
-    );
-    if (workerAccounts) {
-      workerAccounts.innerHTML = renderAutonomousPromotionWorkerAccounts(state);
-      renderIcons(workerAccounts);
-    }
-  });
-
   document.querySelector<HTMLButtonElement>("#closeAutonomousOrchestration")?.addEventListener("click", closeAutonomousOrchestrationPromotion);
   document.querySelector<HTMLButtonElement>("#cancelAutonomousOrchestration")?.addEventListener("click", closeAutonomousOrchestrationPromotion);
   document.querySelector<HTMLDivElement>("#autonomousOrchestrationBackdrop")?.addEventListener("click", (event) => {
@@ -26481,8 +26492,8 @@ const bindAutonomousOrchestrationPromotionUi = (): void => {
       testCommand?.reportValidity();
       return;
     }
-    if (!Number.isInteger(workerCount) || workerCount < 1 || workerCount > 12) {
-      workerCountInput?.setCustomValidity("Choisis entre 1 et 12 workers.");
+    if (!Number.isInteger(workerCount) || workerCount < 1 || workerCount > MAX_ORCHESTRATION_WORKER_COUNT) {
+      workerCountInput?.setCustomValidity(`Choisis entre 1 et ${MAX_ORCHESTRATION_WORKER_COUNT} workers.`);
       workerCountInput?.reportValidity();
       return;
     }
@@ -27088,7 +27099,7 @@ const openOrchestrationConversion = (pane: ExpertChatPane): void => {
       ?? account.projectDir
       ?? "",
     testCommand: orchestrationTestCommandDraft,
-    workerCount: Math.max(1, Math.min(12, orchestrationWorkerCount)),
+    workerCount: Math.max(1, Math.min(MAX_ORCHESTRATION_WORKER_COUNT, orchestrationWorkerCount)),
     testTimeoutSeconds: Math.max(5, Math.min(1800, orchestrationTestTimeoutSeconds)),
     busy: false,
   };
@@ -27191,7 +27202,7 @@ const bindOrchestrationConversionUi = (): void => {
     if (Number.isInteger(value)) state.workerCount = value;
     workerCountInput.setCustomValidity("");
     const total = document.querySelector<HTMLElement>("#orchestrationConvertTeamTotal");
-    if (total && Number.isInteger(value) && value >= 1 && value <= 12) {
+    if (total && Number.isInteger(value) && value >= 1 && value <= MAX_ORCHESTRATION_WORKER_COUNT) {
       total.textContent = `${value + 1} agents au total`;
     }
   });
@@ -27240,8 +27251,8 @@ const bindOrchestrationConversionUi = (): void => {
       testCommand?.reportValidity();
       return;
     }
-    if (!Number.isInteger(workerCount) || workerCount < 1 || workerCount > 12) {
-      workerCountInput?.setCustomValidity("Choisis entre 1 et 12 workers.");
+    if (!Number.isInteger(workerCount) || workerCount < 1 || workerCount > MAX_ORCHESTRATION_WORKER_COUNT) {
+      workerCountInput?.setCustomValidity(`Choisis entre 1 et ${MAX_ORCHESTRATION_WORKER_COUNT} workers.`);
       workerCountInput?.reportValidity();
       return;
     }
@@ -27296,7 +27307,7 @@ const bindOrchestrationConversionUi = (): void => {
       pane.orchestrationId = created.id;
       pane.orchestrationRole = "orchestrator";
       pane.orchestrationTaskId = null;
-      pane.pendingWorkspace = created.projectDir;
+      pane.pendingWorkspace = orchestrationRequestedProjectDir(created);
       pane.draft = "";
       pane.queuedSubmissions = [];
       orchestrationWorkerCount = created.workerCount;

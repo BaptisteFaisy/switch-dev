@@ -447,7 +447,8 @@ test("la nouvelle vue cree et pilote un agent autonome", () => {
   assert.match(main, /id="autonomousLaunchMode"/);
   assert.match(main, /value="orchestrator"/);
   assert.match(main, /id="autonomousLaunchWorkerCount"/);
-  assert.match(main, /data-autonomous-launch-worker=/);
+  assert.doesNotMatch(main, /data-autonomous-launch-worker=/);
+  assert.match(main, /Phase de test : même compte que l’orchestrateur/);
   assert.match(main, /deferFirstRun: launchOrchestration/);
   assert.match(main, /Agent lancé directement en mode orchestrateur/);
   assert.match(main, /id="autonomousEnvironmentPreset"/);
@@ -536,8 +537,9 @@ test("la nouvelle vue cree et pilote un agent autonome", () => {
   assert.match(main, /data-autonomous-orchestrate=/);
   assert.match(main, /id="autonomousOrchestrationForm"/);
   assert.match(main, /id="autonomousOrchestrationAccount"/);
-  assert.match(main, /data-autonomous-orchestration-worker=/);
-  assert.match(main, /id="autonomousOrchestrationWorkersUseOrchestrator"/);
+  assert.doesNotMatch(main, /data-autonomous-orchestration-worker=/);
+  assert.match(main, /Même compte que l’orchestrateur pendant le test/);
+  assert.doesNotMatch(main, /id="autonomousOrchestrationWorkersUseOrchestrator"/);
   assert.match(main, /promote_autonomous_agent_to_orchestration/);
   assert.match(main, /Bascule sans double exécution/);
   assert.match(main, /Connecteurs non transférés/);

@@ -62,17 +62,11 @@ test("la décision d'orchestration automatique exige un marqueur structuré vali
     "Orchestration automatique retenue · 3 workers · trois lots indépendants",
   );
   assert.equal(parseAutomaticOrchestrationDecision("Réponse normale"), null);
-  assert.deepEqual(
-    parseAutomaticOrchestrationDecision(
-      `${AUTOMATIC_ORCHESTRATION_MARKER} {"decision":"orchestrate","workerCount":13}`,
-    ),
-    { workerCount: 20, reason: "" },
-  );
   assert.deepEqual(parseAutomaticOrchestrationDecision(
-    `${AUTOMATIC_ORCHESTRATION_MARKER} {"decision":"orchestrate","workerCount":101}`,
-  ), { workerCount: 200, reason: "" });
+    `${AUTOMATIC_ORCHESTRATION_MARKER} {"decision":"orchestrate","workerCount":5}`,
+  ), { workerCount: 5, reason: "" });
   assert.equal(parseAutomaticOrchestrationDecision(
-    `${AUTOMATIC_ORCHESTRATION_MARKER} {"decision":"orchestrate","workerCount":201}`,
+    `${AUTOMATIC_ORCHESTRATION_MARKER} {"decision":"orchestrate","workerCount":6}`,
   ), null);
   assert.equal(
     parseAutomaticOrchestrationDecision(
@@ -82,20 +76,18 @@ test("la décision d'orchestration automatique exige un marqueur structuré vali
   );
 });
 
-test("le nombre de workers UI valide la variable Vite et retombe sur trois", () => {
-  assert.equal(orchestrationWorkerCountFromEnv("8"), 20);
-  assert.equal(orchestrationWorkerCountFromEnv(" 12 "), 20);
-  assert.equal(orchestrationWorkerCountFromEnv("21"), 100);
-  assert.equal(orchestrationWorkerCountFromEnv("101"), 200);
-  assert.equal(orchestrationWorkerCountFromEnv("200"), 200);
-  for (const invalid of [undefined, null, "", "0", "201", "2.5", "workers", 8]) {
-    assert.equal(orchestrationWorkerCountFromEnv(invalid), 3);
+test("le nombre de workers UI est borné à cinq et retombe sur cinq", () => {
+  assert.equal(orchestrationWorkerCountFromEnv("1"), 1);
+  assert.equal(orchestrationWorkerCountFromEnv(" 4 "), 4);
+  assert.equal(orchestrationWorkerCountFromEnv("5"), 5);
+  for (const invalid of [undefined, null, "", "0", "6", "2.5", "workers", 5]) {
+    assert.equal(orchestrationWorkerCountFromEnv(invalid), 5);
   }
   assert.deepEqual(
-    [1, 2, 3, 4, 5, 20, 21, 100, 101, 200].map(normalizeOrchestrationWorkerCount),
-    [1, 2, 3, 4, 20, 20, 100, 100, 200, 200],
+    [1, 2, 3, 4, 5, 6, 20].map(normalizeOrchestrationWorkerCount),
+    [1, 2, 3, 4, 5, null, null],
   );
-  assert.equal(MAX_ORCHESTRATION_WORKER_COUNT, 200);
+  assert.equal(MAX_ORCHESTRATION_WORKER_COUNT, 5);
   assert.match(main, /VITE_CST_ORCHESTRATION_WORKERS/);
   assert.match(main, /autonomousLaunchWorkerCount = defaultOrchestrationWorkerCount/);
   assert.match(main, /orchestrationWorkerCount = defaultOrchestrationWorkerCount/);
@@ -119,7 +111,7 @@ test("l'orchestration par défaut reste réservée aux points d'entrée racine",
   assert.equal(automaticOrchestrationEnabledByDefault({
     surface: "classic-chat",
     persistedEnabled: false,
-  }), true, "l'ancienne préférence est migrée vers le nouveau défaut");
+  }), false, "le bouton désactivé reste désactivé après rechargement");
   assert.equal(automaticOrchestrationEnabledByDefault({
     surface: "classic-chat",
     orchestrationRole: "orchestrator",
@@ -173,8 +165,6 @@ test("la vue dédiée crée et expose chaque chat de l'équipe", () => {
   assert.match(main, /id="orchestrationWorkerCount"[^>]*min="1"[^>]*max="\$\{MAX_ORCHESTRATION_WORKER_COUNT\}"/);
   assert.match(main, /id="orchestrationConvertWorkerCount"[^>]*min="1"[^>]*max="\$\{MAX_ORCHESTRATION_WORKER_COUNT\}"/);
   assert.match(main, /orchestratorSessionId: sessionId,[\s\S]*?workerCount|workerCount,[\s\S]*?orchestratorSessionId: sessionId/);
-  // Le bouton « Orchestration auto » a été retiré : le défaut est désormais
-  // calculé au même endroit que les exclusions anti-récursion testées ci-dessus.
   assert.match(
     main,
     /automaticOrchestrationEnabled:\s*automaticOrchestrationEnabledByDefault\(/,
@@ -195,6 +185,8 @@ test("la vue dédiée crée et expose chaque chat de l'équipe", () => {
   assert.match(main, /data-orchestration-open-session/);
   assert.match(main, /Preuve du travailleur/);
   assert.match(main, /Dernière revue orchestrateur/);
+  assert.match(main, /Conversation du groupe/);
+  assert.match(main, /orchestrationRequestedProjectDir\(run\)/);
   assert.match(style, /\.orchestration-panel/);
   assert.match(style, /\.orchestration-task-list/);
   assert.match(style, /\.orchestration-workbench/);
@@ -205,12 +197,10 @@ test("la vue dédiée crée et expose chaque chat de l'équipe", () => {
   assert.match(style, /@media \(max-width: 860px\)[\s\S]*\.m-sheet-grid button\.m-orchestration-entry/);
 });
 
-test("un chat normal route automatiquement ses demandes sans ancien bouton dans le bandeau", () => {
-  // Le bouton « Orchestration auto » du composer a ete retire de l'UI ; la
-  // machinerie d'orchestration (manuelle et systeme) reste en place.
-  assert.doesNotMatch(chatView, /toggle-automatic-orchestration/);
-  assert.doesNotMatch(chatView, /Orchestration auto ·/);
-  assert.doesNotMatch(main, /toggle-automatic-orchestration/);
+test("un chat normal expose un bouton orchestrateur actif par défaut", () => {
+  assert.match(chatView, /toggle-automatic-orchestration/);
+  assert.match(chatView, /Orchestrateur ·/);
+  assert.match(main, /toggle-automatic-orchestration/);
   assert.match(chatView, /data-chat-action="open-orchestration"/);
   assert.doesNotMatch(chatView, /data-chat-action="[^"\n]*orchestrate/);
   assert.doesNotMatch(chatView, /role: "available" \| "orchestrator" \| "worker"/);
@@ -226,8 +216,9 @@ test("un chat normal route automatiquement ses demandes sans ancien bouton dans 
   assert.match(main, /text: automaticOrchestrationNotice\(automaticDecision\)/);
   assert.match(main, /else if \(automaticOrchestrationPending\) \{[\s\S]*?else if \(!chatTurnIsBusy\(snapshot\.status\)\)/);
   assert.match(main, /id="autonomousOrchestrationAccount"/);
-  assert.match(main, /data-autonomous-orchestration-worker=/);
+  assert.doesNotMatch(main, /data-autonomous-orchestration-worker=/);
   assert.match(main, /workerAccountIds: state\.workerAccountIds\.slice/);
+  assert.match(main, /Array\.from\(\{ length: decision\.workerCount \}, \(\) => account\.id\)/);
   assert.match(main, /orchestratorSessionId: sessionId/);
   assert.match(main, /pane\.orchestrationRole = "orchestrator"/);
   assert.match(main, /run\.tasks\.forEach\(\(task\) =>/);
@@ -265,9 +256,11 @@ test("le pilotage est asynchrone et concurrent pour les grandes équipes", () =>
   assert.match(backend, /run_locks: Mutex<HashMap<String, Arc<Mutex<\(\)>>>>/);
   assert.match(backend, /lock\.try_lock\(\)/);
   assert.match(backend, /cst-orchestrated-chats-/);
-  assert.match(backend, /const MAX_WORKER_COUNT: u32 = 200/);
-  assert.match(backend, /MAX_MAX_CONCURRENCY: u32 = 200/);
-  assert.match(backend, /MAX_TASK_COUNT: u32 = 200/);
+  assert.match(backend, /const DEFAULT_WORKER_LIMIT: u32 = 5/);
+  assert.match(backend, /const MAX_WORKER_COUNT: u32 = 1_000/);
+  assert.match(backend, /MAX_MAX_CONCURRENCY: u32 = 1_000/);
+  assert.match(backend, /MAX_TASK_COUNT: u32 = MAX_WORKER_COUNT/);
+  assert.match(backend, /WORKER_LIMIT_ENV: &str = "CST_ORCHESTRATION_MAX_WORKERS"/);
 });
 
 test("le moteur impose isolation, preuve, revue, test réel et publication prudente", () => {
@@ -277,7 +270,7 @@ test("le moteur impose isolation, preuve, revue, test réel et publication prude
   assert.match(backend, /validate_worker_count/);
   assert.match(backend, /exactement cette cardinalite de taches/);
   assert.match(backend, /validate_plan\(plan, run\)/);
-  assert.match(backend, /\[1, 2, 3, 4, 20, 100, 200\]/);
+  assert.match(backend, /MIN_TASK_COUNT\.\.=max_task_count\.min\(MAX_TASK_COUNT\)/);
   assert.match(backend, /clone", "--no-local", "--no-checkout", "--no-tags"/);
   assert.match(chat, /ChatFilesystemScope::OrchestrationWorkspace/);
   assert.match(backend, /copy_discussion_between/);
@@ -286,6 +279,9 @@ test("le moteur impose isolation, preuve, revue, test réel et publication prude
   assert.match(backend, /ORCHESTRATION_PROOF:/);
   assert.match(backend, /ORCHESTRATION_REVIEW:/);
   assert.match(backend, /ORCHESTRATION_FINAL:/);
+  assert.match(backend, /pub team_messages: Vec<OrchestrationTeamMessage>/);
+  assert.match(backend, /fn append_team_messages/);
+  assert.match(backend, /Fil de coordination du groupe/);
   assert.match(backend, /proof\.tests\.iter\(\)\.any\(\|test\| !test\.passed\)/);
   assert.match(backend, /run_validation_command/);
   assert.match(backend, /protocol_failures/);

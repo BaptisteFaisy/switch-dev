@@ -71,6 +71,16 @@ export type OrchestrationEvent = {
   message: string;
 };
 
+export type OrchestrationTeamMessage = {
+  id: string;
+  sequence: number;
+  timestamp: number;
+  fromRole: "orchestrator" | "worker";
+  fromTaskId: string | null;
+  toTaskIds: string[];
+  body: string;
+};
+
 export type OrchestrationSnapshot = {
   id: string;
   name: string;
@@ -119,6 +129,8 @@ export type OrchestrationSnapshot = {
   consecutiveStartFailures: number;
   protocolFailures: number;
   publishApplied: boolean;
+  /** Fil asynchrone partagé, borné côté serveur et injecté aux agents. */
+  teamMessages?: OrchestrationTeamMessage[];
   events: OrchestrationEvent[];
 };
 
@@ -128,17 +140,14 @@ export type OrchestrationAccountRole = "orchestrator" | "worker";
 
 export const AUTOMATIC_ORCHESTRATION_MARKER = "CST_AUTO_ORCHESTRATION:";
 
-export const DEFAULT_ORCHESTRATION_WORKER_COUNT = 3;
+export const DEFAULT_ORCHESTRATION_WORKER_COUNT = 5;
 
-/** Budget maximal d'agents autorisé à coder sur un même travail. */
-export const MAX_ORCHESTRATION_WORKER_COUNT = 200;
+/** Plafond visible pendant la phase de test. Le serveur garde une limite configurable plus haute. */
+export const MAX_ORCHESTRATION_WORKER_COUNT = 5;
 
 export const normalizeOrchestrationWorkerCount = (value: number): number | null => {
   if (!Number.isInteger(value) || value < 1 || value > MAX_ORCHESTRATION_WORKER_COUNT) return null;
-  if (value <= 4) return value;
-  if (value <= 20) return 20;
-  if (value <= 100) return 100;
-  return 200;
+  return value;
 };
 
 export const orchestrationWorkerCountFromEnv = (value: unknown): number => {
@@ -176,7 +185,11 @@ export const automaticOrchestrationEnabledByDefault = (
   context: DefaultOrchestrationContext,
 ): boolean =>
   context.surface === "freebuff-terminal"
-  || (!context.orchestrationRole && !context.autonomousAgentId);
+  || (
+    !context.orchestrationRole
+    && !context.autonomousAgentId
+    && context.persistedEnabled !== false
+  );
 
 /**
  * Lit uniquement la ligne de routage emise par le modele. Une mention du

@@ -19189,8 +19189,10 @@ body.autonomous-monitor-dragging { cursor: grabbing; user-select: none; }
   grid-template-columns: repeat(auto-fit, minmax(205px, 1fr));
   gap: 8px;
 }
-.orchestration-create label.orchestration-create-worker,
-.autonomous-orchestration-team label.orchestration-create-worker {
+.orchestration-create .orchestration-create-worker,
+.autonomous-orchestration-team .orchestration-create-worker,
+.autonomous-launch-team .orchestration-create-worker {
+  display: grid;
   gap: 8px;
   padding: 9px;
   border: 1px solid rgba(255, 255, 255, .065);
@@ -19219,6 +19221,17 @@ body.autonomous-monitor-dragging { cursor: grabbing; user-select: none; }
 .orchestration-create-worker > span strong { color: #c4cecc; font-size: 9px; }
 .orchestration-create-worker > span small { color: #667370; font-size: 7px; font-weight: 500; }
 .orchestration-create-worker select { min-height: 36px; font-size: 9px; }
+.orchestration-create-worker-shared {
+  display: inline-flex !important;
+  grid-template-columns: none !important;
+  align-items: center;
+  justify-content: flex-start !important;
+  gap: 5px !important;
+  color: #70cdbc;
+  font-size: 8px;
+  font-weight: 700;
+}
+.orchestration-create-worker-shared svg { width: 12px; height: 12px; }
 .autonomous-orchestration-team { margin-top: 2px; }
 
 .orchestration-runs { display: grid; gap: 12px; }
@@ -19453,6 +19466,43 @@ body.autonomous-monitor-dragging { cursor: grabbing; user-select: none; }
 .orchestration-member-chat-pending svg,
 .orchestration-member-loader { width: 13px; height: 13px; }
 .orchestration-member-loader { color: #76d5c5; animation: orchestration-spin 1s linear infinite; }
+.orchestration-team-feed {
+  display: grid;
+  gap: 8px;
+  padding: 11px;
+  border: 1px solid rgba(91, 231, 208, .13);
+  border-radius: 12px;
+  background: rgba(7, 14, 15, .55);
+}
+.orchestration-team-feed > header,
+.orchestration-team-feed > header > span,
+.orchestration-team-feed > header > span > span {
+  display: flex;
+  align-items: center;
+}
+.orchestration-team-feed > header { justify-content: space-between; gap: 10px; }
+.orchestration-team-feed > header > span { min-width: 0; gap: 8px; }
+.orchestration-team-feed > header > span > svg { width: 15px; height: 15px; color: #72d7c6; }
+.orchestration-team-feed > header > span > span { align-items: flex-start; flex-direction: column; gap: 1px; }
+.orchestration-team-feed > header strong { color: #d1dcda; font-size: 10px; }
+.orchestration-team-feed > header small { color: #687673; font-size: 8px; }
+.orchestration-team-feed > header > b { color: #74d5c4; font: 700 9px var(--font-mono); }
+.orchestration-team-feed-list { display: grid; max-height: 250px; gap: 6px; overflow: auto; }
+.orchestration-team-feed-list article { display: grid; grid-template-columns: 26px minmax(0, 1fr); gap: 8px; padding: 8px; border-radius: 9px; background: rgba(255, 255, 255, .022); }
+.orchestration-team-feed-list article.from-orchestrator { background: rgba(54, 202, 178, .045); }
+.orchestration-team-feed-avatar { display: grid; width: 25px; height: 25px; place-items: center; border-radius: 8px; color: #75d8c7; background: rgba(54, 202, 178, .08); }
+.orchestration-team-feed-avatar svg { width: 13px; height: 13px; }
+.orchestration-team-feed-list article > div { min-width: 0; }
+.orchestration-team-feed-list article small { display: flex; align-items: center; gap: 5px; color: #70807d; font-size: 7px; }
+.orchestration-team-feed-list article small b { color: #9fb0ad; }
+.orchestration-team-feed-list article small svg { width: 9px; height: 9px; }
+.orchestration-team-feed-list article time { margin-left: auto; }
+.orchestration-team-feed-list article p { margin: 3px 0 0; color: #b3c0bd; font-size: 9px; line-height: 1.45; white-space: pre-wrap; }
+.orchestration-team-feed-empty { display: flex; align-items: center; gap: 9px; padding: 10px; color: #667571; }
+.orchestration-team-feed-empty > svg { width: 16px; height: 16px; }
+.orchestration-team-feed-empty > span { display: grid; gap: 2px; }
+.orchestration-team-feed-empty strong { color: #98a8a5; font-size: 9px; }
+.orchestration-team-feed-empty small { font-size: 8px; }
 .orchestration-missions { display: grid; gap: 8px; }
 .orchestration-missions > header { display: flex; align-items: end; justify-content: space-between; gap: 12px; padding: 2px 3px; }
 .orchestration-missions > header > b { color: #7fdaca; font: 700 10px var(--font-mono); }

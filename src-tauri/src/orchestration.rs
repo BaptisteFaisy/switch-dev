@@ -37,13 +37,18 @@ const MAX_TEST_COMMAND_CHARS: usize = 8_000;
 const DEFAULT_TEST_TIMEOUT_SECONDS: u64 = 10 * 60;
 const MIN_TEST_TIMEOUT_SECONDS: u64 = 5;
 const MAX_TEST_TIMEOUT_SECONDS: u64 = 30 * 60;
-const DEFAULT_WORKER_COUNT: u32 = 3;
+const DEFAULT_WORKER_COUNT: u32 = 5;
 const MIN_WORKER_COUNT: u32 = 1;
-const MAX_WORKER_COUNT: u32 = 200;
+/// Le test produit reste volontairement borne a cinq workers. Cette limite peut
+/// etre relevee sans migration de donnees quand le pool de comptes et
+/// l'infrastructure seront prets ; la limite de securite absolue reste 1000.
+const DEFAULT_WORKER_LIMIT: u32 = 5;
+const MAX_WORKER_COUNT: u32 = 1_000;
 const WORKER_COUNT_ENV: &str = "CST_ORCHESTRATION_WORKERS";
+const WORKER_LIMIT_ENV: &str = "CST_ORCHESTRATION_MAX_WORKERS";
 const DEFAULT_MAX_CONCURRENCY: u32 = 8;
 const MIN_MAX_CONCURRENCY: u32 = 1;
-const MAX_MAX_CONCURRENCY: u32 = 200;
+const MAX_MAX_CONCURRENCY: u32 = 1_000;
 /// Budget global de tours d'agents en vol a travers toutes les orchestrations.
 /// Chaque tour en vol est un agent qui code vraiment (et consomme de la
 /// memoire) ; les runs au-dela de ce budget attendent leur tour. C'est le
@@ -55,9 +60,9 @@ const CONCURRENCY_ENV: &str = "CST_ORCHESTRATION_CONCURRENCY";
 /// redirige vers un RAM-disk (tmpfs) pour accelerer les fichiers temporaires
 /// des agents : `CST_ORCHESTRATION_SANDBOX_DIR` (ex. /dev/shm/cst-orchestrated-runs).
 const SANDBOX_DIR_ENV: &str = "CST_ORCHESTRATION_SANDBOX_DIR";
-const DEFAULT_MAX_TASK_COUNT: u32 = 100;
+const DEFAULT_MAX_TASK_COUNT: u32 = DEFAULT_WORKER_LIMIT;
 const MIN_TASK_COUNT: u32 = 1;
-const MAX_TASK_COUNT: u32 = 200;
+const MAX_TASK_COUNT: u32 = MAX_WORKER_COUNT;
 /// Nombre de threads de pilotage asynchrones. Chaque driver parcourt les runs
 /// actifs et les fait progresser en parallele : plusieurs agents peuvent ainsi
 /// avancer sur le meme travail sans etre serialises par une boucle unique.
@@ -66,6 +71,9 @@ const DEFAULT_DRIVER_COUNT: usize = 4;
 const MIN_DRIVER_COUNT: usize = 1;
 const MAX_DRIVER_COUNT: usize = 64;
 const MAX_EVENTS: usize = 1_000;
+const MAX_TEAM_MESSAGES: usize = 500;
+const MAX_TEAM_MESSAGES_PER_TURN: usize = 20;
+const MAX_TEAM_MESSAGE_CHARS: usize = 2_000;
 const MAX_REVIEWS: usize = 20;
 const MAX_PROTOCOL_FAILURES: u32 = 3;
 const MAX_START_FAILURES: u32 = 3;
@@ -150,6 +158,20 @@ pub struct OrchestrationEvent {
     pub timestamp: i64,
     pub kind: String,
     pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct OrchestrationTeamMessage {
+    pub id: String,
+    pub sequence: u64,
+    pub timestamp: i64,
+    pub from_role: OrchestrationAccountRole,
+    #[serde(default)]
+    pub from_task_id: Option<String>,
+    #[serde(default)]
+    pub to_task_ids: Vec<String>,
+    pub body: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -303,6 +325,11 @@ pub struct OrchestrationSnapshot {
     pub protocol_failures: u32,
     #[serde(default)]
     pub publish_applied: bool,
+    /// Fil de coordination asynchrone borne. Les agents ne partagent ni
+    /// processus ni contexte implicite : le serveur injecte ces messages dans
+    /// leurs prochains tours, ce qui reste fiable avec une file de 1000 chats.
+    #[serde(default)]
+    pub team_messages: Vec<OrchestrationTeamMessage>,
     #[serde(default)]
     pub events: Vec<OrchestrationEvent>,
 }
@@ -387,7 +414,7 @@ pub struct ControlOrchestrationRequest {
     pub action: OrchestrationAction,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum OrchestrationAccountRole {
     Orchestrator,
@@ -489,6 +516,8 @@ struct ProofEnvelope {
     tests: Vec<OrchestrationProofTest>,
     #[serde(default)]
     risks: Vec<String>,
+    #[serde(default)]
+    messages: Vec<TeamMessageEnvelope>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -500,6 +529,8 @@ struct ReviewEnvelope {
     feedback: String,
     #[serde(default)]
     tests: Vec<OrchestrationProofTest>,
+    #[serde(default)]
+    messages: Vec<TeamMessageEnvelope>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -513,6 +544,16 @@ struct FinalEnvelope {
     feedback: String,
     #[serde(default)]
     tests: Vec<OrchestrationProofTest>,
+    #[serde(default)]
+    messages: Vec<TeamMessageEnvelope>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TeamMessageEnvelope {
+    #[serde(default)]
+    to_task_ids: Vec<String>,
+    body: String,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
@@ -599,8 +640,11 @@ impl OrchestrationManager {
                 .unwrap_or_else(configured_default_worker_count),
         )?;
         let adaptive_fanout = request.adaptive_fanout.unwrap_or(true);
-        let max_task_count =
-            validate_max_task_count(request.max_task_count.unwrap_or(DEFAULT_MAX_TASK_COUNT))?;
+        let max_task_count = validate_max_task_count(
+            request
+                .max_task_count
+                .unwrap_or_else(configured_worker_limit),
+        )?;
         let minimum_task_count =
             requested_minimum_task_count(&objective, worker_count, adaptive_fanout, max_task_count);
         let max_concurrency = validate_max_concurrency(
@@ -737,6 +781,7 @@ impl OrchestrationManager {
             consecutive_start_failures: 0,
             protocol_failures: 0,
             publish_applied: false,
+            team_messages: Vec::new(),
             events: Vec::new(),
         };
         push_event(
@@ -1476,26 +1521,23 @@ fn normalize_worker_accounts(
     worker_count: u32,
     fallback_account_id: &str,
 ) -> Result<Vec<String>, String> {
-    if account_ids.is_empty() {
-        return Ok(vec![fallback_account_id.to_string(); worker_count as usize]);
-    }
-    if account_ids.len() != worker_count as usize {
+    if !account_ids.is_empty() && account_ids.len() != worker_count as usize {
         return Err(format!(
             "Il faut affecter exactement {worker_count} compte{} aux workers",
             if worker_count > 1 { "s" } else { "" }
         ));
     }
-    Ok(account_ids
-        .into_iter()
-        .map(|value| {
-            let value = value.trim().to_string();
-            if value.is_empty() {
-                fallback_account_id.to_string()
-            } else {
-                value
-            }
-        })
-        .collect())
+    if account_ids
+        .iter()
+        .map(|value| value.trim())
+        .any(|value| !value.is_empty() && value != fallback_account_id)
+    {
+        return Err(
+            "Pendant la phase de test, tous les workers doivent utiliser le compte de l'orchestrateur"
+                .to_string(),
+        );
+    }
+    Ok(vec![fallback_account_id.to_string(); worker_count as usize])
 }
 
 fn handoff_file(
@@ -2105,7 +2147,7 @@ fn complete_worker(
         return;
     };
     let text = snapshot_text(snapshot);
-    let envelope = match parse_marked_json::<ProofEnvelope>(&text, "ORCHESTRATION_PROOF:")
+    let mut envelope = match parse_marked_json::<ProofEnvelope>(&text, "ORCHESTRATION_PROOF:")
         .and_then(validate_proof)
     {
         Ok(proof) => proof,
@@ -2119,6 +2161,15 @@ fn complete_worker(
             return;
         }
     };
+    if let Err(error) = validate_team_messages(&mut envelope.messages, run) {
+        protocol_failure(
+            inner,
+            &run.id,
+            Some(task_id),
+            format!("Messages du travailleur invalides : {error}"),
+        );
+        return;
+    }
     let workspace = task.workspace_dir.as_deref().unwrap_or_default();
     let base_commit = task.base_commit.as_deref().unwrap_or_default();
     let files_changed = match stage_and_changed_files(Path::new(workspace), base_commit) {
@@ -2155,6 +2206,14 @@ fn complete_worker(
             });
             current_task.title.clone()
         };
+        let message_count = envelope.messages.len();
+        append_team_messages(
+            current,
+            OrchestrationAccountRole::Worker,
+            Some(task_id),
+            envelope.messages,
+            now,
+        );
         current.phase = OrchestrationPhase::Reviewing;
         current.current_task_id = Some(task_id.to_string());
         current.next_action_at = Some(now);
@@ -2166,6 +2225,18 @@ fn complete_worker(
             "proof_submitted",
             format!("{task_title} a soumis une preuve"),
         );
+        if message_count > 0 {
+            push_event(
+                current,
+                now,
+                "team_message",
+                format!(
+                    "Worker {} a publie {message_count} message{} dans le groupe",
+                    task.position,
+                    if message_count > 1 { "s" } else { "" }
+                ),
+            );
+        }
         Ok(())
     });
     if let Err(error) = result {
@@ -2183,7 +2254,7 @@ fn complete_review(
         return;
     };
     let text = snapshot_text(snapshot);
-    let envelope = match parse_marked_json::<ReviewEnvelope>(&text, "ORCHESTRATION_REVIEW:")
+    let mut envelope = match parse_marked_json::<ReviewEnvelope>(&text, "ORCHESTRATION_REVIEW:")
         .and_then(validate_review)
     {
         Ok(review) => review,
@@ -2197,25 +2268,43 @@ fn complete_review(
             return;
         }
     };
+    if let Err(error) = validate_team_messages(&mut envelope.messages, run) {
+        protocol_failure(
+            inner,
+            &run.id,
+            Some(task_id),
+            format!("Messages de l'orchestrateur invalides : {error}"),
+        );
+        return;
+    }
     let now = metrics::now_ts();
     let decision = envelope.decision;
     let feedback = envelope.feedback.clone();
     let result = inner.mutate_store(|store| {
         let current = find_run_mut(store, &run.id)?;
         clear_current_turn(current, snapshot);
-        let current_task = find_task_mut(current, task_id)?;
-        current_task.reviews.push(OrchestrationReview {
-            decision,
-            summary: envelope.summary,
-            feedback: feedback.clone(),
-            tests: envelope.tests,
-            created_at: now,
-        });
-        if current_task.reviews.len() > MAX_REVIEWS {
-            current_task
-                .reviews
-                .drain(0..current_task.reviews.len() - MAX_REVIEWS);
+        {
+            let current_task = find_task_mut(current, task_id)?;
+            current_task.reviews.push(OrchestrationReview {
+                decision,
+                summary: envelope.summary,
+                feedback: feedback.clone(),
+                tests: envelope.tests,
+                created_at: now,
+            });
+            if current_task.reviews.len() > MAX_REVIEWS {
+                current_task
+                    .reviews
+                    .drain(0..current_task.reviews.len() - MAX_REVIEWS);
+            }
         }
+        append_team_messages(
+            current,
+            OrchestrationAccountRole::Orchestrator,
+            None,
+            envelope.messages,
+            now,
+        );
         current.updated_at = now;
         Ok(())
     });
@@ -2253,7 +2342,7 @@ fn complete_final_review(
     snapshot: &ChatTurnSnapshot,
 ) {
     let text = snapshot_text(snapshot);
-    let envelope = match parse_marked_json::<FinalEnvelope>(&text, "ORCHESTRATION_FINAL:")
+    let mut envelope = match parse_marked_json::<FinalEnvelope>(&text, "ORCHESTRATION_FINAL:")
         .and_then(|value| validate_final(value, run))
     {
         Ok(value) => value,
@@ -2267,12 +2356,28 @@ fn complete_final_review(
             return;
         }
     };
+    if let Err(error) = validate_team_messages(&mut envelope.messages, run) {
+        protocol_failure(
+            inner,
+            &run.id,
+            None,
+            format!("Messages finaux de l'orchestrateur invalides : {error}"),
+        );
+        return;
+    }
     let now = metrics::now_ts();
     if let Err(error) = inner.mutate_store(|store| {
         let current = find_run_mut(store, &run.id)?;
         clear_current_turn(current, snapshot);
         current.protocol_failures = 0;
         current.final_summary = Some(envelope.summary.clone());
+        append_team_messages(
+            current,
+            OrchestrationAccountRole::Orchestrator,
+            None,
+            envelope.messages.clone(),
+            now,
+        );
         current.updated_at = now;
         Ok(())
     }) {
@@ -2842,9 +2947,7 @@ fn publish_run(inner: &Arc<OrchestrationInner>, run: &OrchestrationSnapshot) {
 
 fn apply_final_patch(run: &OrchestrationSnapshot) -> Result<(), String> {
     if run.source_kind != OrchestrationSourceKind::GitClean {
-        return Err(
-            "Publication interdite pour une source sale, non-Git ou ephemere".to_string(),
-        );
+        return Err("Publication interdite pour une source sale, non-Git ou ephemere".to_string());
     }
     let source = Path::new(&run.project_dir);
     let head = git_text(source, ["rev-parse", "HEAD"])?;
@@ -3114,6 +3217,63 @@ fn read_capped(mut reader: impl Read) -> String {
     String::from_utf8_lossy(&retained).to_string()
 }
 
+fn team_message_author(run: &OrchestrationSnapshot, message: &OrchestrationTeamMessage) -> String {
+    match message.from_role {
+        OrchestrationAccountRole::Orchestrator => "Orchestrateur".to_string(),
+        OrchestrationAccountRole::Worker => message
+            .from_task_id
+            .as_deref()
+            .and_then(|id| run.tasks.iter().find(|task| task.id == id))
+            .map(|task| format!("Worker {}", task.position))
+            .unwrap_or_else(|| "Worker".to_string()),
+    }
+}
+
+fn team_message_targets(run: &OrchestrationSnapshot, message: &OrchestrationTeamMessage) -> String {
+    if message.to_task_ids.is_empty() {
+        return "tout le groupe".to_string();
+    }
+    message
+        .to_task_ids
+        .iter()
+        .filter_map(|id| run.tasks.iter().find(|task| task.id == *id))
+        .map(|task| format!("Worker {}", task.position))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn team_feed(run: &OrchestrationSnapshot, task_id: Option<&str>) -> String {
+    let mut messages = run
+        .team_messages
+        .iter()
+        .rev()
+        .filter(|message| {
+            task_id.is_none()
+                || message.to_task_ids.is_empty()
+                || task_id.is_some_and(|id| message.to_task_ids.iter().any(|target| target == id))
+                || message.from_task_id.as_deref() == task_id
+        })
+        .take(30)
+        .collect::<Vec<_>>();
+    messages.reverse();
+    if messages.is_empty() {
+        return "Aucun message pour le moment.".to_string();
+    }
+    messages
+        .into_iter()
+        .map(|message| {
+            format!(
+                "[#{}] {} -> {} : {}",
+                message.sequence,
+                team_message_author(run, message),
+                team_message_targets(run, message),
+                message.body
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn plan_prompt(run: &OrchestrationSnapshot) -> String {
     let retry = run
         .last_error
@@ -3131,7 +3291,7 @@ fn plan_prompt(run: &OrchestrationSnapshot) -> String {
         run.worker_count.to_string()
     };
     format!(
-        "Tu es l'agent orchestrateur du chat orchestre \"{}\". Tu travailles dans un worktree Git prive et tu ne dois rien modifier pendant cette phase de planification.\n\nObjectif utilisateur :\n{}\n\nChoisis une cardinalite autorisee parmi {allowed}, sans jamais descendre sous le plancher {}. Une demande compacte utilise 1 a 4 missions ; une demande complexe proprement parallele utilise exactement 20 ; une campagne massive et reellement independante utilise exactement 100. Decoupe ensuite l'objectif en exactement cette cardinalite de taches coherentes, petites, testables et sans remplissage. Chaque tache ouvre un chat travailleur distinct et chaque critere doit etre observable. Pour une source ephemere, produis des livrables concrets sous reports/task-XX.md et ne pretends jamais modifier le chemin utilisateur.{}\nTermine par exactement une ligne, sans bloc Markdown :\nORCHESTRATION_PLAN: {{\"summary\":\"strategie concise\",\"tasks\":[{{\"title\":\"titre\",\"description\":\"travail attendu\",\"acceptanceCriteria\":[\"critere verifiable\"]}}]}}",
+        "Tu es l'agent orchestrateur du chat orchestre \"{}\". Tu travailles dans un worktree Git prive et tu ne dois rien modifier pendant cette phase de planification.\n\nObjectif utilisateur :\n{}\n\nChoisis une cardinalite autorisee parmi {allowed}, sans jamais descendre sous le plancher {}. Utilise le maximum de missions independantes qui apportent une valeur reelle, sans doublon ni remplissage. Decoupe ensuite l'objectif en exactement cette cardinalite de taches coherentes, petites et testables. Chaque tache ouvre un chat travailleur distinct et chaque critere doit etre observable. Pour une source ephemere, produis des livrables concrets sous reports/task-XX.md et ne pretends jamais modifier le chemin utilisateur.{}\nTermine par exactement une ligne, sans bloc Markdown :\nORCHESTRATION_PLAN: {{\"summary\":\"strategie concise\",\"tasks\":[{{\"title\":\"titre\",\"description\":\"travail attendu\",\"acceptanceCriteria\":[\"critere verifiable\"]}}]}}",
         run.name, run.objective, run.minimum_task_count, retry
     )
 }
@@ -3152,15 +3312,17 @@ fn worker_prompt(run: &OrchestrationSnapshot, task: &OrchestrationTask) -> Strin
             )
         })
         .unwrap_or_default();
+    let group_feed = team_feed(run, Some(&task.id));
     format!(
-        "Tu es le travailleur charge de la tache {} du chat orchestre \"{}\". Ton environnement Git est isole. Respecte les changements existants et reste strictement dans le perimetre de cette tache.\n\nObjectif global :\n{}\n\nTache : {}\n{}\n\nCriteres d'acceptation :\n{}{}\n\nImplemente la tache, inspecte le diff reel et execute les tests pertinents. Ne declare jamais une garantie absolue d'absence de bug : fournis des preuves reproductibles. Une preuve sans test reussi ou sans modification reelle sera refusee. N'effectue aucune publication ni action externe irreversible.\n\nTermine par exactement une ligne, sans bloc Markdown :\nORCHESTRATION_PROOF: {{\"summary\":\"resultat obtenu\",\"filesChanged\":[\"chemin\"],\"tests\":[{{\"command\":\"commande executee\",\"result\":\"resultat observe\",\"passed\":true}}],\"risks\":[]}}",
+        "Tu es le travailleur charge de la tache {} du chat orchestre \"{}\". Ton environnement Git est isole. Respecte les changements existants et reste strictement dans le perimetre de cette tache.\n\nObjectif global :\n{}\n\nTache : {}\n{}\n\nCriteres d'acceptation :\n{}{}\n\nFil de coordination du groupe (messages pertinents, ordre croissant) :\n{}\n\nImplemente la tache, exploite les informations utiles du groupe, inspecte le diff reel et execute les tests pertinents. Tu peux transmettre jusqu'a 20 messages aux autres workers dans `messages`; une liste `toTaskIds` vide diffuse au groupe. N'y mets que des informations actionnables (contrat, chemin, risque, dependance ou resultat). Ne declare jamais une garantie absolue d'absence de bug : fournis des preuves reproductibles. Une preuve sans test reussi ou sans modification reelle sera refusee. N'effectue aucune publication ni action externe irreversible.\n\nTermine par exactement une ligne, sans bloc Markdown :\nORCHESTRATION_PROOF: {{\"summary\":\"resultat obtenu\",\"filesChanged\":[\"chemin\"],\"tests\":[{{\"command\":\"commande executee\",\"result\":\"resultat observe\",\"passed\":true}}],\"risks\":[],\"messages\":[{{\"toTaskIds\":[\"task-02\"],\"body\":\"information utile\"}}]}}",
         task.position,
         run.name,
         run.objective,
         task.title,
         task.description,
         criteria,
-        revision
+        revision,
+        group_feed
     )
 }
 
@@ -3171,12 +3333,13 @@ fn review_prompt(run: &OrchestrationSnapshot, task: &OrchestrationTask) -> Strin
         .map(|proof| serde_json::to_string(proof).unwrap_or_default())
         .unwrap_or_default();
     format!(
-        "Tu es l'agent orchestrateur. Le patch de la tache {} est applique et stage dans TON worktree prive. Inspecte `git diff --cached`, confronte-le aux criteres, execute des tests pertinents et cherche activement bugs, regressions, manque de couverture et ameliorations necessaires. Tu peux corriger de petites imperfections directement dans ton environnement ; toute correction substantielle doit etre renvoyee au travailleur.\n\nTache : {}\n{}\nCriteres :\n{}\n\nPreuve soumise :\n{}\n\nDecision `accept` seulement si la contribution est propre, complete et testee. Sinon `revise` avec un retour precis et actionnable. La commande globale `{}` sera executee mecaniquement apres ton acceptation.\n\nTermine par exactement une ligne, sans bloc Markdown :\nORCHESTRATION_REVIEW: {{\"decision\":\"accept\",\"summary\":\"constat\",\"feedback\":\"\",\"tests\":[{{\"command\":\"commande executee\",\"result\":\"resultat observe\",\"passed\":true}}]}}",
+        "Tu es l'agent orchestrateur. Le patch de la tache {} est applique et stage dans TON worktree prive. Inspecte `git diff --cached`, confronte-le aux criteres, execute des tests pertinents et cherche activement bugs, regressions, manque de couverture et ameliorations necessaires. Tu peux corriger de petites imperfections directement dans ton environnement ; toute correction substantielle doit etre renvoyee au travailleur.\n\nTache : {}\n{}\nCriteres :\n{}\n\nPreuve soumise :\n{}\n\nFil de coordination du groupe :\n{}\n\nDecision `accept` seulement si la contribution est propre, complete et testee. Sinon `revise` avec un retour precis et actionnable. Tu peux relayer des informations aux workers via `messages`; une liste `toTaskIds` vide diffuse au groupe. La commande globale `{}` sera executee mecaniquement apres ton acceptation.\n\nTermine par exactement une ligne, sans bloc Markdown :\nORCHESTRATION_REVIEW: {{\"decision\":\"accept\",\"summary\":\"constat\",\"feedback\":\"\",\"tests\":[{{\"command\":\"commande executee\",\"result\":\"resultat observe\",\"passed\":true}}],\"messages\":[]}}",
         task.position,
         task.title,
         task.description,
         task.acceptance_criteria.join("\n- "),
         proof,
+        team_feed(run, None),
         run.test_command
     )
 }
@@ -3194,8 +3357,12 @@ fn final_review_prompt(run: &OrchestrationSnapshot) -> String {
         .map(|error| format!("\nLa derniere validation finale a echoue :\n{error}\n"))
         .unwrap_or_default();
     format!(
-        "Tu es l'agent orchestrateur et toutes les contributions sont integrees dans ton environnement prive. Realise l'audit final de l'objectif complet : inspecte le diff depuis le commit de base, execute les tests, recherche les regressions et les ameliorations indispensables.{}\nObjectif :\n{}\n\nTaches disponibles pour un retour :\n{}\n\nSi un probleme subsiste, choisis exactement un taskId et renvoie-le au travailleur avec un feedback actionnable. Sinon declare complete. La commande globale `{}` sera encore executee mecaniquement avant le rendu.\n\nTermine par exactement une ligne, sans bloc Markdown :\nORCHESTRATION_FINAL: {{\"decision\":\"complete\",\"summary\":\"resultat final\",\"taskId\":null,\"feedback\":\"\",\"tests\":[{{\"command\":\"commande executee\",\"result\":\"resultat observe\",\"passed\":true}}]}}",
-        previous_failure, run.objective, tasks, run.test_command
+        "Tu es l'agent orchestrateur et toutes les contributions sont integrees dans ton environnement prive. Realise l'audit final de l'objectif complet : inspecte le diff depuis le commit de base, execute les tests, recherche les regressions et les ameliorations indispensables.{}\nObjectif :\n{}\n\nTaches disponibles pour un retour :\n{}\n\nFil de coordination du groupe :\n{}\n\nSi un probleme subsiste, choisis exactement un taskId et renvoie-le au travailleur avec un feedback actionnable. Sinon declare complete. La commande globale `{}` sera encore executee mecaniquement avant le rendu.\n\nTermine par exactement une ligne, sans bloc Markdown :\nORCHESTRATION_FINAL: {{\"decision\":\"complete\",\"summary\":\"resultat final\",\"taskId\":null,\"feedback\":\"\",\"tests\":[{{\"command\":\"commande executee\",\"result\":\"resultat observe\",\"passed\":true}}],\"messages\":[]}}",
+        previous_failure,
+        run.objective,
+        tasks,
+        team_feed(run, None),
+        run.test_command
     )
 }
 
@@ -3236,7 +3403,7 @@ fn validate_plan(
     if run.adaptive_fanout {
         if !adaptive_fanout_cardinalities(run.max_task_count).contains(&task_count) {
             return Err(format!(
-                "le plan adaptatif doit utiliser une cardinalite autorisee 1/2/3/4/20/100, bornee a {}, mais il en contient {task_count}",
+                "le plan adaptatif doit utiliser entre 1 et {} taches, mais il en contient {task_count}",
                 run.max_task_count
             ));
         }
@@ -3281,6 +3448,74 @@ fn validate_plan(
         }
     }
     Ok(plan)
+}
+
+fn validate_team_messages(
+    messages: &mut Vec<TeamMessageEnvelope>,
+    run: &OrchestrationSnapshot,
+) -> Result<(), String> {
+    if messages.len() > MAX_TEAM_MESSAGES_PER_TURN {
+        return Err(format!(
+            "un tour ne peut pas publier plus de {MAX_TEAM_MESSAGES_PER_TURN} messages de groupe"
+        ));
+    }
+    let known_tasks = run
+        .tasks
+        .iter()
+        .map(|task| task.id.as_str())
+        .collect::<HashSet<_>>();
+    for message in messages {
+        message.body = validate_required_text(
+            &message.body,
+            MAX_TEAM_MESSAGE_CHARS,
+            "Le message de groupe",
+        )?;
+        let mut seen = HashSet::new();
+        message.to_task_ids = message
+            .to_task_ids
+            .drain(..)
+            .map(|target| target.trim().to_string())
+            .filter(|target| !target.is_empty() && seen.insert(target.clone()))
+            .collect();
+        if let Some(unknown) = message
+            .to_task_ids
+            .iter()
+            .find(|target| !known_tasks.contains(target.as_str()))
+        {
+            return Err(format!("destinataire de groupe inconnu : {unknown}"));
+        }
+    }
+    Ok(())
+}
+
+fn append_team_messages(
+    run: &mut OrchestrationSnapshot,
+    from_role: OrchestrationAccountRole,
+    from_task_id: Option<&str>,
+    messages: Vec<TeamMessageEnvelope>,
+    now: i64,
+) {
+    let mut sequence = run
+        .team_messages
+        .last()
+        .map(|message| message.sequence.saturating_add(1))
+        .unwrap_or(1);
+    for message in messages {
+        run.team_messages.push(OrchestrationTeamMessage {
+            id: Uuid::new_v4().to_string(),
+            sequence,
+            timestamp: now,
+            from_role,
+            from_task_id: from_task_id.map(str::to_string),
+            to_task_ids: message.to_task_ids,
+            body: message.body,
+        });
+        sequence = sequence.saturating_add(1);
+    }
+    if run.team_messages.len() > MAX_TEAM_MESSAGES {
+        run.team_messages
+            .drain(0..run.team_messages.len() - MAX_TEAM_MESSAGES);
+    }
 }
 
 fn validate_proof(mut proof: ProofEnvelope) -> Result<ProofEnvelope, String> {
@@ -3597,8 +3832,7 @@ fn inspect_source_repository_with_boundary(
     if !path.is_dir() {
         return Err("Le dossier projet n'existe pas".to_string());
     }
-    let path = fs::canonicalize(path)
-        .map_err(|_| "Le dossier projet n'existe pas".to_string())?;
+    let path = fs::canonicalize(path).map_err(|_| "Le dossier projet n'existe pas".to_string())?;
     if authorized_boundary.is_some_and(|boundary| !path.starts_with(boundary)) {
         return Err("Le dossier projet depasse la frontiere autorisee".to_string());
     }
@@ -3649,7 +3883,11 @@ fn inspect_source_repository_with_boundary(
         let Ok(content) = fs::read_to_string(&alternates) else {
             continue;
         };
-        for line in content.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        for line in content
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+        {
             let candidate = PathBuf::from(line);
             let candidate = if candidate.is_absolute() {
                 candidate
@@ -3687,7 +3925,10 @@ fn add_worktree(repo: &Path, target: &Path, commit: &str) -> Result<(), String> 
         return Err(format!("Le sandbox existe deja : {}", target.display()));
     }
     let output = git_command()
-        .args(["-c", &format!("core.hooksPath={}", disabled_git_hooks_path())])
+        .args([
+            "-c",
+            &format!("core.hooksPath={}", disabled_git_hooks_path()),
+        ])
         .arg("-C")
         .arg(repo)
         .args(["worktree", "add", "--detach"])
@@ -4013,9 +4254,10 @@ fn validate_test_timeout(value: u64) -> Result<u64, String> {
 }
 
 fn validate_worker_count(value: u32) -> Result<u32, String> {
-    if ![1, 2, 3, 4, 20, 100, 200].contains(&value) {
+    let limit = configured_worker_limit();
+    if !(MIN_WORKER_COUNT..=limit).contains(&value) {
         return Err(format!(
-            "Le nombre de workers doit etre l'un des paliers 1, 2, 3, 4, 20, 100 ou 200, sans compter l'orchestrateur"
+            "Le nombre de workers doit etre compris entre {MIN_WORKER_COUNT} et {limit}, sans compter l'orchestrateur"
         ));
     }
     Ok(value)
@@ -4052,10 +4294,7 @@ fn validate_max_concurrency(value: u32) -> Result<u32, String> {
 }
 
 fn adaptive_fanout_cardinalities(max_task_count: u32) -> Vec<u32> {
-    [1, 2, 3, 4, 20, 100, 200]
-        .into_iter()
-        .filter(|count| *count <= max_task_count)
-        .collect()
+    (MIN_TASK_COUNT..=max_task_count.min(MAX_TASK_COUNT)).collect()
 }
 
 fn objective_requests_fanout(objective: &str, requested: u32) -> bool {
@@ -4077,12 +4316,17 @@ fn objective_requests_fanout(objective: &str, requested: u32) -> bool {
         }
         let before = &tokens[index.saturating_sub(5)..index];
         if before.iter().any(|token| {
-            matches!(*token, "pas" | "sans" | "jamais" | "eviter" | "evite" | "interdit")
+            matches!(
+                *token,
+                "pas" | "sans" | "jamais" | "eviter" | "evite" | "interdit"
+            )
         }) {
             continue;
         }
         let after = &tokens[index + 1..(index + 4).min(tokens.len())];
-        if before.iter().any(|token| matches!(*token, "par" | "x" | "exactement"))
+        if before
+            .iter()
+            .any(|token| matches!(*token, "par" | "x" | "exactement"))
             || after.iter().any(|token| {
                 matches!(
                     *token,
@@ -4096,16 +4340,11 @@ fn objective_requests_fanout(objective: &str, requested: u32) -> bool {
     false
 }
 
-fn objective_fanout_floor(objective: &str, _max_task_count: u32) -> u32 {
-    if objective_requests_fanout(objective, 200) {
-        200
-    } else if objective_requests_fanout(objective, 100) {
-        100
-    } else if objective_requests_fanout(objective, 20) {
-        20
-    } else {
-        1
-    }
+fn objective_fanout_floor(objective: &str, max_task_count: u32) -> u32 {
+    (2..=max_task_count.min(MAX_TASK_COUNT))
+        .rev()
+        .find(|requested| objective_requests_fanout(objective, *requested))
+        .unwrap_or(1)
 }
 
 fn requested_minimum_task_count(
@@ -4127,10 +4366,23 @@ fn configured_default_worker_count() -> u32 {
 }
 
 fn configured_default_worker_count_from(configured: Option<&str>) -> u32 {
+    let limit = configured_worker_limit();
     configured
         .and_then(|value| value.trim().parse::<u32>().ok())
-        .filter(|value| [1, 2, 3, 4, 20, 100].contains(value))
-        .unwrap_or(DEFAULT_WORKER_COUNT)
+        .filter(|value| (MIN_WORKER_COUNT..=limit).contains(value))
+        .unwrap_or(DEFAULT_WORKER_COUNT.min(limit))
+}
+
+fn configured_worker_limit() -> u32 {
+    let configured = std::env::var(WORKER_LIMIT_ENV).ok();
+    configured_worker_limit_from(configured.as_deref())
+}
+
+fn configured_worker_limit_from(configured: Option<&str>) -> u32 {
+    configured
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .filter(|value| (MIN_WORKER_COUNT..=MAX_WORKER_COUNT).contains(value))
+        .unwrap_or(DEFAULT_WORKER_LIMIT)
 }
 
 fn configured_default_max_concurrency() -> u32 {
@@ -4193,8 +4445,7 @@ fn normalize_loaded_store(store: &mut OrchestrationStore, now: i64) -> bool {
             run.max_task_count = DEFAULT_MAX_TASK_COUNT;
             changed = true;
         }
-        if run.tasks.len() <= MAX_TASK_COUNT as usize
-            && run.max_task_count < run.tasks.len() as u32
+        if run.tasks.len() <= MAX_TASK_COUNT as usize && run.max_task_count < run.tasks.len() as u32
         {
             run.max_task_count = run.tasks.len() as u32;
             changed = true;
@@ -4257,6 +4508,11 @@ fn normalize_loaded_store(store: &mut OrchestrationStore, now: i64) -> bool {
                     .unwrap_or_else(|| run.account_id.clone());
                 changed = true;
             }
+        }
+        if run.team_messages.len() > MAX_TEAM_MESSAGES {
+            run.team_messages
+                .drain(0..run.team_messages.len() - MAX_TEAM_MESSAGES);
+            changed = true;
         }
         let was_active = run.status == OrchestrationStatus::Active;
         let interrupted = run.current_turn_id.take().is_some()
@@ -4430,12 +4686,14 @@ mod tests {
 
     #[test]
     fn configured_worker_count_uses_only_valid_environment_fallbacks() {
-        assert_eq!(configured_default_worker_count_from(None), 3);
-        assert_eq!(configured_default_worker_count_from(Some("20")), 20);
-        assert_eq!(configured_default_worker_count_from(Some("0")), 3);
-        assert_eq!(configured_default_worker_count_from(Some("8")), 3);
-        assert_eq!(configured_default_worker_count_from(Some("13")), 3);
-        assert_eq!(configured_default_worker_count_from(Some("abc")), 3);
+        assert_eq!(configured_worker_limit_from(None), 5);
+        assert_eq!(configured_worker_limit_from(Some("1000")), 1000);
+        assert_eq!(configured_worker_limit_from(Some("1001")), 5);
+        assert_eq!(configured_default_worker_count_from(None), 5);
+        assert_eq!(configured_default_worker_count_from(Some("4")), 4);
+        assert_eq!(configured_default_worker_count_from(Some("0")), 5);
+        assert_eq!(configured_default_worker_count_from(Some("8")), 5);
+        assert_eq!(configured_default_worker_count_from(Some("abc")), 5);
     }
 
     #[test]
@@ -4443,9 +4701,9 @@ mod tests {
         assert_eq!(configured_default_max_concurrency_from(None), 8);
         assert_eq!(configured_default_max_concurrency_from(Some("1")), 1);
         assert_eq!(configured_default_max_concurrency_from(Some("16")), 16);
-        assert_eq!(configured_default_max_concurrency_from(Some("200")), 200);
+        assert_eq!(configured_default_max_concurrency_from(Some("1000")), 1000);
         assert_eq!(configured_default_max_concurrency_from(Some("0")), 8);
-        assert_eq!(configured_default_max_concurrency_from(Some("201")), 8);
+        assert_eq!(configured_default_max_concurrency_from(Some("1001")), 8);
         assert_eq!(configured_default_max_concurrency_from(Some("abc")), 8);
     }
 
@@ -4510,6 +4768,7 @@ mod tests {
                 passed: false,
             }],
             risks: Vec::new(),
+            messages: Vec::new(),
         };
         assert!(validate_proof(proof).is_err());
     }
@@ -4523,8 +4782,30 @@ mod tests {
             task_id: Some("task-99".to_string()),
             feedback: "Corriger".to_string(),
             tests: Vec::new(),
+            messages: Vec::new(),
         };
         assert!(validate_final(review, &run).is_err());
+    }
+
+    #[test]
+    fn team_messages_are_targeted_bounded_and_persisted() {
+        let mut run = sample_run();
+        let mut messages = vec![TeamMessageEnvelope {
+            to_task_ids: vec!["task-01".to_string(), "task-01".to_string()],
+            body: "Contrat API disponible".to_string(),
+        }];
+        validate_team_messages(&mut messages, &run).unwrap();
+        assert_eq!(messages[0].to_task_ids, vec!["task-01"]);
+        append_team_messages(
+            &mut run,
+            OrchestrationAccountRole::Worker,
+            Some("task-01"),
+            messages,
+            123,
+        );
+        assert_eq!(run.team_messages.len(), 1);
+        assert_eq!(run.team_messages[0].sequence, 1);
+        assert!(team_feed(&run, Some("task-01")).contains("Contrat API disponible"));
     }
 
     #[test]
@@ -4836,6 +5117,7 @@ mod tests {
             consecutive_start_failures: 0,
             protocol_failures: 0,
             publish_applied: false,
+            team_messages: Vec::new(),
             events: Vec::new(),
         }
     }
