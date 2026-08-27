@@ -59,6 +59,9 @@ test("refreshToLatestBuild met à jour le worker puis recharge", () => {
   assert.match(refresh, /reloading = true;/);
   assert.match(refresh, /navigator\.serviceWorker\?\.getRegistration\(\)/);
   assert.match(refresh, /registration\?\.update\(\)/);
+  assert.match(refresh, /caches\.keys\(\)/);
+  assert.match(refresh, /cache\.delete\("\/"\)/);
+  assert.match(refresh, /cache\.delete\(new Request\(window\.location\.origin \+ "\/"\)\)/);
   assert.match(refresh, /window\.location\.reload\(\);/);
 });
 
