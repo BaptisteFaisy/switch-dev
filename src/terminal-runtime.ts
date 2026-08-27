@@ -16,6 +16,10 @@ export const createTerminalRuntime = (theme: ThemeMode = "dark") => {
     fontFamily: "Cascadia Mono, Consolas, monospace",
     fontSize: 13,
     lineHeight: 1.15,
+    // Vingt terminaux peuvent rester montes sans conserver 20 historiques de
+    // mille lignes. Le processus PTY reste actif ; seule la memoire d'affichage
+    // ancienne est bornee.
+    scrollback: 500,
     // Les CLI lances sur un VPS ne peuvent pas ouvrir le navigateur local.
     // Relayer leurs liens OSC 8 via la couche native permet notamment a
     // `claude auth login` d'ouvrir OAuth dans le navigateur du poste client.

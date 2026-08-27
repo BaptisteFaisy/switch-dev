@@ -9,21 +9,27 @@ pub mod chat_tools;
 #[cfg(feature = "desktop")]
 mod client_startup;
 mod creative_accounts;
+pub mod device_fleet;
 pub mod devices;
 mod discussions;
 mod doctolib_lab;
+mod duello_bank;
 mod forum;
+mod freebuff_cloud;
 mod fs_util;
 mod git_docker_environment;
 mod image_generation;
+pub mod ios_wda;
 mod kombai;
 mod metrics;
 mod microsoft;
 mod mobile_push;
+mod network_meter;
 mod orchestration;
 mod pool;
 mod private_messages;
 mod provider;
+mod resource_profile;
 mod runtime_sync;
 mod security;
 pub mod server;
@@ -31,8 +37,12 @@ mod settings;
 mod telegram_notifications;
 #[cfg(feature = "desktop")]
 mod terminal;
+mod terminal_goal;
 mod tiktok_messaging;
 mod tiktok_messaging_policy;
+mod tasks;
+mod referral;
+mod tracking;
 mod video_generation;
 mod voice;
 mod vps_deploy;
@@ -91,6 +101,7 @@ pub fn run() {
         chat_manager.runtime_sync(),
     ));
     tauri::async_runtime::spawn(tiktok_messaging::run_tiktok_connector());
+    tauri::async_runtime::spawn(device_fleet::run_device_fleet_connector());
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -151,6 +162,7 @@ pub fn run() {
             settings::pick_project_dir,
             git_docker_environment::create_git_docker_environment,
             metrics::usage_dashboard,
+            metrics::tokscale_submit_usage,
             account_usage::account_token_usage,
             work_time::work_time_dashboard,
             discussions::list_discussions,
@@ -160,7 +172,16 @@ pub fn run() {
             discussions::move_discussion,
             discussions::rename_discussion,
             discussions::export_discussion_transcript,
+            discussions::import_codex_transcript_to_freebuff,
             discussions::get_discussion_transcript,
+            freebuff_cloud::connect,
+            freebuff_cloud::disconnect,
+            freebuff_cloud::status,
+            freebuff_cloud::projects,
+            freebuff_cloud::create_blank_project,
+            freebuff_cloud::connect_repo,
+            freebuff_cloud::delete_project,
+            freebuff_cloud::connectable_repos,
             discussions::delete_discussion,
             forum::list_forum_topics,
             forum::get_forum_topic,
@@ -209,6 +230,8 @@ pub fn run() {
             creative_accounts::connect_creative_account,
             creative_accounts::delete_creative_account,
             creative_accounts::set_default_creative_account,
+            device_fleet::list_control_devices,
+            device_fleet::control_device,
             whatsapp_notifications::whatsapp_connection,
             whatsapp_notifications::connect_whatsapp,
             whatsapp_notifications::disconnect_whatsapp,

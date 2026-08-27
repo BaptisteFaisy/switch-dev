@@ -64,3 +64,7 @@ test("les fournisseurs annexes demandes sont proposes", () => {
     assert.ok(main.includes(`id: "${id}"`), `fournisseur manquant: ${id}`);
   }
 });
+
+test("Ox Alpha est propose dans les chats OpenRouter", () => {
+  assert.ok(main.includes('"openrouter/stealth/ox-alpha"'));
+});

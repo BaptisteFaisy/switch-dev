@@ -25,6 +25,7 @@ import {
   resolveExpertChatPageSize,
   shouldMinimizeActiveBusyExpertChat,
   shouldPinActiveExpertChatDuringTurn,
+  shouldPinRestoredBusyExpertChat,
 } from "../src/chat/expert.ts";
 
 const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
@@ -109,6 +110,23 @@ test("le chat actif reste epingle pendant le tour lance en mode Disponibles", ()
   assert.ok(runningTurn >= 0, "le tour optimiste doit passer en cours");
   assert.ok(pinDecision > runningTurn, "l'epingle doit etre posee apres le passage en cours");
   assert.ok(displayRefresh > pinDecision, "l'epingle doit preceder le recalcul du filtre");
+});
+
+test("un chat occupe restaure redevient visible une seule fois", () => {
+  assert.equal(shouldPinRestoredBusyExpertChat("all", false, true), false);
+  assert.equal(shouldPinRestoredBusyExpertChat("available", false, false), false);
+  assert.equal(shouldPinRestoredBusyExpertChat("available", false, true), true);
+  assert.equal(
+    shouldPinRestoredBusyExpertChat("available", true, true),
+    false,
+    "un chat deja rattache peut rester volontairement reduit",
+  );
+
+  const refreshStart = main.indexOf("const refreshActiveChatTurns = async");
+  const refreshEnd = main.indexOf("const scheduleActiveChatTurnsRefresh", refreshStart);
+  const refreshSource = main.slice(refreshStart, refreshEnd);
+  assert.match(refreshSource, /shouldPinRestoredBusyExpertChat\(/);
+  assert.match(refreshSource, /explicitlyOpenedBusyChatVisibilityPins\.add\(pane\.key\)/);
 });
 
 test("un changement de disponibilite ne vole pas le focus du chat en cours", () => {
@@ -297,8 +315,9 @@ test("l'interface permet un nombre libre et persiste le mode choisi", () => {
   );
   assert.match(
     main,
-    /responsiveExpertChatGridDimensions\(pagePanes\.length \+ wallTerminals\.length\)/,
+    /responsiveExpertChatGridDimensions\(pagePanes\.length\)/,
   );
+  assert.doesNotMatch(main, /expertChatWallTerminals|wallTerminals/);
   assert.match(
     main,
     /localStorage\.setItem\(EXPERT_CHATS_PER_PAGE_STORAGE_KEY, String\(expertChatPageSizeMode\)\)/,

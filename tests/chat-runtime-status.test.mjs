@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
+  activeChatTurnBelongsToPane,
   chatMessageHasVisibleContent,
   chatMessagesEqual,
   chatPartHasVisibleContent,
@@ -22,6 +23,85 @@ const platform = readFileSync(new URL("../src/platform.ts", import.meta.url), "u
 const style = readFileSync(new URL("../src/style.css", import.meta.url), "utf8");
 const chatBackend = readFileSync(new URL("../src-tauri/src/chat.rs", import.meta.url), "utf8");
 const server = readFileSync(new URL("../src-tauri/src/server.rs", import.meta.url), "utf8");
+
+test("un tour lance sur mobile retrouve son panneau sur un autre appareil", () => {
+  const pane = {
+    key: "chat-pane-mobile",
+    accountId: "account-1",
+    turnId: null,
+    sessionIds: ["session-1"],
+  };
+  assert.equal(
+    activeChatTurnBelongsToPane(
+      { id: 12, accountId: "account-1", sourceChatKey: "chat-pane-mobile" },
+      pane,
+    ),
+    true,
+  );
+  assert.equal(
+    activeChatTurnBelongsToPane(
+      { id: 13, accountId: "account-1", sessionId: "session-1" },
+      { ...pane, key: "chat-pane-restored" },
+    ),
+    true,
+    "la session persistee suffit apres un rechargement",
+  );
+  assert.equal(
+    activeChatTurnBelongsToPane(
+      { id: 14, accountId: "account-2", sessionId: "session-1" },
+      pane,
+    ),
+    false,
+    "deux comptes ne doivent jamais partager un panneau",
+  );
+});
+
+test("le catalogue actif materialise les chats absents de cet appareil", () => {
+  assert.match(main, /const adoptMissingActiveChatTurns = async/);
+  assert.match(main, /expertChatPanes\.push\(pane\)/);
+  assert.match(main, /await adoptMissingActiveChatTurns\(next\)/);
+  assert.match(main, /awaitingDiscussion: !!sessionId && !discussion/);
+  assert.match(main, /pane\.resumeSessionId/);
+  assert.match(main, /restoreExpertChats\(\);[\s\S]*?void refreshActiveChatTurns\(\)/);
+});
+
+test("une synchronisation initiale en panne ne supprime pas les chats locaux", () => {
+  assert.match(main, /let pendingExpertChatRecords: PersistedExpertChatPane\[\] = \[\]/);
+  assert.match(
+    main,
+    /pendingExpertChatRecords\.push\(record\);[\s\S]*?return \[\];/,
+  );
+  assert.match(
+    main,
+    /panes: \[\.\.\.expertChatPanes\.map\([\s\S]*?\.\.\.pendingExpertChatRecords\.filter/,
+  );
+  assert.match(
+    main,
+    /const newlyAttachedPanes = attachPendingExpertChatRecords\(latestDiscussions\)/,
+  );
+  assert.match(
+    main,
+    /nextRenderSignature === discussionsRenderSignature && newlyAttachedPanes\.length === 0/,
+  );
+});
+
+test("l'indexation d'un nouveau rollout ne bloque plus le suivi du chat", () => {
+  assert.match(main, /discussionAttachPromise: Promise<boolean> \| null/);
+  assert.match(main, /if \(pane\.discussionAttachPromise\) return pane\.discussionAttachPromise/);
+  const applyStart = main.indexOf("const applyExpertChatTurnSnapshot = async");
+  const applyEnd = main.indexOf("\nconst pollExpertChatTurn", applyStart);
+  const source = main.slice(applyStart, applyEnd);
+  assert.match(source, /const attachment = attachCreatedExpertChat\(pane, snapshot\.sessionId\)/);
+  assert.match(source, /if \(shouldLaunchAutomaticOrchestration\) \{[\s\S]*?attached = await attachment/);
+  assert.match(source, /else \{[\s\S]*?void attachment\.catch/);
+  assert.doesNotMatch(source, /snapshot\.sessionId\s*\?\s*await attachCreatedExpertChat/);
+});
+
+test("le rattachement d'un rollout respecte compte et noeud", () => {
+  assert.match(main, /const discussionMatchesExpertPaneSession =/);
+  assert.match(main, /discussion\.accountId !== pane\.accountId/);
+  assert.match(main, /discussionNode !== expectedNode/);
+});
 
 test("les contenus sans glyphe visible ne creent plus de bulle vide", () => {
   const invisible = " \n\t\u00a0\u200b\ufeff\u2800";
@@ -187,7 +267,7 @@ test("le badge du panneau reflete le tour serveur quand pane.turn est stale (plu
   // Le modele du panneau resout le tour serveur comme le bandeau lateral...
   assert.match(
     main,
-    /const paneServerTurn\s*=\s*activeChatTurnForDiscussion\(activeChatTurns, discussion\)\s*\?\?\s*activeChatTurnBySourceKey\(activeChatTurns, pane\)/,
+    /const paneServerTurn\s*=\s*activeChatTurnForDiscussion\(activeChatTurns, discussion\)\s*\?\?\s*activeChatTurnForPaneIdentity\(activeChatTurns, pane\)/,
   );
   assert.match(main, /serverTurnStatus: paneServerTurn\?\.status \?\? null/);
   assert.match(main, /paneLocalWaitsForUser \|\| paneServerWaitsForUser/);
@@ -288,10 +368,26 @@ test("toutes les actions consecutives sont regroupees dans une seule liste depli
     ["premiere requete", "seconde requete"],
   ]);
   assert.match(view, /data-tool-kind="activity-group"/);
+  assert.match(view, /data-chat-action-group=/);
+  assert.match(view, /renderDeferredChatActionGroup/);
+  assert.match(main, /data-chat-action-content/);
   assert.match(view, /Actions effectuées par l’IA/);
   assert.match(view, /recherche\$\{count > 1 \? "s" : ""\} web/);
   assert.match(view, /<ul class="chat-action-list">/);
   assert.match(style, /\.chat-action-list/);
+});
+
+test("les details lourds des groupes d'actions ne sont construits qu'au depliage", () => {
+  const start = view.indexOf("const renderOpenCodeActionGroup");
+  const end = view.indexOf("const renderOpenCodeAssistantMeta", start);
+  const implementation = view.slice(start, end);
+
+  assert.ok(start >= 0 && end > start);
+  assert.match(implementation, /registerDeferredChatActionGroup\(parts\)/);
+  assert.match(implementation, /data-chat-action-content/);
+  assert.doesNotMatch(implementation, /parts\.map/);
+  assert.match(main, /document\.addEventListener\("toggle"/);
+  assert.match(main, /renderDeferredChatActionGroup\(groupId\)/);
 });
 
 test("les sondages wait du meme cell_id partagent une seule carte", () => {
@@ -354,7 +450,7 @@ test("un envoi d'image dont la reponse s'est perdue ne bascule plus le chat en �
   assert.match(main, /turn\.sourceChatKey === pane\.key/);
   assert.match(
     main,
-    /activeChatTurnForDiscussion\(next, pane\.discussion\)\s*\?\?\s*activeChatTurnBySourceKey\(next, pane\)/,
+    /activeChatTurnForDiscussion\(next, pane\.discussion\)\s*\?\?\s*activeChatTurnForPaneIdentity\(next, pane\)/,
   );
 
   // 3) Le catch reconcilie au lieu de marquer « failed » sur erreur ambigue, et

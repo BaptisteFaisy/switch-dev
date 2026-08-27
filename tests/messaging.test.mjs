@@ -164,7 +164,7 @@ test("la messagerie accepte, valide, affiche et protege les images privees", () 
 });
 
 test("le temps reel prive coupe les deux polls sans retirer leur repli", () => {
-  assert.match(platform, /RuntimeSyncTopic = [^;]*"privateMessages"/);
+  assert.match(platform, /RuntimeSyncTopic =[^;]*"privateMessages"/);
   assert.match(main, /queueRuntimeSyncUpdate\("privateMessages"\)/);
   assert.match(main, /module\.refreshMessaging\(render, \{ silent: true \}\)/);
   assert.match(main, /return 8_000/);

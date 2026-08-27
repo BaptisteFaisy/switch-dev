@@ -118,7 +118,10 @@ test("le titre semantique est affiche et rafraichi dans la colonne de gauche", (
     main.indexOf("const refreshDiscussions ="),
   );
 
-  assert.match(renderer, /const title = discussion\.title\?\.trim\(\) \|\| "Conversation sans titre"/);
+  assert.match(
+    renderer,
+    /const title = discussion\.title\?\.trim\(\)[\s\S]*?\|\| discussion\.preview\?\.trim\(\)[\s\S]*?\|\| "Conversation sans titre"/,
+  );
   assert.match(renderer, /<strong>\$\{escapeHtml\(title\)\}<\/strong>/);
   assert.match(snapshot, /host\.innerHTML = renderChatSidebarConversations\(\)/);
   assert.match(main, /chatSidebarRefreshPending[\s\S]*requestAnimationFrame\(refreshChatSidebarConversations\)/);

@@ -51,6 +51,6 @@ test("un terminal reste rattache a l'environnement actif", () => {
   ]) {
     assert.ok(main.includes(marker), `parcours environnement/terminal incomplet: ${marker}`);
   }
-  assert.match(platform, /return response as T/);
+  assert.match(platform, /return value as T/);
   assert.doesNotMatch(platform, /return response\.id as T/);
 });

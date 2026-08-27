@@ -1,0 +1,735 @@
+.freebuff-cloud-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 20px;
+  max-width: 860px;
+  width: 100%;
+  margin: 0 auto;
+}
+
+.freebuff-cloud-loading,
+.freebuff-cloud-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 48px 20px;
+  text-align: center;
+  color: var(--muted);
+}
+
+.freebuff-cloud-loading > span,
+.freebuff-cloud-empty > span {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+}
+
+.freebuff-cloud-empty {
+  border: 1px dashed var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+}
+
+.freebuff-cloud-empty span svg {
+  width: 26px;
+  height: 26px;
+  color: var(--muted);
+}
+
+.freebuff-cloud-empty strong {
+  color: var(--text);
+  font-size: 15px;
+}
+
+.freebuff-cloud-empty small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.freebuff-cloud-error,
+.freebuff-cloud-form-error,
+.freebuff-cloud-session-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid color-mix(in srgb, var(--danger) 35%, var(--line));
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--danger) 6%, var(--panel));
+  color: var(--danger);
+  font-size: 13px;
+}
+
+.freebuff-cloud-error svg,
+.freebuff-cloud-form-error svg,
+.freebuff-cloud-session-error svg {
+  width: 17px;
+  height: 17px;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.freebuff-cloud-error {
+  align-items: center;
+  justify-content: space-between;
+}
+
+.freebuff-cloud-error > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+}
+
+.freebuff-cloud-error strong {
+  font-size: 13px;
+}
+
+.freebuff-cloud-error small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.freebuff-cloud-hero {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  padding: 18px 20px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+}
+
+.freebuff-cloud-hero-copy {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 1;
+  min-width: 260px;
+}
+
+.freebuff-cloud-mark {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 42px;
+  height: 42px;
+  border-radius: 12px;
+  background: var(--accent);
+  color: var(--accent-ink);
+  flex-shrink: 0;
+}
+
+.freebuff-cloud-mark svg {
+  width: 22px;
+  height: 22px;
+}
+
+.freebuff-cloud-hero h1 {
+  margin: 0;
+  font-size: 17px;
+  line-height: 1.2;
+  color: var(--text);
+}
+
+.freebuff-cloud-hero p {
+  margin: 3px 0 0;
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.freebuff-cloud-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: 600;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+
+.freebuff-cloud-pill svg {
+  width: 13px;
+  height: 13px;
+}
+
+.freebuff-cloud-pill.is-active {
+  background: color-mix(in srgb, var(--info) 12%, var(--panel));
+  color: var(--info);
+}
+
+.freebuff-cloud-pill.is-done {
+  background: color-mix(in srgb, var(--success) 12%, var(--panel));
+  color: var(--success);
+}
+
+.freebuff-cloud-pill.is-error {
+  background: color-mix(in srgb, var(--danger) 12%, var(--panel));
+  color: var(--danger);
+}
+
+.freebuff-cloud-pill.is-muted {
+  background: var(--panel-muted);
+  color: var(--muted);
+}
+
+.freebuff-cloud-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 13px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease, opacity 0.15s ease;
+  text-decoration: none;
+}
+
+.freebuff-cloud-button svg {
+  width: 15px;
+  height: 15px;
+}
+
+.freebuff-cloud-button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.freebuff-cloud-button.primary {
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+
+.freebuff-cloud-button.primary:hover:not(:disabled) {
+  filter: brightness(1.12);
+}
+
+.freebuff-cloud-button.secondary {
+  background: var(--panel);
+  border-color: var(--line);
+  color: var(--text);
+}
+
+.freebuff-cloud-button.secondary:hover:not(:disabled) {
+  border-color: var(--muted);
+}
+
+.freebuff-cloud-button.danger {
+  background: color-mix(in srgb, var(--danger) 8%, var(--panel));
+  border-color: color-mix(in srgb, var(--danger) 30%, var(--line));
+  color: var(--danger);
+}
+
+.freebuff-cloud-button.ghost {
+  background: transparent;
+  border-color: transparent;
+}
+
+.freebuff-cloud-button.danger-text {
+  color: var(--danger);
+}
+
+.freebuff-cloud-account {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+}
+
+.freebuff-cloud-avatar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 14px;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.freebuff-cloud-account > span:nth-child(2) {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+}
+
+.freebuff-cloud-account strong {
+  font-size: 13.5px;
+  color: var(--text);
+}
+
+.freebuff-cloud-account small {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.freebuff-cloud-connect {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 18px 20px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+}
+
+.freebuff-cloud-connect-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.freebuff-cloud-connect-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.freebuff-cloud-connect-icon svg {
+  width: 19px;
+  height: 19px;
+}
+
+.freebuff-cloud-connect-head > div {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.freebuff-cloud-connect-head strong {
+  font-size: 14px;
+  color: var(--text);
+}
+
+.freebuff-cloud-connect-head small {
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.freebuff-cloud-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.freebuff-cloud-steps li {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.freebuff-cloud-steps li > span {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-size: 11px;
+  font-weight: 700;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.freebuff-cloud-steps li > div {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.freebuff-cloud-steps strong {
+  font-size: 12.5px;
+  color: var(--text);
+}
+
+.freebuff-cloud-steps small {
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.4;
+}
+
+.freebuff-cloud-steps a {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+.freebuff-cloud-steps code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  background: var(--panel-muted);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+
+.freebuff-cloud-connect-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.freebuff-cloud-connect-form label,
+.freebuff-cloud-create-form label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.freebuff-cloud-connect-form textarea,
+.freebuff-cloud-create-form input,
+.freebuff-cloud-create-form select {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 9px 11px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--app-bg-soft);
+  color: var(--text);
+  font-size: 12.5px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  resize: vertical;
+}
+
+.freebuff-cloud-connect-form textarea:focus,
+.freebuff-cloud-create-form input:focus,
+.freebuff-cloud-create-form select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.freebuff-cloud-connect-actions,
+.freebuff-cloud-modal-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.freebuff-cloud-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.freebuff-cloud-toolbar-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.freebuff-cloud-toolbar-title svg {
+  width: 16px;
+  height: 16px;
+  color: var(--muted);
+}
+
+.freebuff-cloud-toolbar-title strong {
+  font-size: 14px;
+  color: var(--text);
+}
+
+.freebuff-cloud-toolbar-title small {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.freebuff-cloud-projects {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.freebuff-cloud-project {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  flex-wrap: wrap;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+}
+
+.freebuff-cloud-project-main {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 1;
+  min-width: 220px;
+}
+
+.freebuff-cloud-project-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 9px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.freebuff-cloud-project-icon svg {
+  width: 17px;
+  height: 17px;
+}
+
+.freebuff-cloud-project-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+
+.freebuff-cloud-project-copy strong {
+  font-size: 13.5px;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.freebuff-cloud-project-copy small {
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.freebuff-cloud-project-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.freebuff-cloud-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgba(10, 15, 12, 0.45);
+}
+
+.freebuff-cloud-modal {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  width: 100%;
+  max-width: 440px;
+  max-height: 85vh;
+  overflow-y: auto;
+  padding: 20px;
+  border-radius: 12px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  box-shadow: var(--eh-glow);
+}
+
+.freebuff-cloud-modal h2 {
+  margin: 0;
+  font-size: 16px;
+  color: var(--text);
+}
+
+.freebuff-cloud-mode-tabs {
+  display: flex;
+  gap: 8px;
+}
+
+.freebuff-cloud-mode-tabs button {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.freebuff-cloud-mode-tabs button svg {
+  width: 14px;
+  height: 14px;
+}
+
+.freebuff-cloud-mode-tabs button.is-active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-ink);
+}
+
+.freebuff-cloud-create-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.freebuff-cloud-hint {
+  font-size: 11.5px;
+  color: var(--muted);
+  line-height: 1.4;
+}
+
+.freebuff-cloud-session {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #0d1210;
+  color: #d8e0da;
+  overflow: hidden;
+}
+
+.freebuff-cloud-session-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 12px 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.freebuff-cloud-session-head > div {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.freebuff-cloud-session-head svg {
+  width: 15px;
+  height: 15px;
+  color: #7ee08b;
+}
+
+.freebuff-cloud-session-head strong {
+  font-size: 13px;
+}
+
+.freebuff-cloud-session-head small {
+  font-size: 11.5px;
+  color: #8a958f;
+}
+
+.freebuff-cloud-session-head .freebuff-cloud-button.secondary {
+  background: rgba(255, 255, 255, 0.07);
+  border-color: rgba(255, 255, 255, 0.12);
+  color: #d8e0da;
+}
+
+.freebuff-cloud-session-output {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px;
+  max-height: 320px;
+  overflow-y: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.freebuff-cloud-session-waiting {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #8a958f;
+}
+
+.freebuff-cloud-session-waiting svg {
+  width: 14px;
+  height: 14px;
+}
+
+.freebuff-cloud-session-line {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.freebuff-cloud-session-line.muted {
+  color: #8a958f;
+}
+
+.freebuff-cloud-session-error {
+  align-items: center;
+  border-color: rgba(232, 121, 121, 0.35);
+  background: rgba(232, 121, 121, 0.08);
+}
+
+.freebuff-cloud-session .freebuff-cloud-pill {
+  align-self: flex-start;
+  background: rgba(255, 255, 255, 0.07);
+  color: #d8e0da;
+}
+
+.freebuff-cloud-session .freebuff-cloud-button.secondary {
+  align-self: flex-start;
+  background: rgba(255, 255, 255, 0.07);
+  border-color: rgba(255, 255, 255, 0.12);
+  color: #d8e0da;
+}
+
+.freebuff-cloud-toast {
+  position: fixed;
+  bottom: 22px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 300;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-size: 12.5px;
+  font-weight: 600;
+  box-shadow: var(--eh-glow);
+}
+
+.freebuff-cloud-toast svg {
+  width: 15px;
+  height: 15px;
+}

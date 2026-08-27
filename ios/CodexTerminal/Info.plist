@@ -23,7 +23,7 @@
     <key>CFBundleVersion</key>
     <string>$(CURRENT_PROJECT_VERSION)</string>
     <key>CSTServerURL</key>
-    <string>https://cst-google-trial.tail3a8bdf.ts.net</string>
+    <string>https://azure-duello.tail3a8bdf.ts.net</string>
     <key>ITSAppUsesNonExemptEncryption</key>
     <false/>
     <key>LSRequiresIPhoneOS</key>

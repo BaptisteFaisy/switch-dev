@@ -8,7 +8,7 @@ if (-not $isAdmin) {
   throw "Lance ce script dans PowerShell en administrateur."
 }
 
-$ruleName = "Codex Switch Terminal SaaS Local 8080"
+$ruleName = "Codex Switch Terminal SaaS Local 18080"
 $existing = Get-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue
 
 if (-not $existing) {
@@ -17,8 +17,8 @@ if (-not $existing) {
     -Direction Inbound `
     -Action Allow `
     -Protocol TCP `
-    -LocalPort 8080 `
+    -LocalPort 18080 `
     -Profile Private | Out-Null
 }
 
-Write-Host "Regle pare-feu active pour le port TCP 8080." -ForegroundColor Green
+Write-Host "Regle pare-feu active pour le port TCP 18080." -ForegroundColor Green

@@ -17,11 +17,24 @@ ios/build
 ios/DerivedData
 clawsweeper
 clawsweeper-state
+# Dossiers non utilises par le build Docker (frontend = src/public/scripts,
+# serveur = src-tauri) : les exclure reduit la taille du contexte envoye au
+# daemon et donc le temps avant la premiere couche.
+android
+ios
+docs
+tests
+.freebuff
+.cst-data
 *.exe
 *.apk
 *.log
 server.local.env.ps1
 **/server.local.env.ps1
+social-analytics/social.env
+social-analytics/social-store.json
+social-gateway/gateway.env
+.env
 config/*.json
 !config/*.example.json
 !config/server-*-budget.json

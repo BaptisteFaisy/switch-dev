@@ -142,6 +142,17 @@ export type KeyboardShortcutEvent = Pick<
   | "metaKey"
 > & Partial<Pick<KeyboardEvent, "getModifierState">>;
 
+type KeyboardShortcutTarget = {
+  closest?: (selector: string) => unknown;
+};
+
+export const keyboardShortcutTargetIsTerminal = (target: unknown): boolean => {
+  if (!target || typeof target !== "object") return false;
+  const candidate = target as KeyboardShortcutTarget;
+  return typeof candidate.closest === "function"
+    && Boolean(candidate.closest(".xterm, [data-terminal-host]"));
+};
+
 export const KEYBOARD_SHORTCUT_STORAGE_KEY = "codex-switch-terminal.keyboard-shortcuts.v1";
 
 const definitionById = new Map(

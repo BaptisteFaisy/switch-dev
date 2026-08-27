@@ -33,6 +33,7 @@ export type PromptSessionHistory = {
 export type PromptHistoryPanelModel = {
   history: PromptHistoryView | null;
   loaded: boolean;
+  freebuffAccounts: Array<{ id: string; label: string }>;
   formatTimestamp: (timestamp?: number | null) => string;
   displayProjectDir: (projectDir?: string | null) => string;
 };
@@ -41,6 +42,7 @@ export type PromptHistoryPanelMountOptions = {
   getModel: () => PromptHistoryPanelModel;
   onRefresh: () => void;
   onOpenDiscussion: (accountId: string, sessionId: string) => void;
+  onImportToFreebuff: (accountId: string, sessionId: string, targetAccountId: string) => void;
   renderIcons: (root?: ParentNode) => void;
   rerender: () => void;
   root?: ParentNode;
@@ -142,6 +144,10 @@ const renderPromptSession = (
     .filter(Boolean)
     .join("");
   const title = session.sessionTitle?.trim() || session.prompts[0]?.text.trim() || "Session sans titre";
+  // Le fournisseur n'est pas toujours présent dans le libellé (ex. compte nommé
+  // « principal »). L'historique des prompts provient du catalogue Codex ;
+  // l'action doit donc rester visible dès qu'un compte Freebuff cible existe.
+  const canImport = (model.freebuffAccounts?.length ?? 0) > 0;
   const messages = session.prompts
     .map(
       (entry, index) => `
@@ -163,6 +169,9 @@ const renderPromptSession = (
         <button class="tool-button" data-prompt-discussion="${escapeHtml(session.sessionId)}" data-prompt-account="${escapeHtml(session.accountId)}" title="Voir la conversation">
           <i data-lucide="messages-square"></i><span>Conversation</span>
         </button>
+        ${canImport ? `<button class="tool-button prompt-import-button" data-prompt-import-open="${escapeHtml(session.sessionId)}" data-prompt-import-source="${escapeHtml(session.accountId)}" title="Transférer cet historique vers un compte Freebuff et reprendre la discussion dans son terminal">
+          <i data-lucide="arrow-right-left"></i><span>Vers Freebuff</span>
+        </button>` : ""}
       </div>
     </div>
   `;
@@ -216,20 +225,55 @@ export const renderPromptHistoryPanel = (
           </button>
         </div>
       </div>
-      <div class="discussion-groups" id="promptList">${renderPromptRows(model, search)}</div>
+      <div class="discussion-groups" id="promptList" data-freebuff-accounts="${escapeHtml(JSON.stringify(model.freebuffAccounts ?? []))}">${renderPromptRows(model, search)}</div>
     </section>
   `;
+};
+
+const optionsForImport = (root: ParentNode, sourceAccountId: string): Array<{ id: string; label: string }> => {
+  const raw = root.querySelector<HTMLElement>("[data-freebuff-accounts]")?.dataset.freebuffAccounts;
+  if (!raw) return [];
+  try {
+    return JSON.parse(raw).filter((account: any) => account.id && account.id !== sourceAccountId);
+  } catch {
+    return [];
+  }
 };
 
 const bindPromptRows = (
   root: ParentNode,
   onOpenDiscussion: PromptHistoryPanelMountOptions["onOpenDiscussion"],
+  onImportToFreebuff: PromptHistoryPanelMountOptions["onImportToFreebuff"],
 ): void => {
   root.querySelectorAll<HTMLButtonElement>("[data-prompt-discussion]").forEach((button) => {
     button.addEventListener("click", () => {
       const sessionId = button.dataset.promptDiscussion;
       const accountId = button.dataset.promptAccount;
       if (accountId && sessionId) onOpenDiscussion(accountId, sessionId);
+    });
+  });
+  root.querySelectorAll<HTMLButtonElement>("[data-prompt-import-open]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const sourceAccountId = button.dataset.promptImportSource;
+      const sessionId = button.dataset.promptImportOpen;
+      if (!sourceAccountId || !sessionId) return;
+      const accounts = optionsForImport(root, sourceAccountId);
+      if (accounts.length === 0) {
+        window.alert("Aucun compte Freebuff disponible. Ajoute d'abord un compte Freebuff dans Réglages.");
+        return;
+      }
+      const targetAccountId = window.prompt(
+        `Compte Freebuff cible :\\n${accounts.map((account, index) => `${index + 1}. ${account.label}`).join("\\n")}`,
+        "1",
+      );
+      if (targetAccountId === null) return;
+      const index = Number.parseInt(targetAccountId, 10) - 1;
+      const target = Number.isInteger(index) ? accounts[index] : undefined;
+      if (!target) {
+        window.alert("Sélection Freebuff invalide.");
+        return;
+      }
+      onImportToFreebuff(sourceAccountId, sessionId, target.id);
     });
   });
 };
@@ -246,7 +290,7 @@ export const mountPromptHistoryPanel = (options: PromptHistoryPanelMountOptions)
     }
     host.innerHTML = renderPromptRows(options.getModel());
     options.renderIcons(host);
-    bindPromptRows(host, options.onOpenDiscussion);
+    bindPromptRows(host, options.onOpenDiscussion, options.onImportToFreebuff);
   });
-  bindPromptRows(root, options.onOpenDiscussion);
+  bindPromptRows(root, options.onOpenDiscussion, options.onImportToFreebuff);
 };

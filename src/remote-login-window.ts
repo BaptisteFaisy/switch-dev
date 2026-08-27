@@ -1,4 +1,4 @@
-const CODEX_DEVICE_VERIFICATION_URL = "https://auth.openai.com/codex/device";
+export const CODEX_DEVICE_VERIFICATION_URL = "https://auth.openai.com/codex/device";
 const LOGIN_OUTPUT_LIMIT = 16_384;
 
 type RemoteLoginPhase = "preparing" | "ready" | "success" | "error";

@@ -1,3 +1,5 @@
+# Serveur Switch local/SSD = developpement uniquement.
+# La version stable/production est hebergee sur le VPS Microsoft Azure.
 param(
   [switch]$Build
 )
@@ -118,13 +120,13 @@ if (-not $ip) {
 # Loopback par defaut : un bind sur 0.0.0.0 declenche la fenetre "Pare-feu
 # Windows" (admin) a chaque demarrage. Pour rendre l'interface accessible depuis
 # un autre appareil du reseau (telephone/tablette), definir explicitement
-# CST_BIND=0.0.0.0:8080 (la fenetre pare-feu n'apparait alors qu'une seule fois,
+# CST_BIND=0.0.0.0:18080 (la fenetre pare-feu n'apparait alors qu'une seule fois,
 # ou lancer scripts/allow-local-server-firewall.ps1 en admin une bonne fois).
-$env:CST_BIND = if ($env:CST_BIND) { $env:CST_BIND } else { "127.0.0.1:8080" }
+$env:CST_BIND = if ($env:CST_BIND) { $env:CST_BIND } else { "127.0.0.1:18080" }
 $bindHost = ($env:CST_BIND -split ":")[0]
 $bindPort = ($env:CST_BIND -split ":")[-1]
 if (-not $bindPort) {
-  $bindPort = "8080"
+  $bindPort = "18080"
 }
 # Expose sur le LAN uniquement si le bind ecoute sur toutes les interfaces.
 $isLanBind = ($bindHost -eq "0.0.0.0" -or $bindHost -eq "::")
@@ -182,7 +184,7 @@ try {
   } else {
     Write-Host "Serveur en local uniquement (127.0.0.1) : aucune fenetre pare-feu." -ForegroundColor Green
     Write-Host "Pour l'ouvrir aux autres appareils du reseau, relance avec :" -ForegroundColor Yellow
-    Write-Host '  $env:CST_BIND = "0.0.0.0:8080"' -ForegroundColor Yellow
+    Write-Host '  $env:CST_BIND = "0.0.0.0:18080"' -ForegroundColor Yellow
   }
   Write-Host ""
 

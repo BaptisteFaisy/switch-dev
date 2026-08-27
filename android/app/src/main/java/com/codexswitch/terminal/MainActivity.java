@@ -18,12 +18,14 @@ import android.net.Uri;
 import android.net.http.SslError;
 import android.os.Bundle;
 import android.os.Environment;
+import android.os.SystemClock;
 import android.text.InputType;
 import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowInsets;
+import android.view.inputmethod.InputMethodManager;
 import android.webkit.CookieManager;
 import android.webkit.JavascriptInterface;
 import android.webkit.PermissionRequest;
@@ -48,6 +50,8 @@ import android.widget.Toast;
 
 import org.json.JSONObject;
 
+import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
 import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.List;
@@ -67,12 +71,15 @@ public class MainActivity extends Activity {
     private static final String PREFS = "cst";
     private static final String KEY_BASE = "baseUrl";
     private static final String KEY_PC_ROUTE_MIGRATED = "pcRouteMigrated20260817";
-    private static final String LEGACY_VPS_BASE_URL = "https://cst-google-trial.tail3a8bdf.ts.net";
+    private static final String KEY_AZURE_ROUTE_MIGRATED = "azureRouteMigrated20260826";
+    private static final String LEGACY_VPS_BASE_URL = "https://azure-duello.tail3a8bdf.ts.net";
+    private static final String LEGACY_PC_BASE_URL = "https://pc-fixe-cst.tail3a8bdf.ts.net";
     private static final String LEGACY_KEY_TOKEN = "token";
     private static final int REQUEST_FILE_CHOOSER = 1001;
     private static final int REQUEST_WEB_PERMISSIONS = 1002;
     private static final int REQUEST_SAVE_FILE = 1003;
     private static final int MAX_BRIDGE_FILE_BASE64_LENGTH = 32 * 1024 * 1024;
+    private static final String MOBILE_TERMINAL_HELPER_ASSET = "cst-mobile-terminal-helper.js";
 
     private FrameLayout rootView;
     private WebView webView;
@@ -91,6 +98,7 @@ public class MainActivity extends Activity {
     private String pendingPaymentAgentId;
     private String pendingPaymentId;
     private String pendingAutonomousAgentId;
+    private String mobileTerminalHelperScript;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -99,6 +107,7 @@ public class MainActivity extends Activity {
         tokenStore = new SecureTokenStore(preferences);
         migrateLegacyToken();
         migrateLegacyServerRoute();
+        migrateAzureServerRoute();
         capturePaymentHandoff(getIntent());
         captureAutonomousAgentHandoff(getIntent());
 
@@ -288,7 +297,7 @@ public class MainActivity extends Activity {
 
     /**
      * Bascule une seule fois les installations existantes de l'ancien VPS vers
-     * le serveur PC embarque. Les URL personnalisees restent intactes et
+     * la cible embarquee. Les URL personnalisees restent intactes et
      * l'utilisateur peut toujours choisir une autre cible apres cette migration.
      */
     private void migrateLegacyServerRoute() {
@@ -301,6 +310,26 @@ public class MainActivity extends Activity {
         String saved = normalizeServerUrl(preferences.getString(KEY_BASE, ""));
         String bundled = normalizeServerUrl(getString(R.string.server_url));
         if (LEGACY_VPS_BASE_URL.equals(saved) && bundled != null) {
+            editor.putString(KEY_BASE, bundled);
+        }
+        editor.apply();
+    }
+
+    /**
+     * Bascule une seule fois l'ancien routage par defaut du PC de developpement
+     * vers le VPS Azure. Une cible personnalisee reste intacte, y compris si
+     * l'utilisateur la choisit apres cette migration.
+     */
+    private void migrateAzureServerRoute() {
+        if (preferences.getBoolean(KEY_AZURE_ROUTE_MIGRATED, false)) {
+            return;
+        }
+
+        SharedPreferences.Editor editor = preferences.edit()
+                .putBoolean(KEY_AZURE_ROUTE_MIGRATED, true);
+        String saved = normalizeServerUrl(preferences.getString(KEY_BASE, ""));
+        String bundled = normalizeServerUrl(getString(R.string.server_url));
+        if (LEGACY_PC_BASE_URL.equals(saved) && bundled != null) {
             editor.putString(KEY_BASE, bundled);
         }
         editor.apply();
@@ -762,6 +791,93 @@ public class MainActivity extends Activity {
         pendingSaveMime = null;
     }
 
+    /**
+     * Injecte l'assistant mobile des terminaux (barre de touches au-dessus du
+     * clavier virtuel, focalisation du champ xterm, raccourcis). Le script est
+     * idempotent : il ne s'installe qu'une seule fois par page, y compris apres
+     * les navigations internes du SPA.
+     */
+    private void injectMobileTerminalHelper() {
+        if (webView == null) {
+            return;
+        }
+        if (mobileTerminalHelperScript == null) {
+            mobileTerminalHelperScript = readAsset(MOBILE_TERMINAL_HELPER_ASSET);
+        }
+        if (mobileTerminalHelperScript == null || mobileTerminalHelperScript.isEmpty()) {
+            return;
+        }
+        webView.evaluateJavascript(mobileTerminalHelperScript, null);
+    }
+
+    private String readAsset(String name) {
+        try (InputStream input = getAssets().open(name)) {
+            ByteArrayOutputStream output = new ByteArrayOutputStream();
+            byte[] chunk = new byte[16 * 1024];
+            int read;
+            while ((read = input.read(chunk)) != -1) {
+                output.write(chunk, 0, read);
+            }
+            return output.toString("UTF-8");
+        } catch (Exception error) {
+            return null;
+        }
+    }
+
+    /**
+     * Ouvre ou ferme le clavier virtuel depuis la page. Sur API 30+, le chemin
+     * WindowInsetsController est plus fiable que showSoftInput seul.
+     */
+    private void showSoftKeyboard(boolean show) {
+        if (webView == null) {
+            return;
+        }
+        InputMethodManager imm = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
+        if (imm == null) {
+            return;
+        }
+        if (show) {
+            imm.showSoftInput(webView, InputMethodManager.SHOW_IMPLICIT);
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+                try {
+                    Api30Insets.showIme(webView);
+                } catch (Exception ignored) {
+                }
+            }
+        } else {
+            imm.hideSoftInputFromWindow(webView.getWindowToken(), 0);
+        }
+    }
+
+    /**
+     * Colle dans l'element WebView actuellement focalise via le raccourci
+     * Android natif. Contrairement a un KeyboardEvent JavaScript synthetique,
+     * ce chemin autorise Chromium a emettre le vrai evenement paste attendu
+     * par xterm, sans exposer le contenu du presse-papiers au pont JavaScript.
+     */
+    private void pasteIntoFocusedWebContent() {
+        if (webView == null) {
+            return;
+        }
+        webView.requestFocus();
+        long now = SystemClock.uptimeMillis();
+        int metaState = KeyEvent.META_CTRL_ON | KeyEvent.META_CTRL_LEFT_ON;
+        webView.dispatchKeyEvent(new KeyEvent(
+                now,
+                now,
+                KeyEvent.ACTION_DOWN,
+                KeyEvent.KEYCODE_V,
+                0,
+                metaState));
+        webView.dispatchKeyEvent(new KeyEvent(
+                now,
+                SystemClock.uptimeMillis(),
+                KeyEvent.ACTION_UP,
+                KeyEvent.KEYCODE_V,
+                0,
+                metaState));
+    }
+
     private void handleWebPermissionRequest(PermissionRequest request) {
         runOnUiThread(() -> {
             if (!isInternalUri(request.getOrigin())) {
@@ -987,6 +1103,7 @@ public class MainActivity extends Activity {
             }
             dispatchPendingPaymentHandoff();
             dispatchPendingAutonomousAgentHandoff();
+            injectMobileTerminalHelper();
         }
 
         @Override
@@ -1130,6 +1247,21 @@ public class MainActivity extends Activity {
         }
 
         @JavascriptInterface
+        public void showKeyboard() {
+            runOnUiThread(() -> showSoftKeyboard(true));
+        }
+
+        @JavascriptInterface
+        public void hideKeyboard() {
+            runOnUiThread(() -> showSoftKeyboard(false));
+        }
+
+        @JavascriptInterface
+        public void pasteFromClipboard() {
+            runOnUiThread(MainActivity.this::pasteIntoFocusedWebContent);
+        }
+
+        @JavascriptInterface
         public boolean openExternalHttpsUrl(String rawUrl) {
             if (rawUrl == null || rawUrl.length() > 2_048) {
                 return false;
@@ -1183,6 +1315,10 @@ public class MainActivity extends Activity {
 
     @android.annotation.TargetApi(android.os.Build.VERSION_CODES.R)
     private static class Api30Insets {
+        static void showIme(View view) {
+            view.getWindowInsetsController().show(WindowInsets.Type.ime());
+        }
+
         static void apply(View view, WindowInsets insets) {
             android.graphics.Insets bars = insets.getInsets(
                     WindowInsets.Type.systemBars()

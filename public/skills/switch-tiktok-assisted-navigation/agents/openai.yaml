@@ -1,0 +1,4 @@
+interface:
+  display_name: "Navigation assistee TikTok"
+  short_description: "Piloter TikTok manuellement via Android"
+  default_prompt: "Use $switch-tiktok-assisted-navigation to assist my manual TikTok navigation on my connected Android device."

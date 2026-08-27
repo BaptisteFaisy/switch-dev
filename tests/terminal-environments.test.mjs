@@ -59,6 +59,57 @@ test("l'environnement actif contient ses propres chats", () => {
   assert.match(main, /discussion\.folderPath = capturedWorkspace/);
 });
 
+test("les terminaux ouverts apparaissent dans la sidebar de leur environnement", () => {
+  assert.match(main, /const environmentTerminals = terminalSessions\.filter/);
+  assert.match(main, /workspaceIdForPath\(path\) === environmentId/);
+  assert.match(main, /Terminaux de cet environnement/);
+  assert.match(main, /data-open-terminal=/);
+});
+
+test("la sidebar garde la corbeille et la fenetre porte seule la croix", () => {
+  assert.doesNotMatch(main, /data-hide-environment-terminal=/);
+  assert.match(main, /data-delete-terminal-history=/);
+  assert.match(main, /data-delete-terminal-history[\s\S]*?<i data-lucide="trash-2"><\/i>/);
+  assert.match(
+    main,
+    /class="expert-pane-fullscreen"[\s\S]*?<\/button>\s*<button[^>]*class="expert-pane-close"[^>]*data-close-terminal[\s\S]*?<i data-lucide="x"><\/i>/,
+  );
+  assert.match(main, /\[data-close-terminal\][\s\S]*?closeTerminalSession\(key\)/);
+  assert.match(main, /const deleteTerminalHistoryAndChat = async/);
+  assert.match(
+    main,
+    /deleteTerminalHistoryAndChat[\s\S]*?closeTerminalSession\(key\)[\s\S]*?archiveDiscussionById\([\s\S]*?true/,
+  );
+  assert.match(main, /id="terminalDeleteBackdrop"/);
+  assert.match(main, /Supprimer ce terminal et son chat \?/);
+  assert.match(style, /\.chat-side-terminal-delete/);
+  assert.doesNotMatch(style, /\.chat-side-terminal-hide/);
+  assert.match(style, /\.expert-pane-fullscreen/);
+  assert.match(style, /\.expert-pane-close/);
+  assert.match(
+    style,
+    /\.expert-terminal-pane-head\.has-new-chat\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0, 1fr\) 28px auto 28px 28px 32px;/,
+  );
+  assert.match(
+    style,
+    /\.expert-terminal-pane-head\.has-freebuff-account-switch\.has-new-chat\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0, 1fr\) minmax\(108px, 150px\) 28px auto 28px 28px 32px;/,
+  );
+});
+
+test("les terminaux restent separes des chats de l'environnement", () => {
+  assert.match(main, /const renderChatSidebarOpenTerminals =/);
+  assert.match(main, /<span>Terminaux ouverts<\/span>/);
+  assert.match(
+    main,
+    /\[data-open-terminal\][\s\S]*?activateTerminalSession\(session\);\s*activeView = "terminal";/,
+  );
+  assert.doesNotMatch(main, /expertChatWallTerminals|wallTerminals/);
+  assert.doesNotMatch(
+    main,
+    /renderExpertChatGrid[\s\S]*?pagePanes\.map\(renderExpertChatPane\)[\s\S]*?renderExpertTerminalPane/,
+  );
+});
+
 test("un nouveau chat attribue l'agent automatiquement avec un reglage facultatif", () => {
   // La fenetre garde le modele et le mode, tandis que le routage de compte est
   // automatique dans le parcours principal et facultatif dans un <details>.
@@ -224,4 +275,147 @@ test("le terminal temporaire de login reste dans le home du compte sans projet",
     server,
     /if request\.login_only \{[\s\S]*?workspace_id_for_dir\(&canonical_home\)[\s\S]*?canonical_home\.clone\(\)/,
   );
+});
+
+test("le navigateur ne relance plus les anciens terminaux absents", () => {
+  const restoreStart = main.indexOf("const restoreTerminals = async () =>");
+  const restoreEnd = main.indexOf("const readClaudeDesignSessions", restoreStart);
+  const restore = main.slice(restoreStart, restoreEnd);
+
+  assert.match(restore, /const liveRemoteKeys = new Set<string>\(\)/);
+  assert.match(restore, /await attachRestoredTerminal\(session, record\.ptyId, \{[\s\S]*?nodeId: record\.nodeId[\s\S]*?remoteId: record\.remoteId/);
+  assert.match(restore, /const staleSessions = restored\.filter/);
+  assert.match(restore, /session\.terminal\.dispose\(\)/);
+  assert.match(restore, /const restartable = isRemoteMode\(\) \? \[\] : restored/);
+  assert.doesNotMatch(
+    restore,
+    /const restartable = isRemoteMode\(\) \? restored/,
+  );
+});
+
+test("les terminaux actifs sont adoptes entre mobile et PC", () => {
+  assert.match(server, /\.route\("\/terminals\/active", get\(api_list_active_terminals\)\)/);
+  assert.match(server, /fn active_for_actor[\s\S]*?!session\.login_only[\s\S]*?session\.owner_id == actor\.owner_id\(\)/);
+  assert.match(server, /source_terminal_key: Option<String>/);
+  assert.match(platform, /case "list_active_terminals":[\s\S]*?listRemoteActiveTerminals/);
+  assert.match(platform, /"\/api\/terminals\/active"/);
+  assert.match(platform, /status === 404 \|\| status === 405/);
+  assert.match(platform, /"\/legacy-active-terminals\.json"/);
+  assert.match(platform, /compatibilityFallback: true/);
+  assert.match(main, /const refreshActiveTerminals = async \(forceReattach = false\): Promise<boolean>/);
+  assert.match(main, /await ensureTerminalsRestored\(\)[\s\S]*?await attachRestoredTerminal\(session, ptyId\)/);
+  assert.match(main, /compatibilityFallback \? selectedAccount\(\)/);
+  assert.match(main, /Terminal existant #\$\{String\(ptyId\)\.slice\(-6\)\}/);
+  assert.match(main, /sourceTerminalKey: session\.key/);
+});
+
+test("l'arret Freebuff distant termine tout l'arbre de processus", () => {
+  assert.match(server, /fn terminate_remote_terminal_process_tree[\s\S]*?taskkill\.exe[\s\S]*?\/T[\s\S]*?\/F/);
+  const stopStart = server.indexOf("fn stop_for_actor");
+  const stopEnd = server.indexOf("fn get(&self", stopStart);
+  const stop = server.slice(stopStart, stopEnd);
+  assert.match(stop, /terminate_remote_terminal_process_tree\(/);
+  assert.doesNotMatch(stop, /\.child[\s\S]*?\.kill\(\)/);
+  assert.match(server, /fn abort_started_session[\s\S]*?terminate_remote_terminal_process_tree/);
+  assert.match(
+    server,
+    /async fn api_stop_terminal[\s\S]*?terminals\.stop_for_actor\(id, &actor\)/,
+  );
+  assert.match(server, /socket_generation: AtomicU64/);
+  assert.match(server, /session\.socket_generation\.load\(Ordering::Acquire\) == socket_generation/);
+});
+
+test("le transport terminal gere les trames invalides et les suppressions idempotentes", () => {
+  assert.match(platform, /let message: RemoteWsMessage/);
+  assert.match(platform, /Message WebSocket terminal invalide/);
+  assert.match(platform, /hasCamelCaseWorkspace/);
+  assert.match(platform, /hasSnakeCaseWorkspace/);
+  assert.match(platform, /hasCamelCaseWorkspace \|\| hasSnakeCaseWorkspace/);
+  assert.match(server, /#\[serde\(rename = "workspaceId"\)\][\s\S]*?workspace_id: String/);
+  assert.match(server, /#\[serde\(rename = "workspacePath"\)\][\s\S]*?workspace_path: String/);
+  assert.match(platform, /for \(let attempt = 0; attempt < 3; attempt \+= 1\)/);
+  assert.match(platform, /httpStatus === 404/);
+  assert.match(platform, /remoteTerminalPendingWrites\.delete\(id\)/);
+  assert.match(platform, /function isRemoteWsMessage\(value: unknown\)/);
+  assert.match(platform, /terminalId: remoteTerminalServerId\(Number\(args\.terminalId\)\)/);
+  assert.match(platform, /Ne jamais rejouer ni router vers un autre noeud un POST/);
+});
+
+test("les IDs de terminaux restent uniques quand plusieurs noeuds repartent de 1", () => {
+  assert.match(platform, /remoteTerminalLocalIds/);
+  assert.match(platform, /nextRemoteTerminalVirtualId/);
+  assert.match(platform, /registerRemoteTerminalId\(localId, result\.route\)/);
+  assert.match(platform, /remoteTerminalServerId\(id\)/);
+  assert.match(platform, /const virtualId = registerRemoteTerminalId\(response\.id, route\)/);
+});
+
+test("une coupure de transport ne ferme jamais un PTY encore vivant", () => {
+  const reconnectStart = platform.indexOf("function scheduleRemoteTerminalReconnect");
+  const reconnectEnd = platform.indexOf("function emitTerminalTransportError", reconnectStart);
+  const reconnect = platform.slice(reconnectStart, reconnectEnd);
+  assert.match(reconnect, /terminalReconnectPlan/);
+  assert.match(reconnect, /openTerminalSocket/);
+  assert.doesNotMatch(reconnect, /emit\("pty-exit"/);
+  assert.doesNotMatch(reconnect, /remoteTerminalRoutes\.delete/);
+  assert.doesNotMatch(reconnect, /remotePendingTerminalInput\.clear/);
+
+  const socketStart = platform.indexOf("function openTerminalSocket");
+  const socketEnd = platform.indexOf("function writeRemoteTerminal", socketStart);
+  const socket = platform.slice(socketStart, socketEnd);
+  assert.match(socket, /message\.type === "exit"[\s\S]*?emit\("pty-exit"/);
+
+  const writeStart = platform.indexOf("function writeRemoteTerminal");
+  const writeEnd = platform.indexOf("function resizeRemoteTerminal", writeStart);
+  const write = platform.slice(writeStart, writeEnd);
+  assert.match(write, /session terminal introuvable[\s\S]*?emit\("pty-exit"/i);
+});
+
+test("revenir sur Freebuff rattache le transport et restaure le clavier", () => {
+  const viewStart = main.indexOf("const setActiveView = (view: AppView)");
+  const viewEnd = main.indexOf("const openDiscussionHistory", viewStart);
+  const view = main.slice(viewStart, viewEnd);
+  assert.match(
+    view,
+    /activeView === "terminal"[\s\S]*?requestTerminalFocusKey = activeTerminalKey;[\s\S]*?render\(\);[\s\S]*?recoverActiveTerminalInput\(\)/,
+  );
+
+  const refreshStart = main.indexOf("const refreshActiveTerminals = async");
+  const refreshEnd = main.indexOf("const readClaudeDesignSessions", refreshStart);
+  const refresh = main.slice(refreshStart, refreshEnd);
+  assert.match(refresh, /activeTerminalsForceReattachRequested \|\|= forceReattach/);
+  assert.match(
+    refresh,
+    /forceReattach && session\.key === activeTerminalKey[\s\S]*?attachRestoredTerminal\(session, ptyId\)/,
+  );
+  assert.match(
+    refresh,
+    /recoverActiveTerminalInput[\s\S]*?refreshActiveTerminals\(true\)[\s\S]*?terminal\.focus\(\)/,
+  );
+
+  const createStart = main.indexOf("const createTerminalSession = async");
+  const mountStart = main.indexOf("const mountExpertTerminals", createStart);
+  const create = main.slice(createStart, mountStart);
+  const mountEnd = main.indexOf("const createNewTerminalOnce", mountStart);
+  const mount = main.slice(mountStart, mountEnd);
+  assert.doesNotMatch(create, /terminal\.element\?\.addEventListener/);
+  assert.match(
+    mount,
+    /terminal\.open\(host\)[\s\S]*?addEventListener\("pointerdown", restorePointerFocus, true\)/,
+  );
+  assert.match(mount, /addEventListener\("pointerup"[\s\S]*?requestAnimationFrame/);
+  assert.match(
+    mount,
+    /querySelector<HTMLTextAreaElement>\("\.xterm-helper-textarea"\)[\s\S]*?focus\(\{ preventScroll: true \}\)/,
+  );
+  assert.match(
+    mount,
+    /addEventListener\("keydown"[\s\S]*?event\.key !== "Enter"[\s\S]*?\.xterm-helper-textarea[\s\S]*?restorePointerFocusAfterPaint\(\)/,
+  );
+  assert.match(mount, /activeModalDialog\(\)[\s\S]*?requestTerminalFocusKey/);
+
+  const eventsStart = main.indexOf("const setupEvents = async");
+  const events = main.slice(eventsStart);
+  assert.match(events, /visibilitychange[\s\S]*?recoverActiveTerminalInput/);
+  assert.match(events, /addEventListener\("pageshow", recoverTerminalOnPageReturn\)/);
+  assert.match(events, /addEventListener\("online", recoverTerminalOnPageReturn\)/);
 });

@@ -101,7 +101,7 @@ test("le retry Oracle est borne, exclusif et conserve le mode sans seed", () => 
   assert.match(retryProvisioner, /if \(-not \$IncludeAccountSeed\).*SkipAccountSeed/);
   assert.match(retryProvisioner, /Ocpus = 2; MemoryGB = 12; Capacity = 2/);
   assert.match(retryProvisioner, /Ocpus = 1\s+MemoryGB = 6\s+Capacity = 1/);
-  assert.match(retryProvisioner, /--ocpus \(\[string\]\$capacityProfile\.Ocpus\)/);
+  assert.match(retryProvisioner, /"--ocpus", \[string\]\$capacityProfile\.Ocpus,/);
   assert.match(retryProvisioner, /Ocpus = \[int\]\$availableProfile\.Ocpus/);
   assert.match(retryProvisioner, /\[switch\]\$ForceLaunch/);
   assert.match(retryProvisioner, /\[switch\]\$FullSizeOnly/);

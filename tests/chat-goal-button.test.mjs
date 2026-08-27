@@ -14,14 +14,22 @@ test("le bouton Goal est rendu par le composant partage desktop et web", () => {
   assert.match(view, /class="chat-goal"/);
   assert.match(view, /data-lucide="target"/);
   assert.match(view, /model\.supportsGoals/);
-  assert.equal((main.match(/supportsGoals: provider === "codex"/g) ?? []).length, 2);
+  assert.match(
+    main,
+    /const providerSupportsGoals = \(provider: Provider\): boolean =>[\s\S]{0,100}provider === "codex" \|\| provider === "claude" \|\| provider === "opencode"/,
+  );
+  assert.equal((main.match(/supportsGoals: providerSupportsGoals\(provider\)/g) ?? []).length, 2);
+  assert.equal(
+    (main.match(/intent === "goal" && !providerSupportsGoals\(accountProvider\(account\)\)/g) ?? []).length,
+    2,
+  );
 });
 
 test("le clic transforme explicitement le brouillon en creation de goal", () => {
   assert.equal(createGoalPrompt("   "), "");
   assert.equal(
     createGoalPrompt("  Livrer la version web  "),
-    "Crée un goal avec l'outil create_goal pour l'objectif suivant, puis commence à le poursuivre :\n\nLivrer la version web",
+    "Crée un goal avec l'outil create_goal pour l'objectif suivant, puis commence à le poursuivre. Si le fournisseur préfixe les outils MCP, utilise son nom exposé correspondant (par exemple cst_chat_create_goal avec OpenCode) :\n\nLivrer la version web",
   );
   assert.match(main, /sendChatMessage\("goal"\)/);
   assert.match(main, /sendExpertChatMessage\(pane, root, undefined, "goal"\)/);

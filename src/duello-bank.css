@@ -1,0 +1,707 @@
+.duello-bank-dashboard {
+  --duello-bank-surface: var(--panel, #0b0b0b);
+  --duello-bank-surface-muted: var(--panel-muted, #151515);
+  --duello-bank-border: var(--line, #2b2b2b);
+  --duello-bank-border-soft: var(--line-soft, #1c1c1c);
+  display: grid;
+  grid-auto-rows: max-content;
+  align-content: start;
+  gap: 16px;
+  min-width: 0;
+  padding: clamp(16px, 2.4vw, 30px);
+  color: var(--text, #fff);
+  background: transparent;
+  font-family: var(--font-body, Inter, sans-serif);
+}
+
+.duello-bank-dashboard button,
+.duello-bank-dashboard input,
+.duello-bank-dashboard select {
+  font-family: inherit;
+}
+
+.duello-bank-dashboard button:focus-visible,
+.duello-bank-dashboard a:focus-visible,
+.duello-bank-dashboard input:focus-visible,
+.duello-bank-dashboard select:focus-visible {
+  outline: 2px solid var(--accent, #fff);
+  outline-offset: 3px;
+}
+
+.duello-bank-hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 24px;
+  padding: 2px 2px 20px;
+  border-bottom: 1px solid var(--duello-bank-border);
+}
+
+.duello-bank-eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--muted, #999);
+  font: 650 10px var(--font-head, Inter, sans-serif);
+  letter-spacing: .13em;
+  text-transform: uppercase;
+}
+
+.duello-bank-eyebrow svg { width: 13px; height: 13px; color: var(--accent, #fff); }
+.duello-bank-hero h1 {
+  margin: 9px 0 6px;
+  color: var(--text, #fff);
+  font: 650 clamp(27px, 3vw, 38px)/1.05 var(--font-head, Inter, sans-serif);
+  letter-spacing: -.025em;
+}
+.duello-bank-hero p {
+  max-width: 740px;
+  margin: 0;
+  color: var(--muted-2, #8a8a8a);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.duello-bank-hero-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.duello-bank-button {
+  display: inline-flex;
+  min-height: 40px;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 0 15px;
+  border: 1px solid var(--duello-bank-border);
+  border-radius: 999px;
+  color: var(--text, #fff);
+  background: var(--duello-bank-surface);
+  cursor: pointer;
+  font: 650 10px var(--font-head, Inter, sans-serif);
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.duello-bank-button svg { width: 14px; height: 14px; }
+.duello-bank-button:hover:not(:disabled):not(.is-disabled) {
+  border-color: color-mix(in srgb, var(--accent, #fff) 62%, var(--duello-bank-border));
+  background: var(--duello-bank-surface-muted);
+}
+.duello-bank-button.primary {
+  border-color: var(--accent, #fff);
+  color: var(--accent-ink, #fff);
+  background: var(--accent, #20211f);
+}
+.duello-bank-button.primary:hover:not(:disabled) { filter: brightness(1.12); }
+.duello-bank-button:disabled,
+.duello-bank-button.is-disabled {
+  cursor: not-allowed;
+  opacity: .45;
+}
+
+.duello-bank-alert {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--duello-bank-border);
+  border-radius: 11px;
+  color: var(--text, #fff);
+  background: var(--duello-bank-surface);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.duello-bank-alert > svg { width: 16px; height: 16px; flex: 0 0 auto; }
+.duello-bank-alert > span { display: grid; gap: 2px; }
+.duello-bank-alert strong { font: 650 11px var(--font-head, Inter, sans-serif); }
+.duello-bank-alert small { color: var(--muted, #888); font-size: 10px; }
+.duello-bank-alert button {
+  margin-left: auto;
+  padding: 5px;
+  border: 0;
+  color: var(--text, #fff);
+  background: transparent;
+  cursor: pointer;
+  font: 650 9px var(--font-head, Inter, sans-serif);
+  text-transform: uppercase;
+}
+.duello-bank-alert.is-error {
+  border-color: color-mix(in srgb, var(--danger, #c35d55) 45%, var(--duello-bank-border));
+  background: color-mix(in srgb, var(--danger, #c35d55) 8%, var(--duello-bank-surface));
+}
+.duello-bank-alert.is-unconfigured {
+  border-color: color-mix(in srgb, var(--warning, #9a7a2d) 42%, var(--duello-bank-border));
+  background: color-mix(in srgb, var(--warning, #9a7a2d) 7%, var(--duello-bank-surface));
+}
+
+.duello-bank-flows {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.duello-bank-flow {
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  gap: 16px;
+  min-width: 0;
+  min-height: 222px;
+  padding: 19px;
+  border: 1px solid var(--duello-bank-border);
+  border-radius: 13px;
+  background: var(--duello-bank-surface);
+}
+
+.duello-bank-flow.is-stripe {
+  background:
+    linear-gradient(135deg, color-mix(in srgb, #635bff 8%, transparent), transparent 52%),
+    var(--duello-bank-surface);
+}
+
+.duello-bank-flow-step {
+  color: var(--muted, #858585);
+  font: 650 9px var(--font-head, Inter, sans-serif);
+  letter-spacing: .11em;
+  text-transform: uppercase;
+}
+
+.duello-bank-flow-heading {
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr);
+  align-items: start;
+  gap: 12px;
+}
+.duello-bank-flow-heading > span {
+  display: grid;
+  width: 38px;
+  height: 38px;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--accent, #fff) 18%, var(--duello-bank-border));
+  border-radius: 50%;
+  color: var(--accent, #fff);
+  background: var(--accent-soft, rgba(255, 255, 255, .05));
+}
+.duello-bank-flow-heading svg { width: 16px; height: 16px; }
+.duello-bank-flow h2 {
+  margin: 1px 0 7px;
+  color: var(--text, #fff);
+  font: 650 17px/1.2 var(--font-head, Inter, sans-serif);
+}
+.duello-bank-flow p {
+  margin: 0;
+  color: var(--muted-2, #8a8a8a);
+  font-size: 10px;
+  line-height: 1.6;
+}
+.duello-bank-flow p strong { color: var(--text, #fff); font-weight: 600; }
+
+.duello-bank-flow-action {
+  display: flex;
+  min-height: 40px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 9px;
+  padding: 0 13px;
+  border: 1px solid var(--duello-bank-border);
+  border-radius: 10px;
+  color: var(--text, #fff);
+  background: var(--duello-bank-surface-muted);
+  cursor: pointer;
+  font: 650 10px var(--font-head, Inter, sans-serif);
+  text-decoration: none;
+}
+.duello-bank-flow-action svg { width: 14px; height: 14px; }
+.duello-bank-flow-action:hover:not(:disabled):not(.is-disabled) {
+  border-color: var(--accent, #fff);
+  color: var(--accent-ink, #fff);
+  background: var(--accent, #20211f);
+}
+.duello-bank-flow-action:disabled,
+.duello-bank-flow-action.is-disabled { cursor: not-allowed; opacity: .45; }
+
+.duello-bank-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+.duello-bank-metrics article {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  gap: 12px;
+  min-height: 112px;
+  padding: 17px;
+  border: 1px solid var(--duello-bank-border);
+  border-radius: 12px;
+  background: var(--duello-bank-surface);
+}
+.duello-bank-metrics article > span {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--text, #fff) 13%, transparent);
+  border-radius: 50%;
+  color: var(--text, #fff);
+  background: color-mix(in srgb, var(--text, #fff) 4%, transparent);
+}
+.duello-bank-metrics svg { width: 14px; height: 14px; }
+.duello-bank-metrics article > div { display: grid; align-content: start; gap: 4px; min-width: 0; }
+.duello-bank-metrics small {
+  color: var(--muted, #818181);
+  font: 600 9px var(--font-head, Inter, sans-serif);
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+.duello-bank-metrics strong {
+  overflow: hidden;
+  color: var(--text, #fff);
+  font: 660 clamp(23px, 2.4vw, 31px)/1.08 var(--font-head, Inter, sans-serif);
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.duello-bank-metrics em { color: var(--muted-2, #707070); font: 9px var(--font-body, Inter, sans-serif); }
+
+.duello-bank-table-card {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--duello-bank-border);
+  border-radius: 12px;
+  background: var(--duello-bank-surface);
+}
+.duello-bank-table-card > header {
+  display: flex;
+  min-height: 62px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 17px;
+  border-bottom: 1px solid var(--duello-bank-border);
+}
+.duello-bank-table-card > header > div { display: grid; gap: 3px; }
+.duello-bank-table-card > header span {
+  color: var(--muted-2, #6f6f6f);
+  font: 650 9px var(--font-head, Inter, sans-serif);
+  letter-spacing: .12em;
+  text-transform: uppercase;
+}
+.duello-bank-table-card > header strong { color: var(--text, #fff); font: 650 14px var(--font-head, Inter, sans-serif); }
+.duello-bank-table-card > header button {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  border: 1px solid var(--duello-bank-border);
+  border-radius: 9px;
+  color: var(--muted, #999);
+  background: var(--duello-bank-surface);
+  cursor: pointer;
+}
+.duello-bank-table-card > header button:hover { color: var(--accent-ink, #fff); border-color: var(--accent, #fff); background: var(--accent, #20211f); }
+.duello-bank-table-card > header svg { width: 14px; height: 14px; }
+.duello-bank-table-wrap { overflow-x: auto; }
+.duello-bank-table-card table { width: 100%; min-width: 800px; border-collapse: collapse; }
+.duello-bank-table-card th {
+  padding: 11px 12px;
+  border-bottom: 1px solid var(--duello-bank-border);
+  color: var(--muted-2, #6f6f6f);
+  font: 650 8px var(--font-head, Inter, sans-serif);
+  letter-spacing: .1em;
+  text-align: left;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.duello-bank-table-card th:last-child { text-align: right; }
+.duello-bank-table-card td {
+  padding: 12px;
+  border-bottom: 1px solid var(--duello-bank-border-soft);
+  color: var(--text, #d6d6d6);
+  font-size: 10px;
+  vertical-align: middle;
+}
+.duello-bank-table-card tbody tr:last-child td { border-bottom: 0; }
+.duello-bank-table-card tbody tr:hover { background: color-mix(in srgb, var(--text, #fff) 2.5%, transparent); }
+.duello-bank-table-card td > strong { display: block; font: 650 11px var(--font-head, Inter, sans-serif); }
+.duello-bank-table-card td > small { display: block; margin-top: 4px; color: var(--muted-2, #707070); font-size: 8px; }
+.duello-bank-money { font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+.duello-bank-member { display: flex; min-width: 180px; align-items: center; gap: 9px; }
+.duello-bank-member > span:last-child { display: grid; min-width: 0; gap: 3px; }
+.duello-bank-member strong { color: var(--text, #fff); font: 650 10px var(--font-head, Inter, sans-serif); }
+.duello-bank-member small {
+  max-width: 210px;
+  overflow: hidden;
+  color: var(--muted-2, #707070);
+  font-size: 8px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.duello-bank-avatar {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid var(--duello-bank-border);
+  border-radius: 50%;
+  color: var(--text, #fff);
+  background: var(--duello-bank-surface-muted);
+  font: 700 9px var(--font-head, Inter, sans-serif);
+}
+
+.duello-bank-status { display: inline-flex; align-items: center; gap: 7px; }
+.duello-bank-status > svg { width: 14px; height: 14px; flex: 0 0 auto; color: var(--muted, #888); }
+.duello-bank-status > span { display: grid; gap: 3px; }
+.duello-bank-status strong { font: 650 9px var(--font-head, Inter, sans-serif); }
+.duello-bank-status small { color: var(--muted-2, #707070); font-size: 8px; }
+.duello-bank-status.is-ready > svg { color: var(--success, #56b870); }
+.duello-bank-status.is-pending > svg { color: var(--warning, #9a7a2d); }
+.duello-bank-status.is-blocked > svg { color: var(--danger, #c35d55); }
+
+.duello-bank-row-button {
+  display: inline-flex;
+  min-height: 31px;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  float: right;
+  padding: 0 10px;
+  border: 1px solid var(--duello-bank-border);
+  border-radius: 9px;
+  color: var(--text, #fff);
+  background: var(--duello-bank-surface-muted);
+  cursor: pointer;
+  font: 650 9px var(--font-head, Inter, sans-serif);
+}
+.duello-bank-row-button svg { width: 12px; height: 12px; }
+.duello-bank-row-button:hover:not(:disabled) { color: var(--accent-ink, #fff); border-color: var(--accent, #fff); background: var(--accent, #20211f); }
+.duello-bank-row-button:disabled { cursor: not-allowed; opacity: .4; }
+
+.duello-bank-empty {
+  display: grid;
+  min-height: 210px;
+  place-items: center;
+  align-content: center;
+  gap: 7px;
+  color: var(--muted-2, #777);
+  text-align: center;
+}
+.duello-bank-empty > span {
+  display: grid;
+  width: 42px;
+  height: 42px;
+  margin-bottom: 3px;
+  place-items: center;
+  border: 1px solid var(--duello-bank-border);
+  border-radius: 50%;
+  color: var(--text, #fff);
+  background: var(--duello-bank-surface-muted);
+}
+.duello-bank-empty svg { width: 17px; height: 17px; }
+.duello-bank-empty strong { color: var(--text, #fff); font: 650 12px var(--font-head, Inter, sans-serif); text-transform: uppercase; }
+.duello-bank-empty small { font-size: 10px; }
+
+.duello-bank-footnote {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0;
+  padding: 2px 3px;
+  color: var(--muted-2, #777);
+  font-size: 9px;
+  line-height: 1.55;
+}
+.duello-bank-footnote svg { width: 13px; height: 13px; flex: 0 0 auto; margin-top: 1px; }
+
+.duello-bank-modal-backdrop {
+  position: fixed;
+  z-index: 90;
+  inset: 0;
+  display: grid;
+  padding: 20px;
+  place-items: center;
+  background: rgba(0, 0, 0, .78);
+  backdrop-filter: blur(8px);
+}
+.duello-bank-modal {
+  position: relative;
+  width: min(100%, 520px);
+  max-height: calc(100dvh - 40px);
+  padding: 28px;
+  overflow-y: auto;
+  border: 1px solid var(--duello-bank-border);
+  border-radius: 16px;
+  color: var(--text, #fff);
+  background: var(--app-bg-soft, #0b0b0b);
+  box-shadow: 0 24px 80px rgba(0, 0, 0, .58);
+}
+.duello-bank-modal h2 {
+  margin: 12px 0 0;
+  color: var(--text, #fff);
+  font: 660 22px/1 var(--font-head, Inter, sans-serif);
+  text-transform: uppercase;
+}
+.duello-bank-modal > p {
+  margin: 10px 0 22px;
+  color: var(--muted, #858585);
+  font-size: 10px;
+  line-height: 1.6;
+}
+.duello-bank-modal > p strong { color: var(--text, #fff); }
+.duello-bank-modal-close {
+  position: absolute;
+  top: 14px;
+  right: 15px;
+  display: grid;
+  width: 31px;
+  height: 31px;
+  place-items: center;
+  border: 1px solid var(--duello-bank-border);
+  border-radius: 50%;
+  color: var(--muted, #aaa);
+  background: var(--duello-bank-surface);
+  cursor: pointer;
+}
+.duello-bank-modal-close:hover:not(:disabled) { color: var(--accent-ink, #fff); background: var(--accent, #20211f); }
+.duello-bank-modal-close:disabled { cursor: wait; opacity: .45; }
+.duello-bank-modal-close svg { width: 14px; height: 14px; }
+.duello-bank-modal form { display: grid; gap: 14px; }
+.duello-bank-modal form > label:not(.duello-bank-confirmation) {
+  display: grid;
+  gap: 7px;
+  color: var(--muted, #aaa);
+  font: 650 8px var(--font-head, Inter, sans-serif);
+  letter-spacing: .09em;
+  text-transform: uppercase;
+}
+.duello-bank-modal form > label small {
+  color: var(--muted-2, #777);
+  font: 8px/1.45 var(--font-body, Inter, sans-serif);
+  letter-spacing: 0;
+  text-transform: none;
+}
+.duello-bank-modal input[type="text"],
+.duello-bank-modal select {
+  width: 100%;
+  height: 43px;
+  min-width: 0;
+  padding: 0 12px;
+  border: 1px solid var(--duello-bank-border);
+  border-radius: 10px;
+  outline: none;
+  color: var(--text, #fff);
+  background: var(--app-bg, #050505);
+  font: 11px var(--font-body, Inter, sans-serif);
+  letter-spacing: 0;
+  text-transform: none;
+}
+.duello-bank-modal input[type="text"]:focus,
+.duello-bank-modal select:focus {
+  border-color: var(--accent, #fff);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent, #fff) 8%, transparent);
+}
+.duello-bank-modal input:disabled,
+.duello-bank-modal select:disabled { cursor: wait; opacity: .65; }
+.duello-bank-amount-field { position: relative; display: block; }
+.duello-bank-amount-field input { padding-right: 38px !important; font-variant-numeric: tabular-nums !important; }
+.duello-bank-amount-field b {
+  position: absolute;
+  top: 50%;
+  right: 13px;
+  color: var(--muted, #888);
+  font: 650 12px var(--font-head, Inter, sans-serif);
+  transform: translateY(-50%);
+}
+.duello-bank-current-balance {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--duello-bank-border-soft);
+  border-radius: 10px;
+  background: var(--duello-bank-surface-muted);
+}
+.duello-bank-current-balance span { color: var(--muted, #888); font-size: 9px; }
+.duello-bank-current-balance strong { font: 650 13px var(--font-head, Inter, sans-serif); font-variant-numeric: tabular-nums; }
+
+.duello-bank-confirmation {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: start;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--duello-bank-border);
+  border-radius: 10px;
+  background: var(--duello-bank-surface-muted);
+  cursor: pointer;
+}
+.duello-bank-confirmation > input {
+  width: 16px;
+  height: 16px;
+  margin: 1px 0 0;
+  accent-color: var(--accent, #fff);
+}
+.duello-bank-confirmation > span { display: grid; gap: 4px; }
+.duello-bank-confirmation strong { color: var(--text, #fff); font: 650 10px/1.35 var(--font-head, Inter, sans-serif); }
+.duello-bank-confirmation small { color: var(--muted, #888); font-size: 9px; line-height: 1.5; }
+
+.duello-bank-reference {
+  display: grid;
+  gap: 5px;
+  padding: 10px 12px;
+  border: 1px solid var(--duello-bank-border-soft);
+  border-radius: 10px;
+  background: var(--duello-bank-surface-muted);
+}
+.duello-bank-reference span { color: var(--muted, #888); font-size: 8px; }
+.duello-bank-reference code {
+  overflow-wrap: anywhere;
+  color: var(--text, #fff);
+  font: 9px var(--font-mono, monospace);
+}
+.duello-bank-form-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 11px;
+  border: 1px solid color-mix(in srgb, var(--danger, #c35d55) 45%, var(--duello-bank-border));
+  border-radius: 10px;
+  color: var(--text, #fff);
+  background: color-mix(in srgb, var(--danger, #c35d55) 8%, var(--duello-bank-surface));
+  font-size: 9px;
+  line-height: 1.5;
+}
+.duello-bank-form-error svg { width: 14px; height: 14px; flex: 0 0 auto; }
+.duello-bank-modal-actions { display: flex; justify-content: flex-end; gap: 8px; padding-top: 2px; }
+
+.duello-bank-toast {
+  position: fixed;
+  z-index: 100;
+  right: 24px;
+  bottom: 24px;
+  display: flex;
+  max-width: min(460px, calc(100vw - 48px));
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px;
+  border: 1px solid var(--accent, #fff);
+  border-radius: 999px;
+  color: var(--accent-ink, #fff);
+  background: var(--accent, #20211f);
+  box-shadow: 0 14px 45px rgba(0, 0, 0, .3);
+  font: 650 9px/1.4 var(--font-head, Inter, sans-serif);
+}
+.duello-bank-toast svg { width: 14px; height: 14px; flex: 0 0 auto; }
+
+.duello-bank-state {
+  min-height: 420px;
+  place-items: center;
+  align-content: center;
+  gap: 7px;
+  color: var(--muted, #777);
+  text-align: center;
+}
+.duello-bank-state-icon {
+  display: grid;
+  width: 48px;
+  height: 48px;
+  margin-bottom: 5px;
+  place-items: center;
+  border: 1px solid var(--duello-bank-border);
+  border-radius: 50%;
+  color: var(--text, #fff);
+  background: var(--duello-bank-surface);
+}
+.duello-bank-state-icon svg { width: 19px; height: 19px; }
+.duello-bank-state[aria-busy="true"] .duello-bank-state-icon svg { animation: duello-bank-spin 1s linear infinite; }
+.duello-bank-state strong { color: var(--text, #fff); font: 650 15px var(--font-head, Inter, sans-serif); }
+.duello-bank-state small { max-width: 430px; font-size: 10px; line-height: 1.5; }
+.duello-bank-state .duello-bank-button { margin-top: 9px; }
+.is-spinning { animation: duello-bank-spin 1s linear infinite; }
+@keyframes duello-bank-spin { to { transform: rotate(360deg); } }
+
+.duello-bank-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+@media (max-width: 900px) {
+  .duello-bank-flows { grid-template-columns: minmax(0, 1fr); }
+  .duello-bank-flow { min-height: 190px; }
+}
+
+@media (max-width: 720px) {
+  .duello-bank-dashboard { padding: 14px 10px 82px; }
+  .duello-bank-hero { grid-template-columns: minmax(0, 1fr); align-items: start; gap: 16px; }
+  .duello-bank-hero-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); justify-content: stretch; }
+  .duello-bank-hero-actions .duello-bank-button { min-width: 0; padding-inline: 10px; }
+  .duello-bank-metrics { grid-template-columns: minmax(0, 1fr); }
+  .duello-bank-metrics article { min-height: 101px; }
+  .duello-bank-table-card > header { padding-inline: 12px; }
+  .duello-bank-table-wrap { overflow: visible; }
+  .duello-bank-table-card table { min-width: 0; }
+  .duello-bank-table-card thead { display: none; }
+  .duello-bank-table-card table,
+  .duello-bank-table-card tbody,
+  .duello-bank-table-card tr,
+  .duello-bank-table-card td { display: block; width: 100%; }
+  .duello-bank-table-card tbody { display: grid; gap: 9px; padding: 10px; }
+  .duello-bank-table-card tbody tr {
+    overflow: hidden;
+    border: 1px solid var(--duello-bank-border);
+    border-radius: 10px;
+    background: var(--duello-bank-surface-muted);
+  }
+  .duello-bank-table-card td {
+    display: grid;
+    grid-template-columns: minmax(86px, 35%) minmax(0, 1fr);
+    align-items: center;
+    gap: 12px;
+    padding: 10px 11px;
+    text-align: right;
+  }
+  .duello-bank-table-card td::before {
+    content: attr(data-label);
+    color: var(--muted-2, #777);
+    font: 650 8px var(--font-head, Inter, sans-serif);
+    letter-spacing: .08em;
+    text-align: left;
+    text-transform: uppercase;
+  }
+  .duello-bank-table-card td > * { min-width: 0; justify-self: end; }
+  .duello-bank-table-card td[colspan] { display: block; }
+  .duello-bank-table-card td[colspan]::before { content: none; }
+  .duello-bank-member { min-width: 0; text-align: left; }
+  .duello-bank-member small { max-width: min(48vw, 210px); }
+  .duello-bank-status { text-align: left; }
+  .duello-bank-row-button { float: none; }
+  .duello-bank-modal { padding: 26px 18px 21px; }
+  .duello-bank-modal-actions { display: grid; grid-template-columns: minmax(0, .8fr) minmax(0, 1.2fr); }
+  .duello-bank-modal-actions .duello-bank-button { min-width: 0; padding-inline: 9px; }
+  .duello-bank-toast { right: 14px; bottom: 76px; left: 14px; max-width: none; justify-content: center; border-radius: 12px; text-align: center; }
+}
+
+@media (max-width: 430px) {
+  .duello-bank-hero-actions { grid-template-columns: minmax(0, 1fr); }
+  .duello-bank-flow { padding: 16px; }
+  .duello-bank-flow-heading { grid-template-columns: 34px minmax(0, 1fr); }
+  .duello-bank-flow-heading > span { width: 34px; height: 34px; }
+  .duello-bank-modal-actions { grid-template-columns: minmax(0, 1fr); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .duello-bank-state-icon svg,
+  .duello-bank-dashboard .is-spinning { animation: none; }
+}

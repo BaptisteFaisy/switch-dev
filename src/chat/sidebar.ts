@@ -22,6 +22,18 @@ export type ChatSidebarDiscussionIdentity = {
   rolloutId?: string | null;
 };
 
+/**
+ * Une copie peut conserver le meme identifiant natif sur deux comptes
+ * (notamment Freebuff). Toute cle frontend doit donc inclure le compte pour ne
+ * jamais ouvrir, rafraichir ou archiver la mauvaise ligne d'historique.
+ */
+export const discussionIdentityKey = (
+  discussion: Pick<ChatSidebarDiscussionIdentity, "accountId" | "sessionId">,
+): string => JSON.stringify([
+  discussion.accountId.trim(),
+  discussion.sessionId.trim(),
+]);
+
 export type ChatSidebarOrderedDiscussion = {
   sessionId: string;
   startedAt: number;

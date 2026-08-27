@@ -15,6 +15,8 @@ const theme = readFileSync(new URL("../src/theme.css", import.meta.url), "utf8")
 const view = readFileSync(new URL("../src/prompt-history-view.ts", import.meta.url), "utf8");
 const historyStyle = readFileSync(new URL("../src/prompt-history.css", import.meta.url), "utf8");
 const smoke = readFileSync(new URL("../scripts/smoke-site.mjs", import.meta.url), "utf8");
+const platform = readFileSync(new URL("../src/platform.ts", import.meta.url), "utf8");
+const server = readFileSync(new URL("../src-tauri/src/server.rs", import.meta.url), "utf8");
 
 const entry = (overrides = {}) => ({
   sessionId: "session-a",
@@ -119,4 +121,21 @@ test("charge l'interface et ses styles uniquement a l'ouverture sans retarder la
   assert.match(historyStyle, /@media \(max-width: 700px\)[\s\S]*?\.prompt-session-messages li/);
   assert.match(historyStyle, /:root\[data-theme="light"\] \.prompt-row/);
   assert.match(smoke, /CST_SMOKE_NAVIGATION_TARGET/);
+});
+
+test("le conteneur charge l'historique reel du serveur au lieu d'une liste vide", () => {
+  assert.match(
+    platform,
+    /case "list_prompt_history":\s*return listRemotePromptHistory<T>\(args\.limit\)/,
+  );
+  assert.doesNotMatch(
+    platform.match(/case "list_prompt_history":[\s\S]*?case "claim_session_for_terminal":/)?.[0] ?? "",
+    /prompts:\s*\[\]/,
+  );
+  assert.match(server, /\.route\("\/prompt-history", get\(api_list_prompt_history\)\)/);
+  assert.match(server, /discussions::list_prompt_history_dashboard\(limit\)/);
+  assert.match(server, /filter_prompt_history_for_identity/);
+  assert.match(platform, /async function listRemotePromptHistory<T>/);
+  assert.match(platform, /apiAt<Record<string, any>>\([\s\S]*?\/api\/prompt-history\?limit=/);
+  assert.match(platform, /prompts\.sort\([\s\S]*?right\.timestamp/);
 });

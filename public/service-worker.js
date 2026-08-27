@@ -5,7 +5,7 @@ const CACHE_PREFIX = "codex-terminal-static-";
 // celui installe. C'est le levier qui sort un onglet d'un cache PWA fige sans
 // aucune manipulation de l'utilisateur, meme si l'URL enregistree pointe encore
 // vers un ancien build.
-const SW_VERSION = "3";
+const SW_VERSION = "5";
 const BUILD_ID = new URL(self.location.href).searchParams.get("build") || "legacy";
 const CACHE_NAME = `${CACHE_PREFIX}${BUILD_ID}`;
 const NAVIGATION_NETWORK_TIMEOUT_MS = 5_000;
@@ -39,20 +39,11 @@ self.addEventListener("activate", (event) => {
       const current = await caches.open(CACHE_NAME);
       await current.delete("/");
       await self.clients.claim();
-      // Recharge une seule fois les onglets ouverts pour qu'ils reprennent
-      // l'index et le JS frais. Le build-id frais re-enregistre ce meme worker
-      // (contenu identique) : aucune nouvelle activation, donc aucune boucle.
-      const windows = await self.clients.matchAll({
-        type: "window",
-        includeUncontrolled: true,
-      });
-      await Promise.all(
-        windows.map((client) =>
-          client.url.includes("/reset-update.html")
-            ? undefined
-            : client.navigate(client.url).catch(() => undefined),
-        ),
-      );
+      // Ne jamais naviguer les clients depuis `activate`: Chromium peut attendre
+      // la fin de l'activation pour committer cette navigation, tandis que le
+      // `waitUntil` attend lui-meme `client.navigate`, ce qui bloque la page.
+      // Le document courant vient deja du nouveau build ; une navigation future
+      // ou la recuperation des chunks Vite reprendra l'index frais si necessaire.
     })(),
   );
 });
@@ -61,6 +52,9 @@ const isPrivateApplicationRequest = (url) =>
   url.pathname.startsWith("/api/")
   || url.pathname.startsWith("/ws/")
   || url.pathname === "/mcp";
+
+const isSocialApplicationRequest = (url) =>
+  url.pathname === "/social" || url.pathname.startsWith("/social/");
 
 const cachedStaticAsset = async (request) => {
   const cache = await caches.open(CACHE_NAME);
@@ -105,7 +99,11 @@ self.addEventListener("fetch", (event) => {
   if (request.method !== "GET") return;
 
   const url = new URL(request.url);
-  if (url.origin !== self.location.origin || isPrivateApplicationRequest(url)) return;
+  if (
+    url.origin !== self.location.origin
+    || isPrivateApplicationRequest(url)
+    || isSocialApplicationRequest(url)
+  ) return;
   // Cette page est la porte de sortie d'un cache PWA obsolète. Si le service
   // worker la remplace par la navigation mise en cache, elle ne peut jamais
   // désinscrire l'ancien worker ni purger les caches.

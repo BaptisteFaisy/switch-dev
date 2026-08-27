@@ -7,14 +7,15 @@ use crate::{
     chat_model_tools::{
         ChatModelToolServerConfig, ACTIVATE_SUPERVISOR_GENERAL_REPORT_TOOL_NAME,
         APPLY_AUTONOMOUS_AGENT_POLICY_TOOL_NAME, AUTONOMOUS_AGENT_TOOL_NAME,
-        CREATE_CALENDAR_EVENT_TOOL_NAME, CREATE_CHAT_TOOL_NAME, LIST_CALENDAR_EVENTS_TOOL_NAME,
-        LIST_OUTLOOK_MESSAGES_TOOL_NAME, LIST_TIKTOK_DM_CAMPAIGNS_TOOL_NAME,
-        LIST_TIKTOK_FOLLOWER_EXTRACTIONS_TOOL_NAME, LIST_TIKTOK_SENDER_ACCOUNTS_TOOL_NAME,
-        MANAGE_TIKTOK_SENDER_LOGIN_TOOL_NAME, MCP_BEARER_ENV, MCP_SERVER_NAME,
-        PAUSE_AUTONOMOUS_AGENT_TOOL_NAME, PREPARE_TIKTOK_DM_CAMPAIGN_TOOL_NAME,
-        QUEUE_TIKTOK_FOLLOWER_EXTRACTION_TOOL_NAME, SELECT_TIKTOK_SENDER_ACCOUNT_TOOL_NAME,
-        SEND_OUTLOOK_EMAIL_TOOL_NAME, SEND_TIKTOK_DM_CAMPAIGN_TOOL_NAME,
-        UPDATE_AUTONOMOUS_AGENT_TOOL_NAME, UPDATE_CALENDAR_EVENT_TOOL_NAME,
+        CREATE_CALENDAR_EVENT_TOOL_NAME, CREATE_CHAT_TOOL_NAME, CREATE_GOAL_TOOL_NAME,
+        LIST_CALENDAR_EVENTS_TOOL_NAME, LIST_OUTLOOK_MESSAGES_TOOL_NAME,
+        LIST_TIKTOK_DM_CAMPAIGNS_TOOL_NAME, LIST_TIKTOK_FOLLOWER_EXTRACTIONS_TOOL_NAME,
+        LIST_TIKTOK_SENDER_ACCOUNTS_TOOL_NAME, MANAGE_TIKTOK_SENDER_LOGIN_TOOL_NAME,
+        MCP_BEARER_ENV, MCP_SERVER_NAME, PAUSE_AUTONOMOUS_AGENT_TOOL_NAME,
+        PREPARE_TIKTOK_DM_CAMPAIGN_TOOL_NAME, QUEUE_TIKTOK_FOLLOWER_EXTRACTION_TOOL_NAME,
+        SELECT_TIKTOK_SENDER_ACCOUNT_TOOL_NAME, SEND_OUTLOOK_EMAIL_TOOL_NAME,
+        SEND_TIKTOK_DM_CAMPAIGN_TOOL_NAME, UPDATE_AUTONOMOUS_AGENT_TOOL_NAME,
+        UPDATE_CALENDAR_EVENT_TOOL_NAME,
     },
     chat_tools::{chat_skills_document, chat_tool_instructions, ChatAgentSkill, ChatAgentTool},
     discussions::{self, DiscussionContextUsage},
@@ -62,6 +63,9 @@ const MAX_THOUGHT_CHARS: usize = 4_000;
 const MAX_PART_DETAIL_CHARS: usize = 12_000;
 const MAX_MODEL_CHARS: usize = 160;
 const MAX_RETAINED_TURNS: usize = 500;
+/// `0` desactive le plafond numerique. L'admission se fait alors uniquement sur
+/// la marge memoire et sur la limite cgroup du conteneur.
+const DEFAULT_MAX_ACTIVE_CHAT_TURNS: usize = 0;
 const DEFAULT_MIN_CONTAINER_HEADROOM_MIB: u64 = 1536;
 const DEFAULT_MIN_HOST_AVAILABLE_MIB: u64 = 1536;
 const PROVIDER_EXIT_GRACE: Duration = Duration::from_secs(2);
@@ -72,6 +76,7 @@ const COMPACT_TIMEOUT: Duration = Duration::from_secs(180);
 /// indisponibilite transitoire des outils ne doit jamais bloquer la reprise
 /// d'une conversation ni faire perdre le message de l'utilisateur.
 const CHAT_MCP_STARTUP_TIMEOUT_SECONDS: u64 = 15;
+const OPENCODE_CONFIG_CONTENT_ENV: &str = "OPENCODE_CONFIG_CONTENT";
 const RESPONSE_QUALITY_INSTRUCTIONS: &str = "Avant toute réponse finale destinée à l'utilisateur, effectue une relecture silencieuse. Corrige les fautes de grammaire, de syntaxe, d'orthographe, d'accord et de ponctuation, puis vérifie que les phrases sont naturelles et non ambiguës dans la langue de l'utilisateur, sauf demande contraire. Pour le code, les commandes et les formats structurés, préserve les éléments littéraux et vérifie que la syntaxe ainsi que tous les délimiteurs et blocs sont complets. Ne modifie pas les citations ou les contenus demandés mot pour mot et ne mentionne pas cette relecture.";
 
 /// Les identifiants de processus renvoyes par les outils d'execution sont lies
@@ -80,6 +85,16 @@ const RESPONSE_QUALITY_INSTRUCTIONS: &str = "Avant toute réponse finale destin�
 /// reprenable. Le modele doit alors relancer l'operation utile au lieu de boucler
 /// sur le handle perime ou d'abandonner le chat.
 const CODEX_PROCESS_CONTINUITY_INSTRUCTIONS: &str = "Les identifiants de processus ou de cellule retournés par `exec`, `write_stdin` et `wait` sont temporaires. Si `write_stdin` ou `wait` répond `Unknown process id`, ne réutilise plus cet identifiant : vérifie l'état du résultat attendu, puis relance seulement l'opération encore nécessaire de façon idempotente et continue la tâche. Une erreur isolée d'outil n'est pas une raison de terminer la conversation.";
+
+/// Politique commune aux chats structures. Le chat racine agit comme
+/// orchestrateur sans attendre une demande explicite, mais les sous-agents
+/// restent bornes et ne recreent pas eux-memes une equipe en cascade.
+pub(crate) const DEFAULT_ORCHESTRATOR_INSTRUCTIONS: &str = "Tu es l'agent racine et l'orchestrateur par défaut de cette conversation. Dès qu'une demande contient au moins une sous-tâche indépendante et utile, délègue-la proactivement à un ou plusieurs sous-agents et synthétise leurs résultats dans le chat principal ; n'attends pas que l'utilisateur demande explicitement le multi-agent. Garde localement les questions simples et les opérations atomiques pour éviter un surcoût inutile. Donne à chaque sous-agent une mission bornée, attends les résultats nécessaires, puis vérifie l'intégration. Si tu es toi-même un sous-agent ou un worker, accomplis uniquement ta mission et ne crée pas une nouvelle équipe sauf nécessité explicite.";
+const ORCHESTRATION_CHILD_INSTRUCTIONS: &str = "Tu es un membre d'une orchestration deja active. Accomplis uniquement la mission bornee fournie par l'orchestrateur. Ne cree, ne lance et ne delegue aucun sous-agent, aucune nouvelle equipe et aucune orchestration imbriquee. Travaille exclusivement dans le dossier courant confine et rends les preuves structurees demandees.";
+
+/// Classification commune injectee dans chaque tour, quel que soit le provider,
+/// afin qu'une reprise de conversation conserve la separation dev/stable.
+const SWITCH_ENVIRONMENT_INSTRUCTIONS: &str = "Classification canonique des environnements Switch : toute version stockée sur le SSD/Samsung T7 ou exécutée sur le poste local pc-fixe est exclusivement une version de développement. La version hébergée sur le VPS Microsoft Azure est la seule version stable/production. Sans autre précision, les termes stable, production et prod désignent le VPS Azure, jamais la copie SSD/locale. Garde ces environnements séparés et ne synchronise, ne promeus, ne déploie ou ne redémarre jamais l'un depuis l'autre sans demande explicite de l'utilisateur.";
 
 /// Filet applique aux tours Claude one-shot : chaque tour est un process
 /// `claude --print` distinct qui meurt a la fin du tour. Toute commande lancee
@@ -92,12 +107,11 @@ const CLAUDE_FOREGROUND_SHELL_INSTRUCTIONS: &str = "N'exécute jamais de command
 /// Duree d'inactivite au-dela de laquelle une session Claude persistante est
 /// recyclee (le process est arrete pour liberer la memoire du noeud). Volontai-
 /// rement genereux : une conversation active reste chaude entre deux messages.
-const LIVE_CLAUDE_IDLE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+const DEFAULT_LIVE_CLAUDE_IDLE_SECONDS: usize = 3 * 60;
 
-/// Plafond de sessions Claude persistantes vivantes simultanement sur le noeud.
-/// Au-dela, la plus ancienne inactive est recyclee. Borne la consommation
-/// memoire sur un VPS partage ; le durcissement fin est prevu en phase 3.
-const LIVE_CLAUDE_MAX_SESSIONS: usize = 8;
+/// `0` conserve toutes les sessions Claude tant que la marge memoire suffit.
+/// Le balayage d'inactivite continue a recycler les sessions froides.
+const DEFAULT_LIVE_CLAUDE_MAX_SESSIONS: usize = 0;
 
 /// Delai d'attente laisse au process pour finaliser un tour apres une demande
 /// d'interruption (control_request `interrupt`) avant de basculer sur l'arret
@@ -111,6 +125,35 @@ fn positive_env_mib(name: &str, fallback_mib: u64) -> u64 {
         .and_then(|value| value.trim().parse::<u64>().ok())
         .filter(|value| *value > 0)
         .unwrap_or(fallback_mib)
+}
+
+fn positive_env_usize(name: &str, fallback: usize) -> usize {
+    env::var(name)
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(fallback)
+}
+
+pub(crate) fn configured_max_active_chat_turns() -> usize {
+    env::var("CST_CHAT_MAX_ACTIVE")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(DEFAULT_MAX_ACTIVE_CHAT_TURNS)
+}
+
+fn live_claude_idle_timeout() -> Duration {
+    Duration::from_secs(positive_env_usize(
+        "CST_CLAUDE_IDLE_SECONDS",
+        DEFAULT_LIVE_CLAUDE_IDLE_SECONDS,
+    ) as u64)
+}
+
+fn live_claude_max_sessions() -> usize {
+    env::var("CST_CLAUDE_MAX_SESSIONS")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(DEFAULT_LIVE_CLAUDE_MAX_SESSIONS)
 }
 
 fn cgroup_container_headroom_bytes() -> Option<u64> {
@@ -180,6 +223,9 @@ enum ChatFilesystemScope {
     /// Conserve le projet source en lecture seule pendant une review humaine,
     /// mais autorise les captures temporaires sous `.codex-proof/`.
     ReviewProofArtifacts,
+    /// Worktree prive cree et controle par `OrchestrationManager`. Le compte
+    /// ne peut jamais reutiliser ici son bypass global ni le multi-agent.
+    OrchestrationWorkspace,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -274,6 +320,7 @@ pub struct ActiveChatTurnSummary {
     pub status: ChatTurnStatus,
     pub started_at: i64,
     pub waiting_for_user: bool,
+    pub project_dir: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -600,9 +647,10 @@ pub struct ChatTurnManager {
     /// sessions web et mobiles alors qu'il tourne.
     workspaces: Arc<Mutex<HashMap<u64, String>>>,
     claims: Arc<Mutex<HashSet<String>>>,
-    /// Serialise la mesure de marge et le lancement du fournisseur. Il n'y a
-    /// aucun plafond de chats : seule la memoire disponible ferme l'admission.
+    /// Serialise la mesure de marge et le lancement du fournisseur afin que
+    /// deux requetes ne consomment pas simultanement la meme marge memoire.
     start_gate: Arc<Mutex<()>>,
+    max_active: usize,
     /// Sessions Claude persistantes vivantes, indexees par `account_id\0session_id`.
     /// Un seul process par conversation ; les taches shell en arriere-plan y
     /// survivent d'un tour a l'autre.
@@ -613,12 +661,19 @@ pub struct ChatTurnManager {
 
 impl Default for ChatTurnManager {
     fn default() -> Self {
+        Self::with_max_active(configured_max_active_chat_turns())
+    }
+}
+
+impl ChatTurnManager {
+    pub(crate) fn with_max_active(max_active: usize) -> Self {
         Self {
             turns: Arc::new(Mutex::new(HashMap::new())),
             owners: Arc::new(Mutex::new(HashMap::new())),
             workspaces: Arc::new(Mutex::new(HashMap::new())),
             claims: Arc::new(Mutex::new(HashSet::new())),
             start_gate: Arc::new(Mutex::new(())),
+            max_active,
             live_claude: Arc::new(Mutex::new(HashMap::new())),
             next_id: Arc::new(AtomicU64::new(0)),
             runtime_sync: RuntimeSync::default(),
@@ -759,6 +814,13 @@ impl ChatTurnManager {
         self.start_with_scope(request, None, ChatFilesystemScope::ReviewProofArtifacts)
     }
 
+    pub(crate) fn start_orchestration(
+        &self,
+        request: StartChatTurnRequest,
+    ) -> Result<ChatTurnSnapshot, String> {
+        self.start_with_scope(request, None, ChatFilesystemScope::OrchestrationWorkspace)
+    }
+
     fn start_with_scope(
         &self,
         request: StartChatTurnRequest,
@@ -770,6 +832,13 @@ impl ChatTurnManager {
             .start_gate
             .lock()
             .map_err(|_| "Admission des chats verrouillee".to_string())?;
+        let active = self.active_count();
+        if self.max_active > 0 && active >= self.max_active {
+            return Err(format!(
+                "capacite chats atteinte: {active}/{} tours actifs; le message doit attendre qu'une place se libere",
+                self.max_active
+            ));
+        }
         enforce_chat_resource_admission()?;
         let prompt = request.prompt.trim().to_string();
         if prompt.is_empty() && request.image_attachments.is_empty() {
@@ -821,6 +890,7 @@ impl ChatTurnManager {
         let model = selected_model(request.model.as_deref(), account.model.as_deref())?;
         let reasoning_effort = selected_reasoning_effort(
             account.provider,
+            account.inference_provider.as_deref(),
             request.reasoning_effort.as_deref(),
             account.reasoning_effort.as_deref(),
         )?;
@@ -857,10 +927,11 @@ impl ChatTurnManager {
         let proof_workspace =
             review_proof_workspace(account.provider, project_dir.as_deref(), filesystem_scope)?;
         let execution_dir = proof_workspace.as_deref().or(project_dir.as_deref());
-        let effective_filesystem_scope = if proof_workspace.is_some() {
-            filesystem_scope
-        } else {
-            ChatFilesystemScope::Default
+        let effective_filesystem_scope = match filesystem_scope {
+            ChatFilesystemScope::ReviewProofArtifacts if proof_workspace.is_none() => {
+                ChatFilesystemScope::Default
+            }
+            scope => scope,
         };
         account
             .provider
@@ -927,6 +998,20 @@ impl ChatTurnManager {
         );
         let base_instructions = merge_turn_instructions(
             base_instructions.as_deref(),
+            Some(SWITCH_ENVIRONMENT_INSTRUCTIONS),
+        );
+        let base_instructions = merge_turn_instructions(
+            base_instructions.as_deref(),
+            Some(
+                if effective_filesystem_scope == ChatFilesystemScope::OrchestrationWorkspace {
+                    ORCHESTRATION_CHILD_INSTRUCTIONS
+                } else {
+                    DEFAULT_ORCHESTRATOR_INSTRUCTIONS
+                },
+            ),
+        );
+        let base_instructions = merge_turn_instructions(
+            base_instructions.as_deref(),
             apply_foreground_net.then_some(CLAUDE_FOREGROUND_SHELL_INSTRUCTIONS),
         );
         let turn_instructions = merge_turn_instructions(
@@ -984,6 +1069,15 @@ impl ChatTurnManager {
                 image_files.paths(),
                 effective_filesystem_scope,
             );
+            // `configure_provider_command...` pose d'abord le MCP goal dans
+            // OPENCODE_CONFIG_CONTENT. L'overlay modele doit donc etre fusionne
+            // ensuite, jamais remplacer cette configuration existante.
+            configure_opencode_model_overlay(
+                &mut command,
+                &account,
+                model.as_deref(),
+                reasoning_effort.as_deref(),
+            )?;
             Ok(command)
         };
 
@@ -1223,6 +1317,11 @@ impl ChatTurnManager {
     }
 
     pub fn active(&self) -> Result<Vec<ActiveChatTurnSummary>, String> {
+        let workspaces = self
+            .workspaces
+            .lock()
+            .map_err(|_| "Environnements des conversations verrouilles".to_string())?
+            .clone();
         let turns = self
             .turns
             .lock()
@@ -1245,6 +1344,7 @@ impl ChatTurnManager {
                     status: snapshot.status,
                     started_at: snapshot.started_at,
                     waiting_for_user: snapshot.parts.iter().any(part_waits_for_user_input),
+                    project_dir: workspaces.get(&snapshot.id).cloned(),
                 });
             }
         }
@@ -1502,7 +1602,7 @@ impl ChatTurnManager {
             .map_err(|_| "Registre des sessions Claude verrouillé".to_string())?;
 
         registry.retain(|_, session| {
-            if session.is_dead() || session.is_idle(LIVE_CLAUDE_IDLE_TIMEOUT) {
+            if session.is_dead() || session.is_idle(live_claude_idle_timeout()) {
                 session.shutdown();
                 false
             } else {
@@ -1523,8 +1623,10 @@ impl ChatTurnManager {
             }
         }
 
-        // Plafond memoire : recycle la session inactive la plus ancienne.
-        while registry.len() >= LIVE_CLAUDE_MAX_SESSIONS {
+        // Un plafond explicite reste configurable pour les petits VPS. La
+        // valeur 0 utilise seulement l'enveloppe memoire globale.
+        let max_sessions = live_claude_max_sessions();
+        while max_sessions > 0 && registry.len() >= max_sessions {
             let victim = registry
                 .iter()
                 .min_by_key(|(_, session)| session.last_activity())
@@ -2339,7 +2441,7 @@ fn configure_provider_command_with_images_and_scope(
 ) {
     match account.provider {
         // Inatteignable : `ChatTurnManager::start` refuse freebuff en amont.
-        Provider::Freebuff => {}
+        Provider::Freebuff | Provider::Aihubmix => {}
         Provider::Codex => {
             command.arg("exec");
             if session_id.is_some() {
@@ -2348,7 +2450,21 @@ fn configure_provider_command_with_images_and_scope(
             // La memoire automatique locale du CLI est desactivee par defaut.
             // Chaque compte conserve son store dans son CODEX_HOME ; le cwd du
             // tour permet ensuite a Codex de retrouver le contexte pertinent.
-            command.arg("--enable").arg("memories").arg("--json");
+            command.arg("--enable").arg("memories");
+            if filesystem_scope != ChatFilesystemScope::OrchestrationWorkspace {
+                command
+                    .arg("--enable")
+                    .arg("multi_agent")
+                    .arg("--enable")
+                    .arg("multi_agent_v2");
+            } else {
+                command
+                    .arg("--disable")
+                    .arg("multi_agent")
+                    .arg("--disable")
+                    .arg("multi_agent_v2");
+            }
+            command.arg("--json");
             // Expose uniquement les resumes prevus pour l'utilisateur. Le
             // raisonnement interne brut reste volontairement masque.
             command
@@ -2374,6 +2490,23 @@ fn configure_provider_command_with_images_and_scope(
                     .arg("approval_policy=\"never\"")
                     .arg("-c")
                     .arg("sandbox_workspace_write.network_access=false");
+            } else if filesystem_scope == ChatFilesystemScope::OrchestrationWorkspace {
+                command.arg("-C").arg(".");
+                if matches!(mode, ChatTurnMode::Plan | ChatTurnMode::Ask) {
+                    command
+                        .arg("-c")
+                        .arg("sandbox_mode=\"read-only\"")
+                        .arg("-c")
+                        .arg("approval_policy=\"never\"");
+                } else {
+                    command
+                        .arg("-c")
+                        .arg("sandbox_mode=\"workspace-write\"")
+                        .arg("-c")
+                        .arg("approval_policy=\"never\"")
+                        .arg("-c")
+                        .arg("sandbox_workspace_write.network_access=false");
+                }
             } else if matches!(mode, ChatTurnMode::Plan | ChatTurnMode::Ask) {
                 command.arg("-c").arg("sandbox_mode=\"read-only\"");
             } else if account.bypass
@@ -2417,7 +2550,10 @@ fn configure_provider_command_with_images_and_scope(
                 ChatTurnMode::Plan | ChatTurnMode::Ask => {
                     command.arg("--permission-mode").arg("plan");
                 }
-                ChatTurnMode::Build if account.bypass => {
+                ChatTurnMode::Build
+                    if account.bypass
+                        && filesystem_scope != ChatFilesystemScope::OrchestrationWorkspace =>
+                {
                     command.arg(account.provider.bypass_flag());
                 }
                 ChatTurnMode::Build => {
@@ -2442,11 +2578,12 @@ fn configure_provider_command_with_images_and_scope(
                     .arg(path)
                     .arg("--allowedTools")
                     .arg(format!(
-                        "mcp__{MCP_SERVER_NAME}__{AUTONOMOUS_AGENT_TOOL_NAME},mcp__{MCP_SERVER_NAME}__{UPDATE_AUTONOMOUS_AGENT_TOOL_NAME},mcp__{MCP_SERVER_NAME}__{PAUSE_AUTONOMOUS_AGENT_TOOL_NAME},mcp__{MCP_SERVER_NAME}__{ACTIVATE_SUPERVISOR_GENERAL_REPORT_TOOL_NAME},mcp__{MCP_SERVER_NAME}__{APPLY_AUTONOMOUS_AGENT_POLICY_TOOL_NAME},mcp__{MCP_SERVER_NAME}__{CREATE_CHAT_TOOL_NAME},mcp__{MCP_SERVER_NAME}__{LIST_OUTLOOK_MESSAGES_TOOL_NAME},mcp__{MCP_SERVER_NAME}__{LIST_CALENDAR_EVENTS_TOOL_NAME},mcp__{MCP_SERVER_NAME}__{SEND_OUTLOOK_EMAIL_TOOL_NAME},mcp__{MCP_SERVER_NAME}__{CREATE_CALENDAR_EVENT_TOOL_NAME},mcp__{MCP_SERVER_NAME}__{UPDATE_CALENDAR_EVENT_TOOL_NAME},mcp__{MCP_SERVER_NAME}__{LIST_TIKTOK_DM_CAMPAIGNS_TOOL_NAME},mcp__{MCP_SERVER_NAME}__{LIST_TIKTOK_SENDER_ACCOUNTS_TOOL_NAME},mcp__{MCP_SERVER_NAME}__{MANAGE_TIKTOK_SENDER_LOGIN_TOOL_NAME},mcp__{MCP_SERVER_NAME}__{SELECT_TIKTOK_SENDER_ACCOUNT_TOOL_NAME},mcp__{MCP_SERVER_NAME}__{PREPARE_TIKTOK_DM_CAMPAIGN_TOOL_NAME},mcp__{MCP_SERVER_NAME}__{SEND_TIKTOK_DM_CAMPAIGN_TOOL_NAME},mcp__{MCP_SERVER_NAME}__{LIST_TIKTOK_FOLLOWER_EXTRACTIONS_TOOL_NAME},mcp__{MCP_SERVER_NAME}__{QUEUE_TIKTOK_FOLLOWER_EXTRACTION_TOOL_NAME}"
+                        "mcp__{MCP_SERVER_NAME}__{CREATE_GOAL_TOOL_NAME},mcp__{MCP_SERVER_NAME}__{AUTONOMOUS_AGENT_TOOL_NAME},mcp__{MCP_SERVER_NAME}__{UPDATE_AUTONOMOUS_AGENT_TOOL_NAME},mcp__{MCP_SERVER_NAME}__{PAUSE_AUTONOMOUS_AGENT_TOOL_NAME},mcp__{MCP_SERVER_NAME}__{ACTIVATE_SUPERVISOR_GENERAL_REPORT_TOOL_NAME},mcp__{MCP_SERVER_NAME}__{APPLY_AUTONOMOUS_AGENT_POLICY_TOOL_NAME},mcp__{MCP_SERVER_NAME}__{CREATE_CHAT_TOOL_NAME},mcp__{MCP_SERVER_NAME}__{LIST_OUTLOOK_MESSAGES_TOOL_NAME},mcp__{MCP_SERVER_NAME}__{LIST_CALENDAR_EVENTS_TOOL_NAME},mcp__{MCP_SERVER_NAME}__{SEND_OUTLOOK_EMAIL_TOOL_NAME},mcp__{MCP_SERVER_NAME}__{CREATE_CALENDAR_EVENT_TOOL_NAME},mcp__{MCP_SERVER_NAME}__{UPDATE_CALENDAR_EVENT_TOOL_NAME},mcp__{MCP_SERVER_NAME}__{LIST_TIKTOK_DM_CAMPAIGNS_TOOL_NAME},mcp__{MCP_SERVER_NAME}__{LIST_TIKTOK_SENDER_ACCOUNTS_TOOL_NAME},mcp__{MCP_SERVER_NAME}__{MANAGE_TIKTOK_SENDER_LOGIN_TOOL_NAME},mcp__{MCP_SERVER_NAME}__{SELECT_TIKTOK_SENDER_ACCOUNT_TOOL_NAME},mcp__{MCP_SERVER_NAME}__{PREPARE_TIKTOK_DM_CAMPAIGN_TOOL_NAME},mcp__{MCP_SERVER_NAME}__{SEND_TIKTOK_DM_CAMPAIGN_TOOL_NAME},mcp__{MCP_SERVER_NAME}__{LIST_TIKTOK_FOLLOWER_EXTRACTIONS_TOOL_NAME},mcp__{MCP_SERVER_NAME}__{QUEUE_TIKTOK_FOLLOWER_EXTRACTION_TOOL_NAME}"
                     ));
             }
         }
         Provider::OpenCode => {
+            configure_opencode_model_tool(command, model_tool_server);
             command
                 .arg("run")
                 .arg("--format")
@@ -2459,11 +2596,23 @@ fn configure_provider_command_with_images_and_scope(
                 ChatTurnMode::Plan | ChatTurnMode::Ask => "plan",
                 ChatTurnMode::Build => "build",
             });
-            if matches!(mode, ChatTurnMode::Build) && account.bypass {
+            if matches!(mode, ChatTurnMode::Build)
+                && account.bypass
+                && filesystem_scope != ChatFilesystemScope::OrchestrationWorkspace
+            {
                 command.arg(account.provider.bypass_flag());
             }
             if let Some(model) = model {
                 command.arg("--model").arg(model);
+            }
+            if account
+                .inference_provider
+                .as_deref()
+                .is_some_and(|provider| provider.eq_ignore_ascii_case("openrouter"))
+            {
+                if let Some(effort) = reasoning_effort {
+                    command.arg("--variant").arg(effort);
+                }
             }
         }
     }
@@ -2524,6 +2673,180 @@ fn configure_codex_model_tool(command: &mut Command, config: Option<&ChatModelTo
     }
 }
 
+fn configure_opencode_model_tool(
+    command: &mut Command,
+    config: Option<&ChatModelToolServerConfig>,
+) {
+    let Some(config) = config else {
+        return;
+    };
+    // OpenCode fusionne OPENCODE_CONFIG_CONTENT au-dessus de la configuration
+    // du compte. Le jeton ephemere reste uniquement dans l'environnement du
+    // processus du tour : aucun secret n'est ecrit dans le dossier utilisateur.
+    command.env(MCP_BEARER_ENV, &config.bearer_token);
+    let overlay = json!({
+        "mcp": {
+            (MCP_SERVER_NAME): {
+                "type": "remote",
+                "url": config.url.clone(),
+                "enabled": true,
+                "oauth": false,
+                "timeout": 30_000,
+                "headers": {
+                    "Authorization": format!("Bearer {{env:{MCP_BEARER_ENV}}}")
+                }
+            }
+        }
+    });
+    merge_opencode_config_content(command, overlay);
+}
+
+fn deep_merge_json(target: &mut Value, overlay: Value) {
+    match (target, overlay) {
+        (Value::Object(target), Value::Object(overlay)) => {
+            for (key, value) in overlay {
+                match target.get_mut(&key) {
+                    Some(existing) => deep_merge_json(existing, value),
+                    None => {
+                        target.insert(key, value);
+                    }
+                }
+            }
+        }
+        (target, overlay) => *target = overlay,
+    }
+}
+
+fn opencode_config_content_with_inherited<F>(command: &Command, inherited: F) -> Value
+where
+    F: FnOnce() -> Option<String>,
+{
+    let explicit = command.get_envs().find_map(|(key, value)| {
+        (key == OPENCODE_CONFIG_CONTENT_ENV).then(|| {
+            value.and_then(|value| value.to_str()).map(str::to_owned)
+        })
+    });
+    let content = match explicit {
+        // Une suppression explicite ne doit jamais retomber sur l'environnement
+        // parent. Elle fournit simplement une base vide aux overlays du tour.
+        Some(content) => content,
+        None => inherited(),
+    };
+    // Historiquement les overlays Switch remplacaient completement cette
+    // variable. Un JSON herite invalide ne doit donc pas rendre un tour qui
+    // fonctionnait auparavant impossible : il est remplace par l'overlay sain.
+    content
+        .and_then(|content| serde_json::from_str(&content).ok())
+        .unwrap_or_else(|| json!({}))
+}
+
+fn merge_opencode_config_content(command: &mut Command, overlay: Value) {
+    merge_opencode_config_content_with_inherited(command, overlay, || {
+        std::env::var(OPENCODE_CONFIG_CONTENT_ENV).ok()
+    });
+}
+
+fn merge_opencode_config_content_with_inherited<F>(
+    command: &mut Command,
+    overlay: Value,
+    inherited: F,
+) where
+    F: FnOnce() -> Option<String>,
+{
+    let mut document = opencode_config_content_with_inherited(command, inherited);
+    deep_merge_json(&mut document, overlay);
+    command.env(OPENCODE_CONFIG_CONTENT_ENV, document.to_string());
+}
+
+/// Ajoute le modele OpenRouter selectionne a l'overlay propre au processus.
+/// L'overlay MCP goal eventuellement pose juste avant est lu puis enrichi : il
+/// n'est jamais ecrase. Seuls l'identifiant public du modele et l'effort choisi
+/// sont ajoutes ; la cle API et le proxy restent dans leur canal serveur dedie.
+fn configure_opencode_model_overlay(
+    command: &mut Command,
+    account: &AccountProfile,
+    model: Option<&str>,
+    reasoning_effort: Option<&str>,
+) -> Result<(), String> {
+    if account.provider != Provider::OpenCode {
+        return Ok(());
+    }
+    let inference_provider = account.inference_provider.as_deref().unwrap_or_default();
+
+    let Some(model) = model else {
+        return Ok(());
+    };
+    let effort = reasoning_effort
+        .map(str::trim)
+        .filter(|effort| !effort.is_empty());
+    if let Some(effort) = effort {
+        if !settings::is_valid_reasoning_effort(effort) {
+            return Err("Intensite de raisonnement invalide".to_string());
+        }
+    }
+
+    // OpenRouter : le niveau est porte par une variante de modele.
+    if inference_provider.eq_ignore_ascii_case("openrouter") {
+        let slug = model
+            .strip_prefix("openrouter/")
+            .filter(|slug| settings::safe_openrouter_model_slug(slug))
+            .ok_or_else(|| "Nom de modele OpenRouter invalide".to_string())?;
+
+        let model_config = match effort {
+            Some(effort) => json!({
+                "variants": {
+                    (effort): { "reasoning": { "effort": effort } }
+                }
+            }),
+            None => json!({}),
+        };
+        merge_opencode_config_content(
+            command,
+            json!({
+                "provider": {
+                    "openrouter": {
+                        "models": {
+                            (slug): model_config
+                        }
+                    }
+                }
+            }),
+        );
+        return Ok(());
+    }
+
+    // DeepSeek (compte special b.ai et comptes DeepSeek) : l'intensite est
+    // passee dans les options du modele (`reasoning_effort`, niveaux high/max
+    // de DeepSeek V4) — c'est le seul canal que le CLI opencode applique pour
+    // ce provider, sans variante dediee.
+    if inference_provider.eq_ignore_ascii_case("deepseek") {
+        let Some(effort) = effort else {
+            return Ok(());
+        };
+        let slug = model
+            .strip_prefix("deepseek/")
+            .filter(|slug| !slug.is_empty())
+            .ok_or_else(|| "Nom de modele DeepSeek invalide".to_string())?;
+        merge_opencode_config_content(
+            command,
+            json!({
+                "provider": {
+                    "deepseek": {
+                        "models": {
+                            (slug): {
+                                "options": { "reasoning_effort": effort }
+                            }
+                        }
+                    }
+                }
+            }),
+        );
+        return Ok(());
+    }
+
+    Ok(())
+}
+
 fn configure_codex_app_connectors(
     command: &mut Command,
     connectors: Option<&[ChatAppConnector]>,
@@ -2578,7 +2901,7 @@ Utilise-la comme contexte durable dans cette conversation. Une demande explicite
 }
 
 fn autonomous_agent_tool_instructions() -> &'static str {
-    "Capacite native Codex Switch Terminal : onze outils MCP permettent d'ouvrir un autre chat, de piloter les agents autonomes et d'utiliser le compte Microsoft 365 de l'utilisateur depuis un chat normal. Quand l'utilisateur demande explicitement d'ouvrir, creer ou lancer un chat normal separe, appelle `create_chat` avec son message initial. Le nouveau chat herite du compte, du modele, de l'effort de raisonnement et de l'environnement courants ; un seul chat peut etre cree par tour. Quand l'utilisateur demande explicitement de creer, lancer, demarrer ou rendre autonome un nouvel agent, appelle `create_autonomous_agent` avec un objectif precis. Quand il demande explicitement de mettre en pause l'agent autonome lie a ce chat, appelle `pause_autonomous_agent` sans demander d'identifiant ; cette pause arrete le cycle courant et empeche toute nouvelle planification jusqu'a une reprise explicite depuis l'interface. Quand il demande explicitement de modifier l'agent autonome lie a ce chat (nom, objectif, role, mode, frequence, validation humaine ou tests), appelle `update_autonomous_agent` avec uniquement les champs a changer. Quand il demande explicitement au superviseur d'activer, produire ou relancer le compte rendu general qui compile les rapports non lus par priorite, appelle `activate_supervisor_general_report` sans demander d'identifiant ; cet outil fonctionne depuis n'importe quel chat. Quand il demande explicitement d'ajouter une meme regle durable a plusieurs agents deja actifs qui utilisent la review humaine, appelle `apply_autonomous_agent_policy` avec une instruction precise et verifiable ; cet outil ne depend pas de la cle du chat, reste limite au compte courant et cible par defaut uniquement le projet courant. Utilise la portee `account` seulement si l'utilisateur vise explicitement tous ses projets. Pour une politique de validation visuelle, passe `requireVisualEvidence: true`, exige une capture ou maquette fidele avant autorisation, une capture du rendu reel apres implementation et une comparaison explicite avec correction des ecarts significatifs. Pour une politique non visuelle, passe `requireVisualEvidence: false`. Ne demande jamais d'identifiant d'agent. Deduis les reglages non critiques et conserve les objectifs, roles, frequences et garde-fous existants. N'appelle pas ces outils pour une question theorique. Ne pretends jamais qu'une creation, une modification ou une mise en pause a reussi si l'appel correspondant n'a pas reussi. Cinq outils supplementaires ouvrent le compte Microsoft 365 lie a l'utilisateur connecte. Quand il demande de consulter, chercher ou resumer ses e-mails, appelle `list_outlook_messages`. Quand il demande son planning, ses rendez-vous ou une disponibilite, appelle `list_calendar_events` ; les horaires retournes sont en UTC, convertis-les avant de les presenter et n'annonce jamais une heure sans avoir verifie le fuseau. Quand il demande d'ecrire ou d'envoyer un e-mail, appelle `send_outlook_email` avec un message complet et pret a partir. Quand il demande de poser un rendez-vous, appelle `create_calendar_event` apres avoir verifie le creneau avec `list_calendar_events`. Quand il demande de deplacer ou de modifier un evenement, appelle `update_calendar_event` avec l'identifiant obtenu par `list_calendar_events`. Ces trois derniers outils NE FONT PARTIR NI N'ECRIVENT RIEN : ils affichent une carte que l'utilisateur doit confirmer dans la conversation. N'ecris donc jamais que l'e-mail est parti, que l'invitation est envoyee ou que l'agenda est a jour ; dis que la proposition attend sa validation. La boite et l'agenda sont ceux du compte connecte : ne demande jamais d'identifiant, de mot de passe ni de boite tierce, et n'invente aucune adresse de destinataire. Si l'utilisateur a lie plusieurs boites Microsoft, sa boite principale sert par defaut ; quand il precise laquelle utiliser, passe son adresse dans le champ `account`, en n'y mettant qu'une de ses propres adresses liees."
+    "Capacite native Codex Switch Terminal : des outils MCP permettent de creer un goal durable, d'ouvrir un autre chat, de piloter les agents autonomes et d'utiliser le compte Microsoft 365 de l'utilisateur depuis un chat normal. Quand l'utilisateur demande explicitement un goal, appelle `create_goal` avec son objectif exact ; OpenCode expose ce meme outil sous le nom namespace `cst_chat_create_goal`, qu'il faut donc appeler dans ce runtime. Cet outil cree un agent autonome persistant qui herite du compte, du modele et de l'environnement du chat. Quand l'utilisateur demande explicitement d'ouvrir, creer ou lancer un chat normal separe, appelle `create_chat` avec son message initial. Le nouveau chat herite du compte, du modele, de l'effort de raisonnement et de l'environnement courants ; un seul chat peut etre cree par tour. Quand l'utilisateur demande explicitement de creer, lancer, demarrer ou rendre autonome un nouvel agent, appelle `create_autonomous_agent` avec un objectif precis. Quand il demande explicitement de mettre en pause l'agent autonome lie a ce chat, appelle `pause_autonomous_agent` sans demander d'identifiant ; cette pause arrete le cycle courant et empeche toute nouvelle planification jusqu'a une reprise explicite depuis l'interface. Quand il demande explicitement de modifier l'agent autonome lie a ce chat (nom, objectif, role, mode, frequence, validation humaine ou tests), appelle `update_autonomous_agent` avec uniquement les champs a changer. Quand il demande explicitement au superviseur d'activer, produire ou relancer le compte rendu general qui compile les rapports non lus par priorite, appelle `activate_supervisor_general_report` sans demander d'identifiant ; cet outil fonctionne depuis n'importe quel chat. Quand il demande explicitement d'ajouter une meme regle durable a plusieurs agents deja actifs qui utilisent la review humaine, appelle `apply_autonomous_agent_policy` avec une instruction precise et verifiable ; cet outil ne depend pas de la cle du chat, reste limite au compte courant et cible par defaut uniquement le projet courant. Utilise la portee `account` seulement si l'utilisateur vise explicitement tous ses projets. Pour une politique de validation visuelle, passe `requireVisualEvidence: true`, exige une capture ou maquette fidele avant autorisation, une capture du rendu reel apres implementation et une comparaison explicite avec correction des ecarts significatifs. Pour une politique non visuelle, passe `requireVisualEvidence: false`. Ne demande jamais d'identifiant d'agent. Deduis les reglages non critiques et conserve les objectifs, roles, frequences et garde-fous existants. N'appelle pas ces outils pour une question theorique. Ne pretends jamais qu'une creation, une modification ou une mise en pause a reussi si l'appel correspondant n'a pas reussi. Cinq outils supplementaires ouvrent le compte Microsoft 365 lie a l'utilisateur connecte. Quand il demande de consulter, chercher ou resumer ses e-mails, appelle `list_outlook_messages`. Quand il demande son planning, ses rendez-vous ou une disponibilite, appelle `list_calendar_events` ; les horaires retournes sont en UTC, convertis-les avant de les presenter et n'annonce jamais une heure sans avoir verifie le fuseau. Quand il demande d'ecrire ou d'envoyer un e-mail, appelle `send_outlook_email` avec un message complet et pret a partir. Quand il demande de poser un rendez-vous, appelle `create_calendar_event` apres avoir verifie le creneau avec `list_calendar_events`. Quand il demande de deplacer ou de modifier un evenement, appelle `update_calendar_event` avec l'identifiant obtenu par `list_calendar_events`. Ces trois derniers outils NE FONT PARTIR NI N'ECRIVENT RIEN : ils affichent une carte que l'utilisateur doit confirmer dans la conversation. N'ecris donc jamais que l'e-mail est parti, que l'invitation est envoyee ou que l'agenda est a jour ; dis que la proposition attend sa validation. La boite et l'agenda sont ceux du compte connecte : ne demande jamais d'identifiant, de mot de passe ni de boite tierce, et n'invente aucune adresse de destinataire. Si l'utilisateur a lie plusieurs boites Microsoft, sa boite principale sert par defaut ; quand il precise laquelle utiliser, passe son adresse dans le champ `account`, en n'y mettant qu'une de ses propres adresses liees."
 }
 
 fn merge_turn_instructions(
@@ -2635,6 +2958,7 @@ fn selected_model(
 
 fn selected_reasoning_effort(
     provider: Provider,
+    inference_provider: Option<&str>,
     requested: Option<&str>,
     fallback: Option<&str>,
 ) -> Result<Option<String>, String> {
@@ -2651,7 +2975,25 @@ fn selected_reasoning_effort(
         // requete explicite, on ne passe pas `--effort` et Claude Code applique
         // son propre defaut.
         Provider::Claude => request,
-        Provider::OpenCode | Provider::Freebuff => return Ok(None),
+        // OpenRouter : la requete prime, puis l'intensite choisie dans Compte
+        // devient le defaut backend. Sans l'une ni l'autre, aucune variante
+        // n'est passee et OpenRouter reste en mode Automatique.
+        Provider::OpenCode
+            if inference_provider
+                .is_some_and(|provider| provider.eq_ignore_ascii_case("openrouter")) =>
+        {
+            request.or_else(|| fallback.map(str::trim).filter(|value| !value.is_empty()))
+        }
+        // DeepSeek (compte special b.ai et comptes DeepSeek) : l'intensite
+        // demandee ou celle du compte est appliquee via les options du modele
+        // dans la config opencode (`reasoning_effort`, high/max de DeepSeek V4).
+        Provider::OpenCode
+            if inference_provider
+                .is_some_and(|provider| provider.eq_ignore_ascii_case("deepseek")) =>
+        {
+            request.or_else(|| fallback.map(str::trim).filter(|value| !value.is_empty()))
+        }
+        Provider::OpenCode | Provider::Freebuff | Provider::Aihubmix => return Ok(None),
     };
     let Some(value) = value else {
         return Ok(None);
@@ -2665,7 +3007,7 @@ fn selected_reasoning_effort(
 fn validate_session_id(provider: Provider, session_id: &str) -> Result<(), String> {
     let valid = match provider {
         Provider::Codex | Provider::Claude => Uuid::parse_str(session_id).is_ok(),
-        Provider::OpenCode | Provider::Freebuff => {
+        Provider::OpenCode | Provider::Freebuff | Provider::Aihubmix => {
             let len = session_id.chars().count();
             (1..=160).contains(&len)
                 && session_id.chars().all(|character| {
@@ -2691,6 +3033,47 @@ fn configure_environment(
         command.env(key, value);
     }
     command.env("NO_COLOR", "1");
+    // Ces plafonds sont opt-in : les gros noeuds gardent leur comportement
+    // historique. Sur le profil conteneur 9 Gio, chaque agent et tous ses descendants
+    // evitent de creer un pool de douze threads et des builds paralleles. Les
+    // vingt chats restent actifs ; c'est le travail interne de chacun qui est
+    // rendu plus frugal.
+    if let Ok(heap_mib) = env::var("CST_CHAT_NODE_HEAP_MIB") {
+        if let Ok(heap_mib) = heap_mib.trim().parse::<usize>() {
+            if heap_mib > 0 {
+                command.env("NODE_OPTIONS", format!("--max-old-space-size={heap_mib}"));
+            }
+        }
+    }
+    if let Ok(build_jobs) = env::var("CST_CHAT_BUILD_JOBS") {
+        if let Ok(build_jobs) = build_jobs.trim().parse::<usize>() {
+            if build_jobs > 0 {
+                command
+                    .env("CARGO_BUILD_JOBS", build_jobs.to_string())
+                    .env("CMAKE_BUILD_PARALLEL_LEVEL", build_jobs.to_string())
+                    .env("MAKEFLAGS", format!("-j{build_jobs}"))
+                    .env("npm_config_jobs", build_jobs.to_string())
+                    .env("RUST_TEST_THREADS", build_jobs.to_string());
+            }
+        }
+    }
+    if let Ok(worker_threads) = env::var("CST_CHAT_WORKER_THREADS") {
+        if let Ok(worker_threads) = worker_threads.trim().parse::<usize>() {
+            if worker_threads > 0 {
+                let worker_threads = worker_threads.to_string();
+                command
+                    .env("GOMAXPROCS", &worker_threads)
+                    .env("MKL_NUM_THREADS", &worker_threads)
+                    .env("NUMEXPR_NUM_THREADS", &worker_threads)
+                    .env("OMP_NUM_THREADS", &worker_threads)
+                    .env("OPENBLAS_NUM_THREADS", &worker_threads)
+                    .env("RAYON_NUM_THREADS", &worker_threads)
+                    .env("TOKIO_WORKER_THREADS", &worker_threads)
+                    .env("UV_THREADPOOL_SIZE", &worker_threads);
+            }
+        }
+    }
+    command.env("MALLOC_ARENA_MAX", "1");
     if let Some(project_dir) = project_dir {
         command.current_dir(project_dir);
         command.env("PWD", project_dir.to_string_lossy().to_string());
@@ -4192,6 +4575,7 @@ fn provider_label(provider: Provider) -> &'static str {
         Provider::Claude => "Claude",
         Provider::OpenCode => "OpenCode",
         Provider::Freebuff => "Freebuff",
+        Provider::Aihubmix => "AIHubMix",
     }
 }
 
@@ -4223,7 +4607,24 @@ mod tests {
             model: Some("modele-par-defaut".to_string()),
             reasoning_effort: Some("medium".to_string()),
             fast_mode: false,
+            completed_on: None,
+            api_key: None,
         }
+    }
+
+    fn command_args(command: &Command) -> Vec<String> {
+        command
+            .get_args()
+            .map(|argument| argument.to_string_lossy().to_string())
+            .collect()
+    }
+
+    fn command_env_value(command: &Command, name: &str) -> Option<String> {
+        command.get_envs().find_map(|(candidate, value)| {
+            (candidate == std::ffi::OsStr::new(name))
+                .then(|| value.map(|value| value.to_string_lossy().to_string()))
+                .flatten()
+        })
     }
 
     fn test_turn() -> Arc<ChatTurn> {
@@ -4658,6 +5059,20 @@ mod tests {
     }
 
     #[test]
+    fn every_turn_knows_the_canonical_switch_environment_classification() {
+        for expected in [
+            "SSD/Samsung T7",
+            "poste local pc-fixe",
+            "développement",
+            "VPS Microsoft Azure",
+            "seule version stable/production",
+            "jamais la copie SSD/locale",
+        ] {
+            assert!(SWITCH_ENVIRONMENT_INSTRUCTIONS.contains(expected));
+        }
+    }
+
+    #[test]
     fn codex_terminal_event_stops_visible_work_before_process_exit() {
         let turn = test_turn();
         apply_provider_event(
@@ -4922,6 +5337,138 @@ mod tests {
     }
 
     #[test]
+    fn opencode_chat_gets_the_scoped_goal_mcp_config() {
+        let account = test_account(Provider::OpenCode);
+        let config = ChatModelToolServerConfig {
+            url: "http://127.0.0.1:8080/mcp/chat-tools".to_string(),
+            bearer_token: "secret-capability".to_string(),
+        };
+        let mut command = Command::new("opencode");
+        configure_provider_command(
+            &mut command,
+            &account,
+            None,
+            ChatTurnMode::Build,
+            Some("openrouter/stealth/ox-alpha"),
+            None,
+            None,
+            false,
+            Some(autonomous_agent_tool_instructions()),
+            Some(&config),
+            None,
+        );
+
+        let arguments = command
+            .get_args()
+            .map(|argument| argument.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        assert!(arguments
+            .iter()
+            .any(|argument| argument == "openrouter/stealth/ox-alpha"));
+        assert!(arguments
+            .iter()
+            .all(|argument| !argument.contains("secret-capability")));
+
+        let environment = command
+            .get_envs()
+            .map(|(key, value)| {
+                (
+                    key.to_string_lossy().to_string(),
+                    value.map(|value| value.to_string_lossy().to_string()),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert!(environment.iter().any(|(key, value)| {
+            key == MCP_BEARER_ENV && value.as_deref() == Some("secret-capability")
+        }));
+
+        let raw_config = command
+            .get_envs()
+            .find_map(|(key, value)| {
+                (key == OPENCODE_CONFIG_CONTENT_ENV)
+                    .then(|| value.map(|value| value.to_string_lossy().to_string()))
+                    .flatten()
+            })
+            .expect("OPENCODE_CONFIG_CONTENT absent");
+        let document: Value = serde_json::from_str(&raw_config).unwrap();
+        assert_eq!(
+            document
+                .pointer("/mcp/cst_chat/type")
+                .and_then(Value::as_str),
+            Some("remote")
+        );
+        assert_eq!(
+            document
+                .pointer("/mcp/cst_chat/url")
+                .and_then(Value::as_str),
+            Some("http://127.0.0.1:8080/mcp/chat-tools")
+        );
+        assert_eq!(
+            document
+                .pointer("/mcp/cst_chat/enabled")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            document
+                .pointer("/mcp/cst_chat/oauth")
+                .and_then(Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            document
+                .pointer("/mcp/cst_chat/timeout")
+                .and_then(Value::as_u64),
+            Some(30_000)
+        );
+        assert_eq!(
+            document
+                .pointer("/mcp/cst_chat/headers/Authorization")
+                .and_then(Value::as_str),
+            Some("Bearer {env:CST_CHAT_AUTONOMOUS_TOOL_TOKEN}")
+        );
+        assert!(!raw_config.contains("secret-capability"));
+    }
+
+    #[test]
+    fn opencode_overlay_deep_merges_inherited_config_and_honors_explicit_removal() {
+        let mut command = Command::new("opencode");
+        merge_opencode_config_content_with_inherited(
+            &mut command,
+            json!({ "mcp": { "cst_chat": { "enabled": true } } }),
+            || {
+                Some(
+                    json!({
+                        "mcp": { "personal": { "enabled": true } },
+                        "provider": { "openrouter": { "options": { "sort": "price" } } }
+                    })
+                    .to_string(),
+                )
+            },
+        );
+        let encoded = command_env_value(&command, OPENCODE_CONFIG_CONTENT_ENV).unwrap();
+        let document: Value = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(document["mcp"]["personal"]["enabled"], true);
+        assert_eq!(document["mcp"]["cst_chat"]["enabled"], true);
+        assert_eq!(
+            document["provider"]["openrouter"]["options"]["sort"],
+            "price"
+        );
+
+        let mut removed = Command::new("opencode");
+        removed.env_remove(OPENCODE_CONFIG_CONTENT_ENV);
+        merge_opencode_config_content_with_inherited(
+            &mut removed,
+            json!({ "mcp": { "cst_chat": { "enabled": true } } }),
+            || Some(json!({ "inherited": true }).to_string()),
+        );
+        let encoded = command_env_value(&removed, OPENCODE_CONFIG_CONTENT_ENV).unwrap();
+        let document: Value = serde_json::from_str(&encoded).unwrap();
+        assert!(document.get("inherited").is_none());
+        assert_eq!(document["mcp"]["cst_chat"]["enabled"], true);
+    }
+
+    #[test]
     fn pasted_images_are_validated_written_and_removed() {
         let attachment = ChatImageAttachmentRequest {
             name: "capture.png".to_string(),
@@ -5113,6 +5660,8 @@ mod tests {
         assert!(environment.iter().any(|(key, value)| {
             key == MCP_BEARER_ENV && value.as_deref() == Some("secret-capability")
         }));
+        assert!(autonomous_agent_tool_instructions().contains("appelle `create_goal`"));
+        assert!(autonomous_agent_tool_instructions().contains("`cst_chat_create_goal`"));
         assert!(autonomous_agent_tool_instructions().contains("appelle `create_autonomous_agent`"));
         assert!(autonomous_agent_tool_instructions().contains("appelle `update_autonomous_agent`"));
         assert!(autonomous_agent_tool_instructions().contains("appelle `pause_autonomous_agent`"));
@@ -5386,30 +5935,315 @@ mod tests {
         );
         assert!(selected_model(Some("modele invalide"), None).is_err());
         assert_eq!(
-            selected_reasoning_effort(Provider::Codex, Some("max"), None).unwrap(),
+            selected_reasoning_effort(Provider::Codex, None, Some("max"), None).unwrap(),
             Some("max".to_string())
         );
         assert_eq!(
-            selected_reasoning_effort(Provider::Codex, Some("ultra"), None).unwrap(),
+            selected_reasoning_effort(Provider::Codex, None, Some("ultra"), None).unwrap(),
             Some("ultra".to_string())
         );
-        assert!(selected_reasoning_effort(Provider::Codex, Some("ultra mode"), None).is_err());
+        assert!(
+            selected_reasoning_effort(Provider::Codex, None, Some("ultra mode"), None).is_err()
+        );
         // Claude : l'intensite explicite de la requete est appliquee (--effort).
         assert_eq!(
-            selected_reasoning_effort(Provider::Claude, Some("high"), Some("medium")).unwrap(),
+            selected_reasoning_effort(Provider::Claude, None, Some("high"), Some("medium"))
+                .unwrap(),
             Some("high".to_string())
         );
         // Claude : le defaut Codex herite sur le compte est ignore (pas de
         // fallback), pour ne pas rabaisser un compte Claude sous son defaut natif.
         assert_eq!(
-            selected_reasoning_effort(Provider::Claude, None, Some("medium")).unwrap(),
+            selected_reasoning_effort(Provider::Claude, None, None, Some("medium")).unwrap(),
             None
         );
-        // OpenCode ne gere pas l'intensite.
+        // Les autres fournisseurs OpenCode ne gerent pas l'intensite.
         assert_eq!(
-            selected_reasoning_effort(Provider::OpenCode, Some("high"), None).unwrap(),
+            selected_reasoning_effort(Provider::OpenCode, Some("deepseek"), Some("high"), None)
+                .unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn openrouter_reasoning_effort_uses_request_then_account_fallback_then_automatic() {
+        assert_eq!(
+            selected_reasoning_effort(
+                Provider::OpenCode,
+                Some("openrouter"),
+                Some("high"),
+                Some("medium")
+            )
+            .unwrap(),
+            Some("high".to_string())
+        );
+        assert_eq!(
+            selected_reasoning_effort(Provider::OpenCode, Some("OpenRouter"), None, Some("medium"))
+                .unwrap(),
+            Some("medium".to_string())
+        );
+        assert_eq!(
+            selected_reasoning_effort(Provider::OpenCode, Some("openrouter"), None, None).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn openrouter_command_overlay_registers_selected_model_and_exact_variant() {
+        let mut account = test_account(Provider::OpenCode);
+        account.inference_provider = Some("openrouter".to_string());
+        let mut command = Command::new("opencode");
+        configure_provider_command(
+            &mut command,
+            &account,
+            None,
+            ChatTurnMode::Build,
+            Some("openrouter/~z-ai/glm-latest"),
+            Some("high"),
+            None,
+            false,
+            None,
+            None,
+            None,
+        );
+        configure_opencode_model_overlay(
+            &mut command,
+            &account,
+            Some("openrouter/~z-ai/glm-latest"),
+            Some("high"),
+        )
+        .unwrap();
+
+        let arguments = command_args(&command);
+        assert!(arguments
+            .windows(2)
+            .any(|pair| pair == ["--variant", "high"]));
+        let encoded = command_env_value(&command, OPENCODE_CONFIG_CONTENT_ENV).unwrap();
+        let overlay: Value = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(
+            overlay["provider"]["openrouter"]["models"]["~z-ai/glm-latest"]["variants"]["high"]
+                ["reasoning"]["effort"],
+            "high"
+        );
+        assert!(!encoded.contains("reasoningEffort"));
+        assert!(!encoded.contains("sk-or-"));
+        assert!(!encoded.to_ascii_lowercase().contains("proxy"));
+    }
+
+    #[test]
+    fn deepseek_reasoning_effort_falls_back_to_the_account_default() {
+        assert_eq!(
+            selected_reasoning_effort(
+                Provider::OpenCode,
+                Some("deepseek"),
+                None,
+                Some("max"),
+            )
+            .unwrap(),
+            Some("max".to_string())
+        );
+        assert_eq!(
+            selected_reasoning_effort(
+                Provider::OpenCode,
+                Some("deepseek"),
+                Some("high"),
+                Some("max"),
+            )
+            .unwrap(),
+            Some("high".to_string())
+        );
+        assert_eq!(
+            selected_reasoning_effort(Provider::OpenCode, Some("deepseek"), None, None).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn deepseek_command_overlay_sets_reasoning_effort_in_model_options() {
+        let mut account = test_account(Provider::OpenCode);
+        account.inference_provider = Some("deepseek".to_string());
+        let mut command = Command::new("opencode");
+        configure_opencode_model_overlay(
+            &mut command,
+            &account,
+            Some("deepseek/deepseek-v4-flash"),
+            Some("max"),
+        )
+        .unwrap();
+
+        let encoded = command_env_value(&command, OPENCODE_CONFIG_CONTENT_ENV).unwrap();
+        let overlay: Value = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(
+            overlay["provider"]["deepseek"]["models"]["deepseek-v4-flash"]["options"]
+                ["reasoning_effort"],
+            "max"
+        );
+        // Aucune variante openrouter ni cle ni proxy dans l'overlay.
+        assert!(encoded.contains("reasoning_effort"));
+        assert!(!encoded.to_ascii_lowercase().contains("variant"));
+        assert!(!encoded.contains("sk-"));
+        assert!(!encoded.to_ascii_lowercase().contains("proxy"));
+
+        // Sans effort, aucun overlay deepseek n'est pose (config inchangee).
+        let mut command = Command::new("opencode");
+        configure_opencode_model_overlay(
+            &mut command,
+            &account,
+            Some("deepseek/deepseek-v4-flash"),
+            None,
+        )
+        .unwrap();
+        assert!(command_env_value(&command, OPENCODE_CONFIG_CONTENT_ENV).is_none());
+    }
+
+    #[test]
+    fn openrouter_command_overlay_preserves_existing_mcp_config() {
+        let mut account = test_account(Provider::OpenCode);
+        account.inference_provider = Some("openrouter".to_string());
+        let config = ChatModelToolServerConfig {
+            url: "http://127.0.0.1:8080/mcp/chat-tools".to_string(),
+            bearer_token: "secret-capability".to_string(),
+        };
+        let mut command = Command::new("opencode");
+        configure_provider_command(
+            &mut command,
+            &account,
+            None,
+            ChatTurnMode::Build,
+            Some("openrouter/vendor/model"),
+            Some("low"),
+            None,
+            false,
+            None,
+            Some(&config),
+            None,
+        );
+        configure_opencode_model_overlay(
+            &mut command,
+            &account,
+            Some("openrouter/vendor/model"),
+            Some("low"),
+        )
+        .unwrap();
+
+        let encoded = command_env_value(&command, OPENCODE_CONFIG_CONTENT_ENV).unwrap();
+        let overlay: Value = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(
+            overlay.pointer("/mcp/cst_chat/url").and_then(Value::as_str),
+            Some("http://127.0.0.1:8080/mcp/chat-tools")
+        );
+        assert_eq!(
+            overlay["provider"]["openrouter"]["models"]["vendor/model"]["variants"]["low"]
+                ["reasoning"]["effort"],
+            "low"
+        );
+        assert!(!encoded.contains("secret-capability"));
+    }
+
+    #[test]
+    fn opencode_mcp_overlay_preserves_openrouter_provider_when_applied_last() {
+        let mut account = test_account(Provider::OpenCode);
+        account.inference_provider = Some("openrouter".to_string());
+        let config = ChatModelToolServerConfig {
+            url: "http://127.0.0.1:8080/mcp/chat-tools".to_string(),
+            bearer_token: "secret-capability".to_string(),
+        };
+        let mut command = Command::new("opencode");
+        configure_opencode_model_overlay(
+            &mut command,
+            &account,
+            Some("openrouter/vendor/model"),
+            Some("high"),
+        )
+        .unwrap();
+        configure_opencode_model_tool(&mut command, Some(&config));
+
+        let encoded = command_env_value(&command, OPENCODE_CONFIG_CONTENT_ENV).unwrap();
+        let overlay: Value = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(
+            overlay.pointer("/mcp/cst_chat/url").and_then(Value::as_str),
+            Some("http://127.0.0.1:8080/mcp/chat-tools")
+        );
+        assert_eq!(
+            overlay["provider"]["openrouter"]["models"]["vendor/model"]["variants"]["high"]
+                ["reasoning"]["effort"],
+            "high"
+        );
+        assert!(!encoded.contains("secret-capability"));
+    }
+
+    #[test]
+    fn openrouter_command_overlay_keeps_automatic_without_variant() {
+        let mut account = test_account(Provider::OpenCode);
+        account.inference_provider = Some("openrouter".to_string());
+        let mut command = Command::new("opencode");
+        configure_provider_command(
+            &mut command,
+            &account,
+            None,
+            ChatTurnMode::Build,
+            Some("openrouter/openai/gpt-latest"),
+            None,
+            None,
+            false,
+            None,
+            None,
+            None,
+        );
+        configure_opencode_model_overlay(
+            &mut command,
+            &account,
+            Some("openrouter/openai/gpt-latest"),
+            None,
+        )
+        .unwrap();
+
+        assert!(!command_args(&command)
+            .iter()
+            .any(|argument| argument == "--variant"));
+        let encoded = command_env_value(&command, OPENCODE_CONFIG_CONTENT_ENV).unwrap();
+        let overlay: Value = serde_json::from_str(&encoded).unwrap();
+        let model = &overlay["provider"]["openrouter"]["models"]["openai/gpt-latest"];
+        assert!(model.is_object());
+        assert!(model.get("variants").is_none());
+    }
+
+    #[test]
+    fn openrouter_command_overlay_registers_explicit_none_variant() {
+        let mut account = test_account(Provider::OpenCode);
+        account.inference_provider = Some("openrouter".to_string());
+        let mut command = Command::new("opencode");
+        configure_provider_command(
+            &mut command,
+            &account,
+            None,
+            ChatTurnMode::Build,
+            Some("openrouter/vendor/optional-reasoning"),
+            Some("none"),
+            None,
+            false,
+            None,
+            None,
+            None,
+        );
+        configure_opencode_model_overlay(
+            &mut command,
+            &account,
+            Some("openrouter/vendor/optional-reasoning"),
+            Some("none"),
+        )
+        .unwrap();
+
+        let encoded = command_env_value(&command, OPENCODE_CONFIG_CONTENT_ENV).unwrap();
+        let overlay: Value = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(
+            overlay["provider"]["openrouter"]["models"]["vendor/optional-reasoning"]["variants"]
+                ["none"]["reasoning"]["effort"],
+            "none"
+        );
+        assert!(command_args(&command)
+            .windows(2)
+            .any(|pair| pair == ["--variant", "none"]));
     }
 
     #[test]
@@ -5514,6 +6348,43 @@ mod tests {
         assert!(!active[0].waiting_for_user);
         assert!(active[1].waiting_for_user);
         assert_eq!(manager.active_count(), 2);
+    }
+
+    #[test]
+    fn global_chat_capacity_accepts_twenty_and_rejects_the_twenty_first_atomically() {
+        let manager = ChatTurnManager::with_max_active(20);
+        for id in 1..=20 {
+            let turn = test_turn();
+            turn.snapshot.lock().unwrap().id = id;
+            manager.turns.lock().unwrap().insert(id, turn);
+        }
+
+        let request = StartChatTurnRequest {
+            account_id: "account".to_string(),
+            session_id: None,
+            prompt: "test".to_string(),
+            image_attachments: Vec::new(),
+            project_dir: None,
+            mode: ChatTurnMode::Build,
+            model: None,
+            reasoning_effort: None,
+            app_connectors: None,
+            app_write_approved: false,
+            agent_tools: Vec::new(),
+            agent_skills: Vec::new(),
+            question_tool: false,
+            proof_tool: false,
+            source_chat_key: None,
+        };
+        let error = manager.start(request).expect_err("capacity must reject");
+        assert!(error.starts_with("capacite chats atteinte: 20/20"));
+    }
+
+    #[test]
+    fn zero_chat_capacity_has_no_numeric_limit() {
+        let manager = ChatTurnManager::with_max_active(0);
+        assert_eq!(manager.max_active, 0);
+        assert!(!(manager.max_active > 0 && 10_000 >= manager.max_active));
     }
 
     #[test]

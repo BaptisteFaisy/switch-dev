@@ -1,0 +1,9 @@
+*
+!Dockerfile
+!server.mjs
+!time.mjs
+!public/
+!public/**
+social.env
+social-store.json
+*.log

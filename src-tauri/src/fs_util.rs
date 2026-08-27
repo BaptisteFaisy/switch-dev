@@ -33,6 +33,21 @@ pub fn atomic_write(path: &Path, contents: impl AsRef<[u8]>) -> io::Result<()> {
     result
 }
 
+/// Restreint un fichier persistant contenant des donnees privees au seul
+/// compte qui execute Switch. Sous Windows, les ACL du repertoire de donnees
+/// restent l'autorite et aucun chmod POSIX equivalent n'est disponible ici.
+#[cfg(not(windows))]
+pub fn restrict_private_file(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+}
+
+#[cfg(windows)]
+pub fn restrict_private_file(_path: &Path) -> io::Result<()> {
+    Ok(())
+}
+
 fn unique_temp_path(path: &Path) -> PathBuf {
     let mut name = OsString::from(".");
     name.push(

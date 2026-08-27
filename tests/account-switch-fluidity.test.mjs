@@ -80,10 +80,11 @@ test("un transfert de quota reutilise le panneau existant et sait revenir en arr
   assert.match(resume, /if \(!sent && transferSnapshot\)/);
   assert.match(
     main,
-    /continueDiscussionWith\(currentDiscussion, suggestion\.accountId, pane, \{\s*preserveNavigation: true,\s*\}\)/,
+    /continueDiscussionWith\(currentDiscussion, suggestion\.accountId, pane, \{[\s\S]*?preserveNavigation: true,[\s\S]*?activateTarget: pane === null,[\s\S]*?\}\)/,
   );
   assert.match(resume, /const preserveNavigation = options\.preserveNavigation === true/);
-  assert.match(resume, /const activateReusePane = !!reusePane && !preserveNavigation/);
+  assert.match(resume, /const activateTarget = options\.activateTarget === true/);
+  assert.match(resume, /activeExpertChatKey = pane\.key;[\s\S]*?moveExpertChatPageToPane\(pane\)/);
 });
 
 test("la progression de bascule est visible, accessible et animee sans mouvement force", () => {
@@ -109,10 +110,17 @@ test("la reprise automatique ne montre plus le changement de compte", () => {
 test("le chargement du catalogue modele ne declenche plus de rendu global", () => {
   const catalog = block("const loadChatModelCatalog =", "const reasoningEffortOptions =");
   assert.match(catalog, /visiblePanes\.forEach\(\(pane\) => refreshExpertChatPane\(pane\)\)/);
-  assert.doesNotMatch(catalog, /\brender\(\)/);
+  // Le rendu global ne survit que pour la vue pool (qui n'a pas de panneaux a
+  // rafraichir individuellement) ; jamais pour les chats.
+  assert.doesNotMatch(catalog, /if \(activeView === "chat"\)\s*render\(\)/);
+  assert.match(catalog, /else if \(activeView === "pool"\) render\(\);/);
 });
 
-test("le nouveau compte est libere avant l'archivage et le rescannage", () => {
+test("le nouveau compte est libere, la vue source est detachee et l'historique reste intact", () => {
+  const detach = block(
+    "const detachTransferredDiscussionSourceFromOpenViews =",
+    "const syncStatusTextDom =",
+  );
   const finalization = block(
     "const finalizeTransferredDiscussion =",
     "const releaseTransferredDiscussion =",
@@ -126,26 +134,32 @@ test("le nouveau compte est libere avant l'archivage et le rescannage", () => {
     "const discussionHasRunningTurn =",
   );
 
-  assert.match(finalization, /await archiveTransferredDiscussion\(discussion\)/);
-  assert.match(finalization, /discussionBusyId === discussion\.sessionId/);
+  assert.match(finalization, /discussionTargetSel\.delete\(discussionIdentityKey\(discussion\)\)/);
+  assert.match(finalization, /discussionIsBusy\(discussion\)/);
   assert.match(finalization, /await refreshDiscussions\(\)/);
+  assert.doesNotMatch(
+    finalization,
+    /archiveTransferredDiscussion|closeTransferredDiscussionSource|delete_discussion/,
+  );
+  assert.match(detach, /stopChatSync\(\)/);
+  assert.match(detach, /chatDiscussion = null/);
+  assert.match(detach, /chatTurn = null/);
+  assert.doesNotMatch(detach, /delete_discussion|archive: true/);
+  assert.match(release, /detachTransferredDiscussionSourceFromOpenViews\(discussion\)/);
   assert.match(release, /setExpertChatAccountTransition\(transferPane, null\)/);
   assert.match(release, /void finalizeTransferredDiscussion\(discussion, target, pendingStatus\)/);
-  assert.doesNotMatch(release, /await archiveTransferredDiscussion|await refreshDiscussions/);
+  assert.doesNotMatch(release, /await refreshDiscussions/);
   assert.doesNotMatch(release, /discussionBusyId = null/);
   assert.equal(
     (continuation.match(/releaseTransferredDiscussion\(discussion, target, transferPane\)/g) ?? [])
       .length,
-    2,
+    4,
   );
 });
 
 test("la copie Codex ne recharge ni ne rescane tout le transcript", () => {
   const start = discussions.indexOf("fn copy_discussion(");
-  const end = discussions.indexOf(
-    "\n// ---------------------------------------------------------------------------\n// (d) move_discussion",
-    start,
-  );
+  const end = discussions.indexOf("\n// (d) move_discussion", start);
   assert.notEqual(start, -1);
   assert.notEqual(end, -1);
   const copy = discussions.slice(start, end);

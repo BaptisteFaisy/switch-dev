@@ -4,6 +4,32 @@ Application Tauri + xterm.js pour utiliser plusieurs comptes Codex, Claude ou
 des fournisseurs API pilotes par OpenCode, ouvrir des chats et lancer des
 terminaux dans un projet choisi.
 
+## Environnements Switch
+
+- La version stockée sur le **SSD Samsung T7** ou exécutée sur le poste local
+  **pc-fixe** est exclusivement la version de **développement**.
+- La version hébergée sur le **VPS Microsoft Azure** est la version
+  **stable / production**.
+- Sans autre précision, les termes « stable », « production » et « prod »
+  désignent toujours le VPS Azure, jamais la copie SSD/locale.
+- Les deux environnements restent séparés : aucune synchronisation, promotion,
+  mise en production ou relance croisée sans demande explicite de Jean-Pierre.
+
+## Porte obligatoire avant chaque build
+
+Toute compilation doit partir d'un nouveau snapshot immuable qui conserve et
+fusionne les modifications faites entre-temps. La source canonique et le
+snapshot sont inventoriés par SHA-256 avant et après le build ; une dérive,
+un conflit ou une provenance absente invalide l'artefact. Il est interdit de
+« nettoyer » une worktree avec reset/clean/restore/checkout, stash drop, une
+copie forcée ou une synchronisation miroir.
+
+`scripts/switch-build-source-guard.ps1` réalise la capture et la vérification.
+Les commandes `npm run build`, `build:frontend`, `build:server` et
+`build:android` appellent désormais cette porte et refusent de démarrer sans
+manifeste frais. Aucun déploiement VPS ne peut être déduit d'un « go » générique
+ou d'une commande visant l'environnement de développement.
+
 ## Principe
 
 Le fonctionnement est volontairement direct :
@@ -693,6 +719,24 @@ acces a l'ecran de cette machine pour la connexion ou les questions manuelles.
 
 ## Serveur web local
 
+### Dashboard Instagram et TikTok (développement)
+
+La pile locale peut ajouter un dashboard **Réseaux sociaux** qui connecte les
+comptes via les OAuth officiels Instagram et TikTok, puis trace les vues par jour
+et par compte sur un graphique 2D. Le module reste masqué si son sidecar n'est pas
+disponible et n'est câblé que dans `compose.yaml`, réservé au développement.
+
+La configuration des secrets, des URI de retour et la sémantique des métriques
+sont décrites dans [`social-analytics/README.md`](social-analytics/README.md).
+
+### Règle d'accès (sécurité)
+
+L'URL de développement `https://pc-fixe-cst.tail3a8bdf.ts.net/` (et `:10000`)
+est réservée au **VPS Azure** : c'est le seul tiers autorisé à s'y connecter.
+Tout accès public est interdit sur cette instance — pas de Tailscale Funnel,
+pas de port applicatif publié sur Internet. Un accès externe éventuel doit
+passer par le tailnet privé avec le VPS Azure comme seul tiers autorisé.
+
 Pour utiliser le PC comme serveur :
 
 ```powershell
@@ -726,6 +770,15 @@ Pour autoriser le port 8080 sur le profil reseau prive :
 
 En mode serveur, une URL de depot est clonee normalement dans le repertoire de
 donnees. Les chats et terminaux utilisent ensuite directement ce clone.
+
+## Incident connu documenté : saisie après Chat → Terminal
+
+Le correctif de la perte de clavier lors du passage d'un chat à un terminal web/VPS
+est documenté dans [`docs/terminal-focus-vps-fix.md`](docs/terminal-focus-vps-fix.md).
+Il protège à la fois le focus xterm après remontage du DOM et les caractères saisis
+pendant une reconnexion du PTY. Toute modification future du transport ou du
+rendu doit conserver ces deux protections et vérifier les tests ciblés avant
+publication.
 
 ## Build et tests
 
@@ -938,6 +991,28 @@ Le même flux est sélectionnable dans **Choisir un environnement → Depuis Git
 Le déploiement direct utilise `--deploy utilisateur@hote`. Le guide
 [Dockerize Git](docs/dockerize-git.md) décrit le paquet portable, les stacks
 détectées, les secrets, les monorepos et la construction native sur le VPS.
+
+### Goal persistant dans le TUI Freebuff
+
+Switch installe automatiquement le skill `switch-create-goal` dans chaque home
+Freebuff. Dans le TUI, lance-le avec
+`/skill:switch-create-goal <objectif>` : le skill utilise les outils MCP
+`cst_goal__create_goal`, `cst_goal__get_goal` et `cst_goal__update_goal`.
+
+Un seul goal inacheve peut exister par proprietaire et environnement. Cette
+portee reste stable quand Freebuff recree son terminal ou transfere la discussion
+vers un autre compte. Le goal est conserve dans `terminal-goals.json` apres la
+fermeture du PTY ou le redemarrage du serveur. Le statut `blocked` reste
+inacheve : le meme goal doit reprendre puis passer a `complete` avant qu'un
+remplacement soit autorise. Le bearer MCP est injecte uniquement dans
+l'environnement du processus Freebuff et n'est jamais enregistre dans
+`mcp.json`.
+
+Pour un travail logiciel, le skill impose aussi une preuve temporaire couvrant
+les cas normaux, limites et d'erreur — jusqu'a quelques milliers de scenarios
+generes lorsqu'ils sont deterministes et peu couteux. Tant qu'un test requis
+echoue, le goal reste inacheve et le travail continue. Une fois tout valide, le
+skill supprime seulement ces tests temporaires puis relance les tests permanents.
 
 ## Mobile
 

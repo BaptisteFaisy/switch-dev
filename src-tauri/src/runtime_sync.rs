@@ -11,7 +11,9 @@ const RUNTIME_SYNC_BUFFER: usize = 64;
 #[serde(rename_all = "camelCase")]
 pub(crate) enum RuntimeSyncTopic {
     ActiveChatTurns,
+    ActiveTerminals,
     AutonomousAgents,
+    AccountCompletions,
     PrivateMessages,
 }
 
@@ -92,7 +94,9 @@ mod tests {
         let mut events = sync.subscribe();
 
         sync.notify(RuntimeSyncTopic::ActiveChatTurns);
+        sync.notify(RuntimeSyncTopic::ActiveTerminals);
         sync.notify(RuntimeSyncTopic::AutonomousAgents);
+        sync.notify(RuntimeSyncTopic::AccountCompletions);
 
         assert_eq!(
             events.try_recv().unwrap(),
@@ -105,12 +109,28 @@ mod tests {
         assert_eq!(
             events.try_recv().unwrap(),
             RuntimeSyncEvent {
-                topic: RuntimeSyncTopic::AutonomousAgents,
+                topic: RuntimeSyncTopic::ActiveTerminals,
                 revision: 2,
                 user_ids: None,
             }
         );
-        assert_eq!(sync.revision(), 2);
+        assert_eq!(
+            events.try_recv().unwrap(),
+            RuntimeSyncEvent {
+                topic: RuntimeSyncTopic::AutonomousAgents,
+                revision: 3,
+                user_ids: None,
+            }
+        );
+        assert_eq!(
+            events.try_recv().unwrap(),
+            RuntimeSyncEvent {
+                topic: RuntimeSyncTopic::AccountCompletions,
+                revision: 4,
+                user_ids: None,
+            }
+        );
+        assert_eq!(sync.revision(), 4);
     }
 
     #[test]

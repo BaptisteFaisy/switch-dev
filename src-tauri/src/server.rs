@@ -12,23 +12,37 @@ use crate::{
     chat_model_tools::{
         self, ApplyAutonomousAgentPolicyToolArguments, AutonomousAgentToolContext,
         ChatModelToolServerConfig, ChatOpenRequestRegistry, ChatToolCapabilityRegistry,
-        ChatToolScope, CreateAutonomousAgentToolArguments, CreateChatToolArguments,
-        UpdateAutonomousAgentToolArguments, ACTIVATE_SUPERVISOR_GENERAL_REPORT_TOOL_NAME,
-        APPLY_AUTONOMOUS_AGENT_POLICY_TOOL_NAME, AUTONOMOUS_AGENT_TOOL_NAME,
+        ChatToolScope, CreateAutonomousAgentToolArguments, CreateAutonomousGoalToolArguments,
+        CreateChatToolArguments, CreateTerminalGoalToolArguments,
+        UpdateAutonomousAgentToolArguments, UpdateGoalToolArguments,
+        ACTIVATE_SUPERVISOR_GENERAL_REPORT_TOOL_NAME, APPLY_AUTONOMOUS_AGENT_POLICY_TOOL_NAME,
+        AUTONOMOUS_AGENT_TOOL_NAME, CONTROL_DEVICE_TOOL_NAME,
         CONTROL_PRIVATE_MESSAGE_CAMPAIGN_TOOL_NAME, CREATE_CALENDAR_EVENT_TOOL_NAME,
-        CREATE_CHAT_TOOL_NAME, CREATE_PRIVATE_MESSAGE_CAMPAIGN_TOOL_NAME,
-        LIST_CALENDAR_EVENTS_TOOL_NAME, LIST_OUTLOOK_MESSAGES_TOOL_NAME,
+        CREATE_CHAT_TOOL_NAME, CREATE_GOAL_TOOL_NAME, CREATE_PRIVATE_MESSAGE_CAMPAIGN_TOOL_NAME,
+        GET_CONTROL_DEVICE_ACTION_TOOL_NAME, GET_GOAL_TOOL_NAME, LIST_CALENDAR_EVENTS_TOOL_NAME,
+        LIST_CONTROL_DEVICES_TOOL_NAME, LIST_OUTLOOK_MESSAGES_TOOL_NAME,
         LIST_PRIVATE_MESSAGE_CAMPAIGNS_TOOL_NAME, LIST_PRIVATE_MESSAGE_USERS_TOOL_NAME,
         LIST_TIKTOK_DM_CAMPAIGNS_TOOL_NAME, LIST_TIKTOK_FOLLOWER_EXTRACTIONS_TOOL_NAME,
         LIST_TIKTOK_SENDER_ACCOUNTS_TOOL_NAME, MANAGE_TIKTOK_SENDER_LOGIN_TOOL_NAME,
         PAUSE_AUTONOMOUS_AGENT_TOOL_NAME, PREPARE_TIKTOK_DM_CAMPAIGN_TOOL_NAME,
         QUEUE_TIKTOK_FOLLOWER_EXTRACTION_TOOL_NAME, SELECT_TIKTOK_SENDER_ACCOUNT_TOOL_NAME,
         SEND_OUTLOOK_EMAIL_TOOL_NAME, SEND_TIKTOK_DM_CAMPAIGN_TOOL_NAME,
-        UPDATE_AUTONOMOUS_AGENT_TOOL_NAME, UPDATE_CALENDAR_EVENT_TOOL_NAME,
+        UPDATE_AUTONOMOUS_AGENT_TOOL_NAME, UPDATE_CALENDAR_EVENT_TOOL_NAME, UPDATE_GOAL_TOOL_NAME,
     },
     creative_accounts::{self, ConnectCreativeAccountRequest, CreativeAccountIdRequest},
+    freebuff_cloud::{self, AgentRunStreamQuery, ConnectFreebuffCloudRequest, ConnectRepoRequest, CreateBlankProjectRequest, DeleteProjectRequest},
+    device_fleet::{
+        self, DeviceActionKind, DeviceActionRecord, DeviceActionRequest, DeviceActionResult,
+        DeviceActionStatus, DeviceConnectorClaimRequest, DeviceConnectorClaimResponse,
+        DeviceConnectorHeartbeatRequest, DeviceConnectorReportRequest, DeviceFleetError,
+        DeviceFleetManager,
+    },
     discussions,
     doctolib_lab::{self, DoctolibLabManager, DoctolibLabSearchRequest},
+    duello_bank::{
+        CreditDuelloWalletRequest, DuelloBankClient, DuelloBankConfig, DuelloBankError,
+        DuelloBankErrorKind,
+    },
     forum::{ForumAuthor, ForumError, ForumManager},
     git_docker_environment::{self, CreateGitDockerEnvironmentRequest},
     image_generation::{self, ImageGenerationRequest, ImageGenerationStatusRequest},
@@ -49,12 +63,13 @@ use crate::{
         PrivateMessageImageRequest, PrivateMessageManager, PrivateMessageUser,
         MAX_PRIVATE_MESSAGE_REQUEST_BYTES,
     },
-    runtime_sync::RuntimeSync,
+    runtime_sync::{RuntimeSync, RuntimeSyncTopic},
     settings::{self, AccountProfile, AppSettings, Provider},
     telegram_notifications::{
         self, ConnectTelegramManagerRequest, ConnectTelegramRequest,
         PrepareManagedTelegramBotRequest,
     },
+    terminal_goal::{terminal_goal_key, TerminalGoalManager},
     tiktok_messaging::{
         ConfirmTikTokDmCampaignRequest, PrepareTikTokDmCampaignRequest,
         QueueTikTokFollowerExtractionRequest, QueueTikTokSenderSetupRequest,
@@ -63,17 +78,17 @@ use crate::{
         TikTokFollowerResultReportRequest, TikTokFollowerSubmissionReportRequest,
         TikTokSenderSetupActionKind, TikTokSenderSetupReportRequest,
     },
+    referral::{CreateReferralCodeRequest, ReferralManager},
+    tracking::{CreateTrackingLinkRequest, TrackingManager},
     video_generation::{self, VideoGenerationRequest, VideoGenerationStatusRequest},
     voice,
-    vps_deploy::{
-        StartGoogleCloudDeployRequest, StartVpsDeployRequest, VpsDeployError, VpsDeployManager,
-    },
+    vps_deploy::{StartVpsDeployRequest, VpsDeployError, VpsDeployManager},
     whatsapp_notifications::{self, ConnectWhatsAppRequest},
     work_time,
     workspace_access::{WorkspaceAccessError, WorkspaceAccessErrorKind, WorkspaceAccessManager},
 };
 use axum::{
-    body::Bytes,
+    body::{Body, Bytes},
     extract::{
         rejection::JsonRejection,
         ws::{Message, WebSocket, WebSocketUpgrade},
@@ -84,12 +99,14 @@ use axum::{
         HeaderMap, HeaderValue, StatusCode,
     },
     middleware::{self, Next},
-    response::{IntoResponse, Response},
+    response::{IntoResponse, Redirect, Response},
     routing::{delete, get, post},
     Json, Router,
 };
 use futures_util::{SinkExt, StreamExt};
-use portable_pty::{CommandBuilder, MasterPty, NativePtySystem, PtySize, PtySystem};
+use portable_pty::{
+    Child as PtyChild, CommandBuilder, MasterPty, NativePtySystem, PtySize, PtySystem,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -114,10 +131,74 @@ use uuid::Uuid;
 const WORKSPACE_RETENTION_SECS: u64 = 7 * 24 * 60 * 60;
 const DEFAULT_DRAIN_LEASE_SECS: u64 = 20;
 const MAX_DRAIN_LEASE_SECS: u64 = 60;
+/// Ces secrets appartiennent uniquement au processus serveur. Les laisser dans
+/// son environnement permettrait aux providers et terminaux qu'il lance de les
+/// heriter, notamment le jeton capable d'activer `/api/admin/drain`.
+const SERVER_CONTROL_SECRET_ENV_VARS: [&str; 3] = [
+    "CST_ADMIN_TOKEN",
+    "CST_GIT_PAT",
+    "CST_DUELLO_BANK_ADMIN_TOKEN",
+];
 // Le receiver conserve les sorties produites entre le demarrage du PTY et
 // l'ouverture du WebSocket par le navigateur. Une capacite genereuse evite de
 // perdre l'ecran ANSI initial d'une TUI telle que Codex.
-const TERMINAL_EVENT_BUFFER: usize = 2_048;
+// 2048 blocs de 8 Kio couvrent environ 16 Mio de sortie en attente par
+// terminal. La hausse reduit fortement les evenements jetes (`RecvError::Lagged`)
+// pendant les rafales (builds, npm, TUI) qui se traduisaient par des « sauts »
+// ou des gels d'affichage. La memoire n'est allouee que si le consommateur
+// WebSocket est en retard, donc le cout au repos reste nul.
+const TERMINAL_EVENT_BUFFER: usize = 2048;
+// Regroupe uniquement les fragments PTY deja disponibles. Cette limite borne
+// la taille d'une trame WebSocket sans ajouter de temporisation a l'echo du
+// terminal. Un fragment qui ferait depasser la limite reste en attente pour la
+// trame suivante.
+const TERMINAL_WS_DATA_BATCH_BYTES: usize = 64 * 1024;
+
+/// Decode un flux d'octets en chaines UTF-8 valides en conservant, d'un read a
+/// l'autre, la fin d'une sequence multi-octets coupee par la taille du buffer
+/// du PTY. Sans cela, `from_utf8_lossy` insere un U+FFFD a chaque sequence
+/// coupee (accents/emojis corrompus).
+fn incremental_utf8_decoder() -> impl FnMut(&[u8]) -> String {
+    let mut carry: Vec<u8> = Vec::new();
+    move |chunk: &[u8]| {
+        let mut buf = std::mem::take(&mut carry);
+        buf.extend_from_slice(chunk);
+        let mut remaining = buf.as_slice();
+        let mut output = String::new();
+
+        loop {
+            match std::str::from_utf8(remaining) {
+                Ok(valid) => {
+                    output.push_str(valid);
+                    break;
+                }
+                Err(error) => {
+                    let valid_up_to = error.valid_up_to();
+                    // SAFETY: `valid_up_to` est garanti etre une frontiere UTF-8
+                    // valide par `std::str::from_utf8`.
+                    output.push_str(unsafe {
+                        std::str::from_utf8_unchecked(&remaining[..valid_up_to])
+                    });
+                    match error.error_len() {
+                        Some(invalid_len) => {
+                            output.push('\u{FFFD}');
+                            remaining = &remaining[valid_up_to + invalid_len..];
+                        }
+                        None => {
+                            // Une sequence incomplete peut suivre un octet
+                            // invalide : seule cette queue doit attendre le
+                            // prochain read.
+                            carry.extend_from_slice(&remaining[valid_up_to..]);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        output
+    }
+}
 
 /// Version du binaire, exposee par `/healthz`, `/api/health` et `--version`.
 /// Un tour lance avec le jeton administrateur n'a pas de compte nominatif :
@@ -143,12 +224,24 @@ pub struct ServerConfig {
     node_id: String,
     node_label: String,
     node_capacity: usize,
+    terminal_capacity: usize,
     /// Racine autorisee pour le navigateur de dossiers et les workspaces
     /// pointant un dossier EXISTANT (`workspacePath`). Definie via
     /// `CST_WORKSPACES_ROOT` (defaut : dossier personnel). Toute navigation ou
     /// selection en dehors de cette racine est refusee. Stockee sous forme
     /// canonique pour une comparaison de prefixe fiable.
     workspaces_root: PathBuf,
+    /// Endpoint de l'application Duello qui renvoie le nombre de personnes
+    /// parrainees par code (`CST_DUELLO_REFERRAL_API_URL`). Vide = suivi inactif.
+    duello_referral_api_url: Option<String>,
+    /// Jeton optionnel envoye en `Authorization: Bearer` a l'endpoint Duello.
+    duello_referral_api_key: Option<String>,
+    /// Base publique de l'application Duello pour construire le lien
+    /// `{appUrl}?ref={code}` (`CST_DUELLO_APP_URL`).
+    duello_app_url: String,
+    /// Acces serveur uniquement au grand livre Duello. Le jeton est lu avant le
+    /// runtime puis retire de l'environnement des terminaux enfants.
+    duello_bank: DuelloBankConfig,
 }
 
 #[derive(Clone)]
@@ -161,10 +254,15 @@ struct ServerState {
     chat_open_requests: ChatOpenRequestRegistry,
     microsoft: MicrosoftManager,
     autonomous: AutonomousAgentManager,
+    terminal_goals: TerminalGoalManager,
     orchestration: OrchestrationManager,
     forum: ForumManager,
     private_messages: PrivateMessageManager,
     tiktok_messaging: TikTokDmManager,
+    device_fleet: DeviceFleetManager,
+    tracking: TrackingManager,
+    referral: ReferralManager,
+    duello_bank: DuelloBankClient,
     workspace_access: WorkspaceAccessManager,
     doctolib_lab: Arc<DoctolibLabManager>,
     kombai: Arc<KombaiManager>,
@@ -175,6 +273,19 @@ struct ServerState {
     /// updater interrompu laisse le noeud ferme aux autres agents. Les sessions
     /// deja ouvertes continuent et un redemarrage repart toujours non draine.
     drain_until: Arc<AtomicI64>,
+    /// Coordination du nettoyage declenche depuis l'interface web : le serveur
+    /// ne fait que porter la demande et le dernier resultat ; le travail reel
+    /// est execute par le gardien Windows qui surveille `/healthz`.
+    cleanup: Arc<CleanupCoordinator>,
+}
+
+/// Demande de nettoyage en attente + dernier resultat publie par l'agent
+/// Windows. Tout est volatile (en memoire) : apres un redemarrage, aucun
+/// nettoyage n'est en attente et il n'y a plus de resultat a montrer.
+#[derive(Default)]
+struct CleanupCoordinator {
+    requested_at: AtomicI64,
+    last_result: std::sync::Mutex<Option<serde_json::Value>>,
 }
 
 #[derive(Debug, Clone)]
@@ -208,6 +319,10 @@ impl RequestActor {
 struct StartTerminalRequest {
     id: Option<u64>,
     account_id: String,
+    #[serde(default)]
+    agent_id: Option<String>,
+    #[serde(default)]
+    source_terminal_key: Option<String>,
     /// Depot Git a cloner normalement sur le serveur. Les clones inutilises
     /// depuis sept jours sont nettoyes. Ignore si `workspace_path` est fourni.
     #[serde(default)]
@@ -266,6 +381,7 @@ struct HealthResponse {
     active_chat_turns: usize,
     available_account_ids: Vec<String>,
     capacity: usize,
+    terminal_capacity: usize,
     started_at: i64,
 }
 
@@ -284,6 +400,11 @@ struct LivenessResponse {
     active_terminals: usize,
     active_chat_turns: usize,
     capacity: usize,
+    terminal_capacity: usize,
+    /// Vrai tant qu'un nettoyage demande depuis l'interface web n'a pas encore
+    /// ete execute par le gardien Windows. Lu sans authentification par le
+    /// gardien, comme le reste de `/healthz` : aucun secret ici.
+    cleanup_pending: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -469,7 +590,9 @@ enum ServerWsMessage {
     Status {
         id: u64,
         status: String,
+        #[serde(rename = "workspaceId")]
         workspace_id: String,
+        #[serde(rename = "workspacePath")]
         workspace_path: String,
     },
     Pong {
@@ -486,11 +609,29 @@ enum ClientWsMessage {
     Ping,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 struct RemoteTerminalManager {
     sessions: Arc<Mutex<HashMap<u64, Arc<RemoteTerminalSession>>>>,
     reservations: Arc<Mutex<HashSet<u64>>>,
+    starting_freebuff_accounts: Arc<Mutex<HashSet<String>>>,
+    device_terminal_tokens: Arc<Mutex<HashMap<String, DeviceTerminalCapability>>>,
+    device_fleet: DeviceFleetManager,
     next_id: Arc<AtomicU64>,
+    max_active: usize,
+    runtime_sync: RuntimeSync,
+    goal_tool_capabilities: Option<ChatToolCapabilityRegistry>,
+    goal_tools_url: Option<String>,
+}
+
+impl Default for RemoteTerminalManager {
+    fn default() -> Self {
+        Self::with_max_active(crate::resource_profile::configured_terminal_capacity())
+    }
+}
+
+struct TerminalEventCursor {
+    receiver: broadcast::Receiver<ServerWsMessage>,
+    prefetched: Option<ServerWsMessage>,
 }
 
 struct RemoteTerminalSession {
@@ -498,30 +639,248 @@ struct RemoteTerminalSession {
     master: Mutex<Box<dyn MasterPty + Send>>,
     child: Mutex<Box<dyn portable_pty::Child + Send>>,
     events: broadcast::Sender<ServerWsMessage>,
-    pending_events: Mutex<Option<broadcast::Receiver<ServerWsMessage>>>,
+    pending_events: Mutex<Option<TerminalEventCursor>>,
+    socket_generation: AtomicU64,
     started_at: i64,
     owner_id: String,
     account_id: String,
     account_label: String,
+    agent_id: Option<String>,
+    source_terminal_key: Option<String>,
     workspace_id: String,
     workspace_path: PathBuf,
+    login_only: bool,
+    device_terminal_capability: Option<ActiveDeviceTerminalCapability>,
+    device_terminal_tokens: Arc<Mutex<HashMap<String, DeviceTerminalCapability>>>,
+    device_fleet: DeviceFleetManager,
     recorded_end: AtomicBool,
+    /// Lease du bearer MCP Freebuff. La retirer revoque immediatement la
+    /// capacite, meme si un WebSocket conserve encore un Arc de session.
+    goal_tool_lease: Mutex<Option<TerminalGoalToolLease>>,
+}
+
+struct TerminalGoalToolLease {
+    server: ChatModelToolServerConfig,
+    registry: ChatToolCapabilityRegistry,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DeviceTerminalCapability {
+    owner_id: String,
+    origin_id: String,
+    terminal_id: u64,
+}
+
+#[derive(Debug, Clone)]
+struct ActiveDeviceTerminalCapability {
+    token: String,
+    context: DeviceTerminalCapability,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DeviceActionAccess {
+    OwnerAll,
+    OriginOnly(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DeviceActionContext {
+    owner_id: String,
+    access: DeviceActionAccess,
+}
+
+impl DeviceTerminalCapability {
+    fn action_context(&self) -> DeviceActionContext {
+        DeviceActionContext {
+            owner_id: self.owner_id.clone(),
+            access: DeviceActionAccess::OriginOnly(self.origin_id.clone()),
+        }
+    }
+}
+
+impl DeviceActionContext {
+    fn queue_action(
+        &self,
+        device_fleet: &DeviceFleetManager,
+        request: DeviceActionRequest,
+    ) -> Result<DeviceActionRecord, DeviceFleetError> {
+        match &self.access {
+            DeviceActionAccess::OwnerAll => device_fleet.queue_action(&self.owner_id, request),
+            DeviceActionAccess::OriginOnly(origin_id) => {
+                device_fleet.queue_ephemeral_action(&self.owner_id, origin_id, request)
+            }
+        }
+    }
+
+    fn action_status(
+        &self,
+        device_fleet: &DeviceFleetManager,
+        action_id: &str,
+    ) -> Result<DeviceActionRecord, DeviceFleetError> {
+        match &self.access {
+            DeviceActionAccess::OwnerAll => device_fleet.action_status(&self.owner_id, action_id),
+            DeviceActionAccess::OriginOnly(origin_id) => {
+                device_fleet.action_status_for_origin(&self.owner_id, origin_id, action_id)
+            }
+        }
+    }
+
+    async fn wait_action(
+        &self,
+        device_fleet: &DeviceFleetManager,
+        action_id: &str,
+        timeout: Duration,
+    ) -> Result<DeviceActionRecord, DeviceFleetError> {
+        match &self.access {
+            DeviceActionAccess::OwnerAll => {
+                device_fleet
+                    .wait_action(&self.owner_id, action_id, timeout)
+                    .await
+            }
+            DeviceActionAccess::OriginOnly(origin_id) => {
+                device_fleet
+                    .wait_action_for_origin(&self.owner_id, origin_id, action_id, timeout)
+                    .await
+            }
+        }
+    }
+}
+
+impl Drop for TerminalGoalToolLease {
+    fn drop(&mut self) {
+        self.registry.revoke(&self.server.bearer_token);
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoteTerminalSummary {
+    id: u64,
+    account_id: String,
+    account_label: String,
+    agent_id: Option<String>,
+    source_terminal_key: Option<String>,
+    workspace_id: String,
+    workspace_path: String,
+    started_at: i64,
+    login_only: bool,
+    /// Vrai quand ce n'est pas un PTY lance par Switch mais une instance
+    /// Freebuff Desktop tournee directement sur le poste (home occupe). La
+    /// presence est synchronisee, mais Switch ne pilote pas son PTY.
+    #[serde(default)]
+    external: bool,
 }
 
 impl Drop for RemoteTerminalSession {
     fn drop(&mut self) {
         if let Ok(mut child) = self.child.lock() {
-            let _ = child.kill();
+            let _ = terminate_remote_terminal_process_tree(child.as_mut());
         }
     }
 }
 
+fn terminate_remote_terminal_process_tree(child: &mut dyn PtyChild) -> std::io::Result<()> {
+    let Some(pid) = child.process_id() else {
+        return child.kill();
+    };
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let status = Command::new("taskkill.exe")
+            .args(["/PID", pid.to_string().as_str(), "/T", "/F"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        if status.is_ok_and(|status| status.success()) {
+            return Ok(());
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        let process_group = format!("-{pid}");
+        let status = Command::new("kill")
+            .args(["-KILL", "--", process_group.as_str()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        if status.is_ok_and(|status| status.success()) {
+            return Ok(());
+        }
+    }
+
+    child.kill()
+}
+
 struct RemoteTerminalIdReservation {
     reservations: Arc<Mutex<HashSet<u64>>>,
+    starting_freebuff_accounts: Arc<Mutex<HashSet<String>>>,
+    freebuff_account_id: Option<String>,
     id: u64,
 }
 
+struct DeviceTerminalTokenReservation {
+    tokens: Arc<Mutex<HashMap<String, DeviceTerminalCapability>>>,
+    device_fleet: DeviceFleetManager,
+    token: String,
+    capability: DeviceTerminalCapability,
+    committed: bool,
+}
+
+impl DeviceTerminalTokenReservation {
+    fn commit(mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for DeviceTerminalTokenReservation {
+    fn drop(&mut self) {
+        if !self.committed {
+            revoke_device_terminal_capability(
+                &self.tokens,
+                &self.device_fleet,
+                &self.token,
+                &self.capability,
+            );
+        }
+    }
+}
+
 impl RemoteTerminalManager {
+    fn with_max_active(max_active: usize) -> Self {
+        Self {
+            sessions: Arc::new(Mutex::new(HashMap::new())),
+            reservations: Arc::new(Mutex::new(HashSet::new())),
+            starting_freebuff_accounts: Arc::new(Mutex::new(HashSet::new())),
+            device_terminal_tokens: Arc::new(Mutex::new(HashMap::new())),
+            device_fleet: DeviceFleetManager::default(),
+            next_id: Arc::new(AtomicU64::new(0)),
+            max_active,
+            runtime_sync: RuntimeSync::default(),
+            goal_tool_capabilities: None,
+            goal_tools_url: None,
+        }
+    }
+
+    fn with_runtime_sync(mut self, runtime_sync: RuntimeSync) -> Self {
+        self.runtime_sync = runtime_sync;
+        self
+    }
+
+    fn with_device_fleet(mut self, device_fleet: DeviceFleetManager) -> Self {
+        self.device_fleet = device_fleet;
+        self
+    }
+
+    fn with_goal_tools(mut self, capabilities: ChatToolCapabilityRegistry, url: String) -> Self {
+        self.goal_tool_capabilities = Some(capabilities);
+        self.goal_tools_url = Some(url);
+        self
+    }
+
     fn active_count(&self) -> usize {
         self.sessions
             .lock()
@@ -541,7 +900,98 @@ impl RemoteTerminalManager {
             .unwrap_or_default()
     }
 
-    fn reserve_id(&self, requested: Option<u64>) -> Result<RemoteTerminalIdReservation, String> {
+    fn active_for_actor(&self, actor: &RequestActor) -> Result<Vec<RemoteTerminalSummary>, String> {
+        let sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| "Etat terminal verrouille".to_string())?;
+        let mut active = sessions
+            .iter()
+            .filter(|(_, session)| {
+                !session.login_only
+                    && (actor.is_administrator() || session.owner_id == actor.owner_id())
+            })
+            .map(|(id, session)| RemoteTerminalSummary {
+                id: *id,
+                account_id: session.account_id.clone(),
+                account_label: session.account_label.clone(),
+                agent_id: session.agent_id.clone(),
+                source_terminal_key: session.source_terminal_key.clone(),
+                workspace_id: session.workspace_id.clone(),
+                workspace_path: session.workspace_path.to_string_lossy().to_string(),
+                started_at: session.started_at,
+                login_only: session.login_only,
+                external: false,
+            })
+            .collect::<Vec<_>>();
+        active.sort_by_key(|session| (session.started_at, session.id));
+        Ok(active)
+    }
+
+    fn unavailable_account_ids(&self) -> HashSet<String> {
+        let mut ids = self
+            .sessions
+            .lock()
+            .map(|sessions| {
+                sessions
+                    .values()
+                    .map(|session| session.account_id.clone())
+                    .collect::<HashSet<_>>()
+            })
+            .unwrap_or_default();
+        if let Ok(starting) = self.starting_freebuff_accounts.lock() {
+            ids.extend(starting.iter().cloned());
+        }
+        ids
+    }
+
+    fn reserve_device_terminal_token(
+        &self,
+        terminal_id: u64,
+        owner_id: &str,
+    ) -> Result<DeviceTerminalTokenReservation, String> {
+        if owner_id.trim().is_empty() {
+            return Err("Proprietaire du terminal Freebuff absent".to_string());
+        }
+        let token = format!(
+            "cstd_{}{}",
+            Uuid::new_v4().simple(),
+            Uuid::new_v4().simple()
+        );
+        let capability = DeviceTerminalCapability {
+            owner_id: owner_id.to_string(),
+            origin_id: Uuid::new_v4().to_string(),
+            terminal_id,
+        };
+        self.device_terminal_tokens
+            .lock()
+            .map_err(|_| "Capacites USB des terminaux verrouillees".to_string())?
+            .insert(token.clone(), capability.clone());
+        Ok(DeviceTerminalTokenReservation {
+            tokens: self.device_terminal_tokens.clone(),
+            device_fleet: self.device_fleet.clone(),
+            token,
+            capability,
+            committed: false,
+        })
+    }
+
+    fn device_terminal_capability(&self, provided: &str) -> Option<DeviceTerminalCapability> {
+        if provided.is_empty() {
+            return None;
+        }
+        let tokens = self.device_terminal_tokens.lock().ok()?;
+        tokens.iter().find_map(|(token, capability)| {
+            crate::security::constant_time_eq(provided.as_bytes(), token.as_bytes())
+                .then(|| capability.clone())
+        })
+    }
+
+    fn reserve_id(
+        &self,
+        requested: Option<u64>,
+        freebuff_account_id: Option<&str>,
+    ) -> Result<RemoteTerminalIdReservation, String> {
         let mut reservations = self
             .reservations
             .lock()
@@ -550,6 +1000,13 @@ impl RemoteTerminalManager {
             .sessions
             .lock()
             .map_err(|_| "Etat terminal verrouille".to_string())?;
+        let active_or_starting = sessions.len().saturating_add(reservations.len());
+        if self.max_active > 0 && active_or_starting >= self.max_active {
+            return Err(format!(
+                "capacite terminaux atteinte: {active_or_starting}/{} terminaux actifs",
+                self.max_active
+            ));
+        }
         let id = if let Some(id) = requested {
             if reservations.contains(&id) || sessions.contains_key(&id) {
                 return Err(format!("Identifiant terminal deja vivant: {id}"));
@@ -563,11 +1020,34 @@ impl RemoteTerminalManager {
                 }
             }
         };
+        let freebuff_account_id = freebuff_account_id.map(ToString::to_string);
+        if let Some(account_id) = freebuff_account_id.as_deref() {
+            if sessions
+                .values()
+                .any(|session| session.account_id == account_id)
+            {
+                return Err(
+                    "Compte Freebuff indisponible : un terminal est deja ouvert".to_string()
+                );
+            }
+            let mut starting = self
+                .starting_freebuff_accounts
+                .lock()
+                .map_err(|_| "Reservations Freebuff verrouillees".to_string())?;
+            if !starting.insert(account_id.to_string()) {
+                return Err(
+                    "Compte Freebuff indisponible : un terminal est deja en cours d'ouverture"
+                        .to_string(),
+                );
+            }
+        }
         drop(sessions);
         reservations.insert(id);
         drop(reservations);
         Ok(RemoteTerminalIdReservation {
             reservations: self.reservations.clone(),
+            starting_freebuff_accounts: self.starting_freebuff_accounts.clone(),
+            freebuff_account_id,
             id,
         })
     }
@@ -613,10 +1093,23 @@ impl RemoteTerminalManager {
             None
         };
 
-        let id_reservation = self.reserve_id(request.id)?;
-        let id = id_reservation.id;
         let canonical_home = settings::expand_home(&account.codex_home)?;
         fs::create_dir_all(&canonical_home).map_err(|error| error.to_string())?;
+        if provider == Provider::Freebuff
+            && crate::provider::freebuff_instance_busy(&canonical_home)
+        {
+            return Err(format!(
+                "Compte Freebuff indisponible : {} possede deja un terminal ouvert",
+                account.label
+            ));
+        }
+        // Ferme la fenetre de course entre le controle du fichier owner et le
+        // moment ou le processus Freebuff ecrit lui-meme ce fichier.
+        let id_reservation = self.reserve_id(
+            request.id,
+            (provider == Provider::Freebuff).then_some(account.id.as_str()),
+        )?;
+        let id = id_reservation.id;
 
         // Un dossier existant est utilise directement. Un depot distant est
         // clone normalement avec sa branche et son upstream : les commandes Git
@@ -678,6 +1171,43 @@ impl RemoteTerminalManager {
             );
         }
 
+        let goal_tool_lease = if provider == Provider::Freebuff && !request.login_only {
+            let capabilities = self.goal_tool_capabilities.as_ref().ok_or_else(|| {
+                "Outils create_goal indisponibles pour le terminal Freebuff".to_string()
+            })?;
+            let url = self.goal_tools_url.as_deref().ok_or_else(|| {
+                "URL des outils create_goal indisponible pour le terminal Freebuff".to_string()
+            })?;
+            crate::provider::ensure_freebuff_goal_mcp(&account_home, url).map_err(|error| {
+                format!("Configuration de create_goal pour Freebuff impossible : {error}")
+            })?;
+            let goal_key = terminal_goal_key(&owner_id, &workspace_id)?;
+            let token = capabilities.issue(AutonomousAgentToolContext {
+                account_id: account.id.clone(),
+                scope: ChatToolScope::GoalsOnly,
+                user_id: (owner_id != "server-admin").then_some(owner_id.clone()),
+                source_chat_key: request.source_terminal_key.clone(),
+                project_dir: Some(repo_dir.to_string_lossy().to_string()),
+                mode: crate::chat::ChatTurnMode::Build,
+                model: account.model.clone(),
+                reasoning_effort: account.reasoning_effort.clone(),
+                goal_key: Some(goal_key),
+            })?;
+            Some(TerminalGoalToolLease {
+                server: ChatModelToolServerConfig {
+                    url: url.to_string(),
+                    bearer_token: token,
+                },
+                registry: capabilities.clone(),
+            })
+        } else {
+            None
+        };
+
+        let device_terminal_capability = (provider == Provider::Freebuff)
+            .then(|| self.reserve_device_terminal_token(id, &owner_id))
+            .transpose()?;
+
         let pty_system = NativePtySystem::default();
         let pair = pty_system
             .openpty(PtySize {
@@ -693,9 +1223,31 @@ impl RemoteTerminalManager {
         for (key, value) in provider.home_env(&account_home) {
             builder.env(key, value);
         }
+        if let Some(lease) = goal_tool_lease.as_ref() {
+            builder.env(
+                crate::chat_model_tools::MCP_BEARER_ENV,
+                lease.server.bearer_token.as_str(),
+            );
+        }
         builder.env("TERM", "xterm-256color");
         builder.env("COLORTERM", "truecolor");
         builder.env("PWD", repo_dir.to_string_lossy().to_string());
+        crate::resource_profile::configure_terminal_resources(&mut builder);
+        if provider == Provider::Freebuff {
+            let server_bin = std::env::current_exe()
+                .map_err(|error| format!("Binaire cst-server introuvable : {error}"))?;
+            builder.env("CST_DEVICE_API_URL", config.device_terminal_api_url()?);
+            builder.env(
+                "CST_DEVICE_TOKEN",
+                device_terminal_capability
+                    .as_ref()
+                    .map(|capability| capability.token.as_str())
+                    .ok_or_else(|| "Capacite USB Freebuff absente".to_string())?,
+            );
+            builder.env("CST_DEVICE_HELPER", "cst-device");
+            builder.env("CST_SERVER_BIN", server_bin);
+            builder.env("PATH", path_with_device_terminal_helper(config)?);
+        }
 
         if let Some(proxy) = proxy {
             for key in [
@@ -710,20 +1262,26 @@ impl RemoteTerminalManager {
             }
         }
 
-        let child = pair
+        let mut child = pair
             .slave
             .spawn_command(builder)
             .map_err(|error| error.to_string())?;
         drop(pair.slave);
 
-        let mut reader = pair
-            .master
-            .try_clone_reader()
-            .map_err(|error| error.to_string())?;
-        let writer = pair
-            .master
-            .take_writer()
-            .map_err(|error| error.to_string())?;
+        let mut reader = match pair.master.try_clone_reader() {
+            Ok(reader) => reader,
+            Err(error) => {
+                let _ = terminate_remote_terminal_process_tree(child.as_mut());
+                return Err(error.to_string());
+            }
+        };
+        let writer = match pair.master.take_writer() {
+            Ok(writer) => writer,
+            Err(error) => {
+                let _ = terminate_remote_terminal_process_tree(child.as_mut());
+                return Err(error.to_string());
+            }
+        };
         // Garder le receiver initial est essentiel : le shell peut produire son
         // prompt (et Codex son premier ecran ANSI) avant que le POST /terminals
         // ait repondu et que le navigateur ait ouvert son WebSocket.
@@ -734,14 +1292,30 @@ impl RemoteTerminalManager {
             master: Mutex::new(pair.master),
             child: Mutex::new(child),
             events: events.clone(),
-            pending_events: Mutex::new(Some(initial_events)),
+            pending_events: Mutex::new(Some(TerminalEventCursor {
+                receiver: initial_events,
+                prefetched: None,
+            })),
+            socket_generation: AtomicU64::new(0),
             started_at: metrics::now_ts(),
             owner_id,
             account_id: account.id.clone(),
             account_label: account.label.clone(),
+            agent_id: request.agent_id.clone(),
+            source_terminal_key: request.source_terminal_key.clone(),
             workspace_id: workspace_id.clone(),
             workspace_path: repo_dir.clone(),
+            login_only: request.login_only,
+            device_terminal_capability: device_terminal_capability.as_ref().map(|reservation| {
+                ActiveDeviceTerminalCapability {
+                    token: reservation.token.clone(),
+                    context: reservation.capability.clone(),
+                }
+            }),
+            device_terminal_tokens: self.device_terminal_tokens.clone(),
+            device_fleet: self.device_fleet.clone(),
             recorded_end: AtomicBool::new(false),
+            goal_tool_lease: Mutex::new(goal_tool_lease),
         });
 
         {
@@ -750,42 +1324,78 @@ impl RemoteTerminalManager {
                 .lock()
                 .map_err(|_| "Etat terminal verrouille".to_string())?;
             if sessions.contains_key(&id) {
+                drop(sessions);
+                if let Ok(mut child) = session.child.lock() {
+                    let _ = terminate_remote_terminal_process_tree(child.as_mut());
+                }
                 return Err(format!("Identifiant terminal deja vivant: {id}"));
             }
             sessions.insert(id, session.clone());
         }
         id_reservation.commit();
+        // La session possede desormais le contexte de revocation. Tout echec
+        // anterieur laisse la reservation retirer immediatement le jeton.
+        if let Some(capability) = device_terminal_capability {
+            capability.commit();
+        }
+        if !session.login_only {
+            self.runtime_sync.notify(RuntimeSyncTopic::ActiveTerminals);
+        }
 
         let sessions = self.sessions.clone();
+        let runtime_sync = self.runtime_sync.clone();
         let reader_events = events.clone();
-        thread::spawn(move || {
-            let mut buffer = [0_u8; 8192];
-            loop {
-                match reader.read(&mut buffer) {
-                    Ok(0) => break,
-                    Ok(size) => {
-                        let data = String::from_utf8_lossy(&buffer[..size]).to_string();
-                        let _ = reader_events.send(ServerWsMessage::Data { id, data });
-                    }
-                    Err(error) => {
-                        let _ = reader_events.send(ServerWsMessage::Error {
-                            id,
-                            message: error.to_string(),
-                        });
-                        break;
+        let reader_thread = thread::Builder::new()
+            .name(format!("cst-remote-terminal-reader-{id}"))
+            .stack_size(crate::resource_profile::TERMINAL_READER_STACK_BYTES)
+            .spawn(move || {
+                let mut buffer = [0_u8; 8192];
+                let mut decode = incremental_utf8_decoder();
+                loop {
+                    match reader.read(&mut buffer) {
+                        Ok(0) => break,
+                        Ok(size) => {
+                            let data = decode(&buffer[..size]);
+                            if !data.is_empty() {
+                                let _ = reader_events.send(ServerWsMessage::Data { id, data });
+                            }
+                        }
+                        Err(error) => {
+                            let _ = reader_events.send(ServerWsMessage::Error {
+                                id,
+                                message: error.to_string(),
+                            });
+                            break;
+                        }
                     }
                 }
-            }
 
-            let ended = sessions
+                let ended = sessions
+                    .lock()
+                    .ok()
+                    .and_then(|mut sessions| sessions.remove(&id));
+                if let Some(session) = ended {
+                    finish_session(&session);
+                    let _ = session.events.send(ServerWsMessage::Exit { id });
+                    if !session.login_only {
+                        runtime_sync.notify(RuntimeSyncTopic::ActiveTerminals);
+                    }
+                }
+            });
+        if let Err(error) = reader_thread {
+            let ended = self
+                .sessions
                 .lock()
                 .ok()
                 .and_then(|mut sessions| sessions.remove(&id));
             if let Some(session) = ended {
                 finish_session(&session);
-                let _ = session.events.send(ServerWsMessage::Exit { id });
+                if !session.login_only {
+                    self.runtime_sync.notify(RuntimeSyncTopic::ActiveTerminals);
+                }
             }
-        });
+            return Err(format!("Lecture du terminal impossible: {error}"));
+        }
 
         let banner = format!(
             "\r\n[Codex Switch Terminal SaaS] session #{id} | compte: {} | repo: {} | dossier: {}\r\n\r\n",
@@ -793,7 +1403,13 @@ impl RemoteTerminalManager {
             repo_label,
             repo_dir.to_string_lossy()
         );
-        let _ = events.send(ServerWsMessage::Data { id, data: banner });
+        if events
+            .send(ServerWsMessage::Data { id, data: banner })
+            .is_err()
+        {
+            self.abort_started_session(id, &session);
+            return Err("Diffusion du bandeau terminal impossible".to_string());
+        }
 
         let command = if request.login_only {
             // Mode authentification strict : ne jamais retomber sur la commande
@@ -804,12 +1420,19 @@ impl RemoteTerminalManager {
         };
         if let Some(command) = command {
             let line = format!("{}\r", command.trim());
-            session
+            let write_result = session
                 .writer
                 .lock()
-                .map_err(|_| "Writer terminal verrouille".to_string())?
-                .write_all(line.as_bytes())
-                .map_err(|error| error.to_string())?;
+                .map_err(|_| "Writer terminal verrouille".to_string())
+                .and_then(|mut writer| {
+                    writer
+                        .write_all(line.as_bytes())
+                        .map_err(|error| error.to_string())
+                });
+            if let Err(error) = write_result {
+                self.abort_started_session(id, &session);
+                return Err(error);
+            }
         }
 
         Ok(StartTerminalResponse {
@@ -817,6 +1440,24 @@ impl RemoteTerminalManager {
             workspace_id,
             workspace_path: repo_dir.to_string_lossy().to_string(),
         })
+    }
+
+    fn abort_started_session(&self, id: u64, session: &Arc<RemoteTerminalSession>) {
+        let removed = self.sessions.lock().ok().and_then(|mut sessions| {
+            let matches = sessions
+                .get(&id)
+                .is_some_and(|candidate| Arc::ptr_eq(candidate, session));
+            matches.then(|| sessions.remove(&id)).flatten()
+        });
+        if let Some(session) = removed {
+            finish_session(&session);
+            if !session.login_only {
+                self.runtime_sync.notify(RuntimeSyncTopic::ActiveTerminals);
+            }
+            if let Ok(mut child) = session.child.lock() {
+                let _ = terminate_remote_terminal_process_tree(child.as_mut());
+            }
+        }
     }
 
     fn write(&self, id: u64, data: String) -> Result<(), String> {
@@ -882,12 +1523,13 @@ impl RemoteTerminalManager {
     }
 
     fn stop(&self, id: u64) -> Result<(), String> {
-        let Some(session) = self
+        let session = self
             .sessions
             .lock()
             .map_err(|_| "Etat terminal verrouille".to_string())?
-            .remove(&id)
-        else {
+            .get(&id)
+            .cloned();
+        let Some(session) = session else {
             return Ok(());
         };
 
@@ -895,37 +1537,77 @@ impl RemoteTerminalManager {
         let result = session
             .child
             .lock()
-            .map_err(|_| "Process terminal verrouille".to_string())?
-            .kill();
-        let _ = session.events.send(ServerWsMessage::Exit { id });
-        result.map_err(|error| error.to_string())
+            .map_err(|_| "Process terminal verrouille".to_string())
+            .and_then(|mut child| {
+                terminate_remote_terminal_process_tree(child.as_mut())
+                    .map_err(|error| error.to_string())
+            });
+        if let Err(error) = result {
+            // Conserver la session dans la table tant que l'arbre n'est pas
+            // confirme comme termine : un DELETE en erreur ne doit pas rendre
+            // le PTY invisible tout en laissant Freebuff vivant.
+            return Err(error);
+        }
+
+        let removed = self.sessions.lock().ok().and_then(|mut sessions| {
+            let matches = sessions
+                .get(&id)
+                .is_some_and(|candidate| Arc::ptr_eq(candidate, &session));
+            matches.then(|| sessions.remove(&id)).flatten()
+        });
+        if let Some(removed) = removed {
+            if !removed.login_only {
+                self.runtime_sync.notify(RuntimeSyncTopic::ActiveTerminals);
+            }
+            let _ = removed.events.send(ServerWsMessage::Exit { id });
+        }
+        Ok(())
     }
 
     fn stop_for_actor(&self, id: u64, actor: &RequestActor) -> Result<(), String> {
         let session = {
-            let mut sessions = self
+            let sessions = self
                 .sessions
                 .lock()
                 .map_err(|_| "Etat terminal verrouille".to_string())?;
-            let Some(session) = sessions.get(&id) else {
+            let Some(session) = sessions.get(&id).cloned() else {
                 return Ok(());
             };
             if !actor.is_administrator() && session.owner_id != actor.owner_id() {
                 return Err("Terminal introuvable ou inaccessible".to_string());
             }
-            sessions.remove(&id)
+            session
         };
-        let Some(session) = session else {
-            return Ok(());
-        };
+
         finish_session(&session);
         let result = session
             .child
             .lock()
-            .map_err(|_| "Process terminal verrouille".to_string())?
-            .kill();
-        let _ = session.events.send(ServerWsMessage::Exit { id });
-        result.map_err(|error| error.to_string())
+            .map_err(|_| "Process terminal verrouille".to_string())
+            .and_then(|mut child| {
+                terminate_remote_terminal_process_tree(child.as_mut())
+                    .map_err(|error| error.to_string())
+            });
+        if let Err(error) = result {
+            // Ne pas retirer un PTY dont l'arbre n'a pas ete arrete. Le retry
+            // client pourra alors retenter le DELETE sur une session encore
+            // adressable au lieu de perdre definitivement son identifiant.
+            return Err(error);
+        }
+
+        let removed = self.sessions.lock().ok().and_then(|mut sessions| {
+            let matches = sessions
+                .get(&id)
+                .is_some_and(|candidate| Arc::ptr_eq(candidate, &session));
+            matches.then(|| sessions.remove(&id)).flatten()
+        });
+        if let Some(removed) = removed {
+            if !removed.login_only {
+                self.runtime_sync.notify(RuntimeSyncTopic::ActiveTerminals);
+            }
+            let _ = removed.events.send(ServerWsMessage::Exit { id });
+        }
+        Ok(())
     }
 
     fn get(&self, id: u64) -> Result<Arc<RemoteTerminalSession>, String> {
@@ -935,6 +1617,13 @@ impl RemoteTerminalManager {
             .get(&id)
             .cloned()
             .ok_or_else(|| "Session terminal introuvable".to_string())
+    }
+
+    fn contains(&self, id: u64) -> bool {
+        self.sessions
+            .lock()
+            .map(|sessions| sessions.contains_key(&id))
+            .unwrap_or(false)
     }
 
     fn get_for_actor(
@@ -953,7 +1642,16 @@ impl RemoteTerminalManager {
 
 impl RemoteTerminalIdReservation {
     fn commit(self) {
-        // La session inseree porte desormais l'identifiant vivant.
+        // La session inseree porte maintenant l'identifiant vivant ; les
+        // reservations transitoires doivent etre liberees apres le spawn.
+        if let Ok(mut reservations) = self.reservations.lock() {
+            reservations.remove(&self.id);
+        }
+        if let Some(account_id) = self.freebuff_account_id.as_deref() {
+            if let Ok(mut starting) = self.starting_freebuff_accounts.lock() {
+                starting.remove(account_id);
+            }
+        }
     }
 }
 
@@ -962,12 +1660,61 @@ impl Drop for RemoteTerminalIdReservation {
         if let Ok(mut reservations) = self.reservations.lock() {
             reservations.remove(&self.id);
         }
+        if let Some(account_id) = self.freebuff_account_id.as_deref() {
+            if let Ok(mut starting) = self.starting_freebuff_accounts.lock() {
+                starting.remove(account_id);
+            }
+        }
+    }
+}
+
+fn revoke_device_terminal_capability(
+    tokens: &Arc<Mutex<HashMap<String, DeviceTerminalCapability>>>,
+    device_fleet: &DeviceFleetManager,
+    token: &str,
+    capability: &DeviceTerminalCapability,
+) {
+    match tokens.lock() {
+        Ok(mut tokens) => {
+            tokens.remove(token);
+        }
+        Err(_) => {
+            // Le lookup echoue ferme si ce mutex est empoisonne : le jeton ne
+            // peut donc plus autoriser de requete, meme si son retrait echoue.
+            eprintln!(
+                "[device-fleet] retrait du jeton du terminal {} impossible ; registre refuse par securite",
+                capability.terminal_id
+            );
+        }
+    }
+    if let Err(error) =
+        device_fleet.expire_origin_actions(&capability.owner_id, &capability.origin_id)
+    {
+        // `expire_origin_actions` place l'origin dans sa deny-list memoire avant
+        // la persistance. Ne jamais journaliser le jeton ni l'identifiant origin.
+        eprintln!(
+            "[device-fleet] persistance de fin du terminal {} impossible ; origin refusee en memoire : {error}",
+            capability.terminal_id
+        );
     }
 }
 
 fn finish_session(session: &Arc<RemoteTerminalSession>) {
-    if session.recorded_end.swap(true, Ordering::Relaxed) {
+    if session.recorded_end.swap(true, Ordering::AcqRel) {
         return;
+    }
+
+    if let Some(capability) = session.device_terminal_capability.as_ref() {
+        revoke_device_terminal_capability(
+            &session.device_terminal_tokens,
+            &session.device_fleet,
+            &capability.token,
+            &capability.context,
+        );
+    }
+
+    if let Ok(mut lease) = session.goal_tool_lease.lock() {
+        lease.take();
     }
 
     let _ = metrics::record_agent_run(
@@ -982,6 +1729,7 @@ fn frontend_cache_control(path: &str) -> Option<&'static str> {
     if path.starts_with("/api/")
         || path.starts_with("/ws/")
         || path.starts_with("/mcp")
+        || path.starts_with("/t/")
         || path == "/healthz"
     {
         return None;
@@ -1031,15 +1779,26 @@ async fn set_frontend_cache_control(request: Request, next: Next) -> Response {
     response
 }
 
-pub async fn run_from_env() -> Result<(), String> {
+/// Charge puis retire les secrets de controle avant la creation du runtime
+/// Tokio. L'environnement d'un processus ne doit pas etre modifie pendant que
+/// d'autres threads peuvent le lire.
+pub fn prepare_from_env_before_runtime() -> Result<ServerConfig, String> {
     let config = ServerConfig::from_env()?;
+    isolate_server_control_secrets()?;
+    Ok(config)
+}
+
+pub async fn run(config: ServerConfig) -> Result<(), String> {
     fs::create_dir_all(config.data_dir.join("workspaces")).map_err(|error| error.to_string())?;
     fs::create_dir_all(config.data_dir.join("codex-homes")).map_err(|error| error.to_string())?;
     fs::create_dir_all(config.data_dir.join("logs")).map_err(|error| error.to_string())?;
+    install_device_terminal_helper(&config)?;
 
     let settings = settings::load_settings_for_terminal()?;
     let pool_manager = Arc::new(PoolManager::build(&settings)?);
-    let chat = ChatTurnManager::default();
+    // La capacite annoncee par /health est aussi le plafond atomique reel du
+    // moteur. Elle couvre les chats UI, autonomes et orchestres sans exception.
+    let chat = ChatTurnManager::with_max_active(config.node_capacity);
     crate::chat::start_orphan_chat_image_sweeper();
     let user_auth = AuthManager::load(config.data_dir.clone(), &config.public_base_url)?
         .with_runtime_sync(chat.runtime_sync());
@@ -1066,6 +1825,7 @@ pub async fn run_from_env() -> Result<(), String> {
                         mode: agent.mode,
                         model: agent.model.clone(),
                         reasoning_effort: agent.reasoning_effort.clone(),
+                        goal_key: None,
                     })
                     .ok()?;
                 Some(ChatModelToolServerConfig {
@@ -1079,6 +1839,19 @@ pub async fn run_from_env() -> Result<(), String> {
     let private_messages =
         PrivateMessageManager::new(config.data_dir.join("private-messages.json"))?;
     let tiktok_messaging = TikTokDmManager::new(config.data_dir.join("tiktok-dm-campaigns.json"))?;
+    let device_fleet = DeviceFleetManager::load(
+        &config.data_dir,
+        Duration::from_secs(device_fleet::DEFAULT_CONNECTOR_TTL_SECONDS as u64),
+    )
+    .map_err(|error| format!("Store des actions appareils illisible : {error}"))?;
+    let tracking = TrackingManager::load(config.data_dir.join("tracking-links.json"))?;
+    let referral = ReferralManager::load(
+        config.data_dir.join("referral-codes.json"),
+        config.duello_referral_api_url.clone(),
+        config.duello_referral_api_key.clone(),
+        config.duello_app_url.clone(),
+    )?;
+    let duello_bank = DuelloBankClient::new(config.duello_bank.clone())?;
     let workspace_access = WorkspaceAccessManager::load(config.data_dir.clone())?;
     // Les jetons Microsoft vivent dans `config.data_dir`, comme `user-auth.json`
     // et contrairement aux autres integrations qui passent par
@@ -1089,19 +1862,29 @@ pub async fn run_from_env() -> Result<(), String> {
         &config.public_base_url,
         user_auth.clone(),
     )?;
+    let terminal_goals = TerminalGoalManager::new(config.data_dir.join("terminal-goals.json"))?;
+    let terminals = RemoteTerminalManager::with_max_active(config.terminal_capacity)
+        .with_device_fleet(device_fleet.clone())
+        .with_runtime_sync(chat.runtime_sync())
+        .with_goal_tools(chat_tool_capabilities.clone(), config.chat_tools_mcp_url()?);
     let state = Arc::new(ServerState {
         config: config.clone(),
         auth: user_auth.clone(),
-        terminals: RemoteTerminalManager::default(),
+        terminals,
         chat,
         chat_tool_capabilities,
         chat_open_requests: ChatOpenRequestRegistry::default(),
         microsoft: microsoft.clone(),
         autonomous,
+        terminal_goals,
         orchestration,
         forum,
         private_messages,
         tiktok_messaging,
+        device_fleet: device_fleet.clone(),
+        tracking,
+        referral,
+        duello_bank,
         workspace_access,
         doctolib_lab: Arc::new(DoctolibLabManager::default()),
         kombai: Arc::new(KombaiManager::default()),
@@ -1109,9 +1892,14 @@ pub async fn run_from_env() -> Result<(), String> {
         vps_deploy: VpsDeployManager::default(),
         started_at: metrics::now_ts(),
         drain_until: Arc::new(AtomicI64::new(0)),
+        cleanup: Arc::new(CleanupCoordinator::default()),
     });
     telegram_notifications::start_polling(state.autonomous.clone());
     state.microsoft.start_keepalive();
+    #[cfg(target_os = "windows")]
+    if embedded_device_connector_enabled() {
+        tokio::spawn(run_embedded_device_connector(device_fleet));
+    }
     tokio::spawn(
         crate::private_messages::run_private_message_campaign_worker(
             state.private_messages.clone(),
@@ -1123,15 +1911,23 @@ pub async fn run_from_env() -> Result<(), String> {
 
     let api = Router::new()
         .route("/health", get(api_health))
-        .route("/admin/drain", post(api_admin_drain))
-        .route("/vps/capabilities", get(api_vps_capabilities))
-        .route("/vps/google/status", get(api_vps_google_status))
-        .route("/vps/google/auth", post(api_vps_google_auth))
-        .route("/vps/google/trial", post(api_vps_google_trial))
         .route(
-            "/vps/google/deployments",
-            post(api_vps_google_start_deployment),
+            "/tracking-links",
+            get(api_tracking_links).post(api_create_tracking_link),
         )
+        .route("/tracking-links/:slug", delete(api_delete_tracking_link))
+        .route("/referral", get(api_referral_snapshot).post(api_create_referral))
+        .route("/referral/:code", delete(api_delete_referral))
+        .route("/duello-bank", get(api_duello_bank_snapshot))
+        .route(
+            "/duello-bank/credits",
+            post(api_credit_duello_wallet).layer(DefaultBodyLimit::max(8 * 1024)),
+        )
+        .route("/admin/drain", post(api_admin_drain))
+        .route("/cleanup/request", post(api_cleanup_request))
+        .route("/cleanup/status", get(api_cleanup_status))
+        .route("/cleanup/result", post(api_cleanup_result))
+        .route("/vps/capabilities", get(api_vps_capabilities))
         .route(
             "/vps/deployments",
             get(api_vps_deployments).post(api_vps_start_deployment),
@@ -1147,9 +1943,11 @@ pub async fn run_from_env() -> Result<(), String> {
         .route("/accounts/:id", delete(api_remove_account))
         .route("/limits", get(api_limits))
         .route("/usage", get(api_usage))
+        .route("/tokscale/submit", post(api_tokscale_submit))
         .route("/account-usage", get(api_account_usage))
         .route("/work-time", get(api_work_time))
         .route("/discussions", get(api_list_discussions))
+        .route("/prompt-history", get(api_list_prompt_history))
         .route("/discussions/transcript", get(api_discussion_transcript))
         .route("/discussions/copy", post(api_copy_discussion))
         .route("/discussions/move", post(api_move_discussion))
@@ -1159,6 +1957,10 @@ pub async fn run_from_env() -> Result<(), String> {
         .route(
             "/discussions/export",
             post(api_export_discussion_transcript),
+        )
+        .route(
+            "/discussions/import-codex-freebuff",
+            post(api_import_codex_transcript_to_freebuff),
         )
         .route(
             "/forum/topics",
@@ -1191,6 +1993,27 @@ pub async fn run_from_env() -> Result<(), String> {
         .route(
             "/private-messages/campaigns/:campaign_id/control",
             post(api_control_private_message_campaign),
+        )
+        .route("/device-fleet", get(api_list_control_devices))
+        .route(
+            "/device-fleet/actions",
+            post(api_control_device).layer(DefaultBodyLimit::max(16 * 1024)),
+        )
+        .route(
+            "/device-fleet/actions/:action_id",
+            get(api_device_action_status),
+        )
+        .route(
+            "/device-fleet/connector/heartbeat",
+            post(api_device_connector_heartbeat).layer(DefaultBodyLimit::max(256 * 1024)),
+        )
+        .route(
+            "/device-fleet/connector/claim",
+            post(api_device_connector_claim).layer(DefaultBodyLimit::max(4 * 1024)),
+        )
+        .route(
+            "/device-fleet/connector/report",
+            post(api_device_connector_report).layer(DefaultBodyLimit::max(12 * 1024 * 1024)),
         )
         .route(
             "/tiktok/dm-campaigns",
@@ -1293,6 +2116,36 @@ pub async fn run_from_env() -> Result<(), String> {
             "/creative/accounts/delete",
             post(api_delete_creative_account),
         )
+        .route("/freebuff-cloud/status", get(api_freebuff_cloud_status))
+        .route(
+            "/freebuff-cloud/connect",
+            post(api_freebuff_cloud_connect).layer(DefaultBodyLimit::max(16 * 1024)),
+        )
+        .route("/freebuff-cloud/disconnect", post(api_freebuff_cloud_disconnect))
+        .route("/freebuff-cloud/projects", get(api_freebuff_cloud_projects))
+        .route(
+            "/freebuff-cloud/projects/blank",
+            post(api_freebuff_cloud_create_blank_project)
+                .layer(DefaultBodyLimit::max(8 * 1024)),
+        )
+        .route(
+            "/freebuff-cloud/projects/repo",
+            post(api_freebuff_cloud_connect_repo).layer(DefaultBodyLimit::max(8 * 1024)),
+        )
+        .route(
+            "/freebuff-cloud/projects/delete",
+            post(api_freebuff_cloud_delete_project).layer(DefaultBodyLimit::max(8 * 1024)),
+        )
+        .route("/freebuff-cloud/repos", get(api_freebuff_cloud_connectable_repos))
+        .route("/freebuff-cloud/stream", get(api_freebuff_cloud_stream))
+        .route(
+            "/tasks",
+            get(api_tasks_list)
+                .post(api_tasks_add)
+                .put(api_tasks_replace)
+                .layer(DefaultBodyLimit::max(1024 * 1024)),
+        )
+        .route("/tasks/:id", delete(api_tasks_remove))
         .route(
             "/notifications/whatsapp",
             get(api_whatsapp_connection)
@@ -1464,6 +2317,7 @@ pub async fn run_from_env() -> Result<(), String> {
         .route("/pool/start", post(api_pool_status))
         .route("/pool/stop", post(api_pool_stop))
         .route("/terminals", post(api_start_terminal))
+        .route("/terminals/active", get(api_list_active_terminals))
         .route("/terminals/:id/write", post(api_write_terminal))
         .route("/terminals/:id/resize", post(api_resize_terminal))
         .route("/terminals/:id", delete(api_stop_terminal))
@@ -1516,6 +2370,10 @@ pub async fn run_from_env() -> Result<(), String> {
         .route("/healthz", get(api_healthz))
         .with_state(state.clone());
 
+    let public = Router::new()
+        .route("/t/:slug", get(public_tracking_redirect))
+        .with_state(state.clone());
+
     let mcp = Router::new()
         .route(
             "/mcp/chat-tools",
@@ -1537,6 +2395,7 @@ pub async fn run_from_env() -> Result<(), String> {
 
     let app = Router::new()
         .merge(health)
+        .merge(public)
         .merge(mcp)
         .nest("/api/auth", auth::router(user_auth))
         .nest("/api/microsoft", microsoft::router(microsoft))
@@ -1571,6 +2430,170 @@ pub async fn run_from_env() -> Result<(), String> {
         .with_graceful_shutdown(shutdown_signal())
         .await
         .map_err(|error| error.to_string())
+}
+
+/// Conserve les secrets dans `ServerConfig`, mais les retire de l'environnement
+/// avant la creation du moindre provider ou terminal. Sous Linux, le processus
+/// devient aussi non inspectable par les autres processus du meme UID : sans
+/// cette seconde barriere, `/proc/<pid>/environ` peut encore exposer
+/// l'environnement initial meme apres `remove_var`.
+fn isolate_server_control_secrets() -> Result<(), String> {
+    for name in SERVER_CONTROL_SECRET_ENV_VARS {
+        std::env::remove_var(name);
+    }
+    prevent_same_user_process_inspection()
+}
+
+#[cfg(target_os = "linux")]
+fn prevent_same_user_process_inspection() -> Result<(), String> {
+    // SAFETY: `prctl(PR_SET_DUMPABLE, 0)` est une operation locale au
+    // processus. Les arguments inutilises sont explicitement mis a zero comme
+    // recommande par prctl(2), avec les types ABI Linux attendus.
+    let result = unsafe {
+        libc::prctl(
+            libc::PR_SET_DUMPABLE,
+            0 as libc::c_ulong,
+            0 as libc::c_ulong,
+            0 as libc::c_ulong,
+            0 as libc::c_ulong,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(format!(
+            "isolation des secrets du serveur impossible: {}",
+            std::io::Error::last_os_error()
+        ))
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn prevent_same_user_process_inspection() -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn embedded_device_connector_enabled() -> bool {
+    !std::env::var("CST_DEVICE_EMBEDDED_CONNECTOR")
+        .ok()
+        .is_some_and(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "0" | "false" | "off"
+            )
+        })
+}
+
+#[cfg(target_os = "windows")]
+async fn run_embedded_device_connector(manager: DeviceFleetManager) {
+    let first_snapshot = device_fleet::inspect_local_fleet().unwrap_or_default();
+    let connector_id = first_snapshot
+        .connector_id
+        .clone()
+        .unwrap_or_else(|| "usb-windows-server".to_string());
+    let heartbeat_manager = manager.clone();
+    let heartbeat_connector_id = connector_id.clone();
+    let heartbeat = async move {
+        loop {
+            let inventory = tokio::task::spawn_blocking(device_fleet::inspect_local_fleet).await;
+            let request = match inventory {
+                Ok(Ok(snapshot)) => DeviceConnectorHeartbeatRequest {
+                    connector_id: heartbeat_connector_id.clone(),
+                    devices: snapshot.devices,
+                    tools: snapshot.tools,
+                    error: snapshot.error,
+                },
+                Ok(Err(error)) => DeviceConnectorHeartbeatRequest {
+                    connector_id: heartbeat_connector_id.clone(),
+                    devices: Vec::new(),
+                    tools: Default::default(),
+                    error: Some(error.to_string()),
+                },
+                Err(error) => DeviceConnectorHeartbeatRequest {
+                    connector_id: heartbeat_connector_id.clone(),
+                    devices: Vec::new(),
+                    tools: Default::default(),
+                    error: Some(format!("Inventaire USB interrompu : {error}")),
+                },
+            };
+            let _ = heartbeat_manager.heartbeat(request);
+            tokio::time::sleep(Duration::from_secs(3)).await;
+        }
+    };
+
+    let workers = async move {
+        let permits = Arc::new(tokio::sync::Semaphore::new(8));
+        loop {
+            let permit = match permits.clone().acquire_owned().await {
+                Ok(permit) => permit,
+                Err(_) => return,
+            };
+            match manager.claim_next(&connector_id) {
+                Ok(Some(job)) => {
+                    let worker_manager = manager.clone();
+                    let worker_connector_id = connector_id.clone();
+                    tokio::spawn(async move {
+                        let _permit = permit;
+                        let request = job.request.clone();
+                        let action_id = job.action_id.clone();
+                        let result = match tokio::task::spawn_blocking({
+                            let worker_manager = worker_manager.clone();
+                            let request = request.clone();
+                            let action_id = action_id.clone();
+                            move || worker_manager.execute_local_action(&action_id, request)
+                        })
+                        .await
+                        {
+                            Ok(Ok(result)) => result,
+                            Ok(Err(error)) => {
+                                embedded_device_failure(&action_id, &request, &error.to_string())
+                            }
+                            Err(error) => embedded_device_failure(
+                                &action_id,
+                                &request,
+                                &format!("Execution USB interrompue : {error}"),
+                            ),
+                        };
+                        let _ = worker_manager.report(DeviceConnectorReportRequest {
+                            connector_id: worker_connector_id,
+                            action_id: job.action_id,
+                            claim_token: job.claim_token,
+                            result,
+                        });
+                    });
+                }
+                Ok(None) | Err(_) => {
+                    drop(permit);
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                }
+            }
+        }
+    };
+    tokio::join!(heartbeat, workers);
+}
+
+#[cfg(target_os = "windows")]
+fn embedded_device_failure(
+    action_id: &str,
+    request: &DeviceActionRequest,
+    detail: &str,
+) -> DeviceActionResult {
+    let now = metrics::now_ts();
+    DeviceActionResult {
+        action_id: action_id.to_string(),
+        device_id: request.device_id.clone(),
+        action: request.action,
+        success: false,
+        detail: detail.chars().take(500).collect(),
+        stdout: None,
+        stderr: None,
+        data_base64: None,
+        mime_type: None,
+        started_at: now,
+        finished_at: now,
+        truncated: detail.chars().count() > 500,
+    }
 }
 
 /// Arret propre sur Ctrl-C (SIGINT) ET SIGTERM (envoye par `systemctl restart`
@@ -1630,10 +2653,24 @@ impl ServerConfig {
         let node_label = std::env::var("CST_NODE_LABEL").unwrap_or_else(|_| node_id.clone());
         let node_capacity = std::env::var("CST_NODE_CAPACITY")
             .ok()
-            .and_then(|value| value.parse::<usize>().ok())
-            .filter(|value| *value > 0)
-            .unwrap_or_else(default_node_capacity);
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .unwrap_or_else(crate::chat::configured_max_active_chat_turns);
+        let terminal_capacity = std::env::var("CST_TERMINAL_CAPACITY")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .unwrap_or_else(crate::resource_profile::configured_terminal_capacity);
         let workspaces_root = resolve_workspaces_root(&data_dir);
+        let duello_referral_api_url = std::env::var("CST_DUELLO_REFERRAL_API_URL")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        let duello_referral_api_key = std::env::var("CST_DUELLO_REFERRAL_API_KEY")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        let duello_app_url = std::env::var("CST_DUELLO_APP_URL")
+            .unwrap_or_else(|_| "https://app.duello.fr/".to_string());
+        let duello_bank = DuelloBankConfig::from_env();
         Ok(ServerConfig {
             bind,
             data_dir,
@@ -1644,7 +2681,12 @@ impl ServerConfig {
             node_id,
             node_label,
             node_capacity,
+            terminal_capacity,
             workspaces_root,
+            duello_referral_api_url,
+            duello_referral_api_key,
+            duello_app_url,
+            duello_bank,
         })
     }
 
@@ -1667,6 +2709,348 @@ impl ServerConfig {
             SocketAddr::new(ip, bound.port())
         ))
     }
+
+    /// URL locale remise aux terminaux Freebuff. Le jeton associe n'est
+    /// accepte que par les routes device-fleet : il ne donne jamais acces aux
+    /// comptes, discussions, workspaces ou operations d'administration.
+    fn device_terminal_api_url(&self) -> Result<String, String> {
+        let bound: SocketAddr = self
+            .bind
+            .parse()
+            .map_err(|error| format!("CST_BIND invalide pour le controle USB : {error}"))?;
+        let ip = if bound.ip().is_unspecified() {
+            if bound.is_ipv4() {
+                IpAddr::V4(Ipv4Addr::LOCALHOST)
+            } else {
+                IpAddr::V6(Ipv6Addr::LOCALHOST)
+            }
+        } else {
+            bound.ip()
+        };
+        Ok(format!(
+            "http://{}/api/device-fleet",
+            SocketAddr::new(ip, bound.port())
+        ))
+    }
+
+    fn device_terminal_helper_dir(&self) -> PathBuf {
+        self.data_dir.join("bin")
+    }
+}
+
+fn install_device_terminal_helper(config: &ServerConfig) -> Result<(), String> {
+    let helper_dir = config.device_terminal_helper_dir();
+    fs::create_dir_all(&helper_dir).map_err(|error| {
+        format!(
+            "Creation du dossier de l'aide device impossible ({}): {error}",
+            helper_dir.display()
+        )
+    })?;
+
+    #[cfg(windows)]
+    {
+        let wrapper = helper_dir.join("cst-device.cmd");
+        fs::write(
+            &wrapper,
+            b"@echo off\r\nif \"%CST_SERVER_BIN%\"==\"\" (echo CST_SERVER_BIN est absent 1>&2 & exit /b 2)\r\n\"%CST_SERVER_BIN%\" device %*\r\n",
+        )
+        .map_err(|error| format!("Ecriture de {} impossible: {error}", wrapper.display()))?;
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let wrapper = helper_dir.join("cst-device");
+        fs::write(
+            &wrapper,
+            b"#!/bin/sh\nif [ -z \"${CST_SERVER_BIN:-}\" ]; then echo 'CST_SERVER_BIN est absent' >&2; exit 2; fi\nexec \"$CST_SERVER_BIN\" device \"$@\"\n",
+        )
+        .map_err(|error| format!("Ecriture de {} impossible: {error}", wrapper.display()))?;
+        fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700)).map_err(|error| {
+            format!("Permissions de {} impossibles: {error}", wrapper.display())
+        })?;
+    }
+
+    Ok(())
+}
+
+fn path_with_device_terminal_helper(config: &ServerConfig) -> Result<std::ffi::OsString, String> {
+    let current = std::env::var_os("PATH").unwrap_or_default();
+    std::env::join_paths(
+        std::iter::once(config.device_terminal_helper_dir()).chain(std::env::split_paths(&current)),
+    )
+    .map_err(|error| format!("PATH du terminal USB invalide : {error}"))
+}
+
+/// Petit client borne utilise par le wrapper `cst-device` des terminaux
+/// Freebuff. Toute l'autorisation reste cote serveur et le wrapper ne contient
+/// aucun secret : il lit uniquement la capacite device-only de son environnement.
+const DEVICE_TERMINAL_IDEMPOTENCY_KEY_MAX_BYTES: usize = 128;
+const DEVICE_TERMINAL_ACTION_MAX_RETRIES: usize = 3;
+const DEVICE_TERMINAL_ACTION_RETRY_DELAY: Duration = Duration::from_millis(150);
+
+#[derive(Debug, Clone, PartialEq)]
+struct DeviceTerminalActionCommand {
+    device_id: String,
+    action: String,
+    args: Value,
+    confirmed: bool,
+    idempotency_key: String,
+}
+
+fn parse_device_terminal_action(
+    arguments: &[String],
+) -> Result<DeviceTerminalActionCommand, String> {
+    if arguments.len() < 2 {
+        return Err(device_terminal_cli_usage());
+    }
+    let device_id = arguments[0].trim().to_string();
+    let action = arguments[1].trim().to_string();
+    let supported = matches!(
+        action.as_str(),
+        "info"
+            | "screenshot"
+            | "open_screen"
+            | "tap"
+            | "swipe"
+            | "type_text"
+            | "key_event"
+            | "open_app"
+            | "shell"
+    );
+    if device_id.is_empty() || !supported {
+        return Err(device_terminal_cli_usage());
+    }
+
+    let mut args = None;
+    let mut confirmed = false;
+    let mut idempotency_key = None;
+    let mut index = 2;
+    while index < arguments.len() {
+        match arguments[index].as_str() {
+            "--confirm" => {
+                if confirmed {
+                    return Err("Le flag --confirm ne peut apparaitre qu'une fois".to_string());
+                }
+                confirmed = true;
+                index += 1;
+            }
+            "--idempotency-key" => {
+                if idempotency_key.is_some() {
+                    return Err(
+                        "Le flag --idempotency-key ne peut apparaitre qu'une fois".to_string()
+                    );
+                }
+                let key = arguments
+                    .get(index + 1)
+                    .ok_or_else(|| "Le flag --idempotency-key exige une cle ASCII".to_string())?;
+                if key.starts_with("--") {
+                    return Err("Le flag --idempotency-key exige une cle ASCII".to_string());
+                }
+                validate_device_terminal_idempotency_key(key)?;
+                idempotency_key = Some(key.clone());
+                index += 2;
+            }
+            option if option.starts_with("--") => {
+                return Err(format!("Option cst-device action inconnue : {option}"));
+            }
+            raw => {
+                if args.is_some() {
+                    return Err("Un seul objet JSON args est accepte".to_string());
+                }
+                let value: Value = serde_json::from_str(raw)
+                    .map_err(|error| format!("ARGS_JSON invalide : {error}"))?;
+                if !value.is_object() {
+                    return Err("ARGS_JSON doit etre un objet JSON".to_string());
+                }
+                args = Some(value);
+                index += 1;
+            }
+        }
+    }
+
+    if !matches!(action.as_str(), "info" | "screenshot") && !confirmed {
+        return Err(format!(
+            "L'action {action} modifie ou ouvre l'appareil : confirmez la demande explicite de l'utilisateur avec --confirm"
+        ));
+    }
+
+    Ok(DeviceTerminalActionCommand {
+        device_id,
+        action,
+        args: args.unwrap_or_else(|| json!({})),
+        confirmed,
+        idempotency_key: idempotency_key.unwrap_or_else(|| Uuid::new_v4().to_string()),
+    })
+}
+
+fn validate_device_terminal_idempotency_key(key: &str) -> Result<(), String> {
+    if key.is_empty()
+        || key.len() > DEVICE_TERMINAL_IDEMPOTENCY_KEY_MAX_BYTES
+        || !key.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-' | ':')
+        })
+    {
+        return Err(format!(
+            "IDEMPOTENCY_KEY doit contenir entre 1 et {DEVICE_TERMINAL_IDEMPOTENCY_KEY_MAX_BYTES} caracteres ASCII parmi lettres, chiffres, '.', '_', '-' et ':'"
+        ));
+    }
+    Ok(())
+}
+
+fn device_terminal_action_payload(command: &DeviceTerminalActionCommand) -> Value {
+    json!({
+        "deviceId": command.device_id,
+        "action": command.action,
+        "args": command.args,
+        "confirmed": command.confirmed,
+        "idempotencyKey": command.idempotency_key,
+    })
+}
+
+async fn retry_ambiguous_device_terminal_action<T, E, F, Fut>(
+    payload: Vec<u8>,
+    mut send: F,
+    retry_delay: Duration,
+) -> Result<T, E>
+where
+    F: FnMut(Vec<u8>) -> Fut,
+    Fut: std::future::Future<Output = Result<T, E>>,
+{
+    let mut retries = 0;
+    loop {
+        match send(payload.clone()).await {
+            Ok(response) => return Ok(response),
+            Err(error) => {
+                if retries >= DEVICE_TERMINAL_ACTION_MAX_RETRIES {
+                    return Err(error);
+                }
+                retries += 1;
+                if !retry_delay.is_zero() {
+                    tokio::time::sleep(retry_delay).await;
+                }
+            }
+        }
+    }
+}
+
+pub async fn run_device_terminal_cli(arguments: &[String]) -> Result<(), String> {
+    let api_url = std::env::var("CST_DEVICE_API_URL")
+        .map(|value| value.trim().trim_end_matches('/').to_string())
+        .map_err(|_| "CST_DEVICE_API_URL est absent de ce terminal".to_string())?;
+    let parsed_url = url::Url::parse(&api_url)
+        .map_err(|error| format!("CST_DEVICE_API_URL est invalide : {error}"))?;
+    let local_host = parsed_url
+        .host_str()
+        .is_some_and(|host| host.eq_ignore_ascii_case("localhost"))
+        || parsed_url
+            .host_str()
+            .and_then(|host| host.parse::<IpAddr>().ok())
+            .is_some_and(|ip| ip.is_loopback());
+    if !matches!(parsed_url.scheme(), "http" | "https") || !local_host {
+        return Err("CST_DEVICE_API_URL doit cibler le serveur Switch local".to_string());
+    }
+    let token = std::env::var("CST_DEVICE_TOKEN")
+        .map(|value| value.trim().to_string())
+        .map_err(|_| "CST_DEVICE_TOKEN est absent de ce terminal".to_string())?;
+    if token.is_empty() {
+        return Err("CST_DEVICE_TOKEN est vide".to_string());
+    }
+
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(45))
+        .build()
+        .map_err(|error| format!("Client de controle USB indisponible : {error}"))?;
+    let (status, bytes) = match arguments.first().map(String::as_str) {
+        Some("list") if arguments.len() == 1 => {
+            let response = client
+                .get(&api_url)
+                .bearer_auth(&token)
+                .send()
+                .await
+                .map_err(|error| format!("Serveur de controle USB injoignable : {error}"))?;
+            let status = response.status();
+            let bytes = response
+                .bytes()
+                .await
+                .map_err(|error| format!("Reponse du controle USB illisible : {error}"))?;
+            (status, bytes)
+        }
+        Some("status") if arguments.len() == 2 => {
+            let action_id = Uuid::parse_str(arguments[1].trim()).map_err(|_| {
+                "ACTION_ID doit etre un UUID retourne par cst-device action".to_string()
+            })?;
+            let response = client
+                .get(format!("{api_url}/actions/{action_id}"))
+                .bearer_auth(&token)
+                .send()
+                .await
+                .map_err(|error| format!("Serveur de controle USB injoignable : {error}"))?;
+            let status = response.status();
+            let bytes = response
+                .bytes()
+                .await
+                .map_err(|error| format!("Reponse du controle USB illisible : {error}"))?;
+            (status, bytes)
+        }
+        Some("action") => {
+            let command = parse_device_terminal_action(&arguments[1..])?;
+            let payload = serde_json::to_vec(&device_terminal_action_payload(&command))
+                .map_err(|error| format!("Action USB non serialisable : {error}"))?;
+            let action_url = format!("{api_url}/actions");
+            retry_ambiguous_device_terminal_action(
+                payload,
+                |body| {
+                    let request = client
+                        .post(&action_url)
+                        .bearer_auth(&token)
+                        .header(CONTENT_TYPE, "application/json")
+                        .body(body);
+                    async move {
+                        let response = request.send().await?;
+                        let status = response.status();
+                        let bytes = response.bytes().await?;
+                        Ok::<_, reqwest::Error>((status, bytes))
+                    }
+                },
+                DEVICE_TERMINAL_ACTION_RETRY_DELAY,
+            )
+            .await
+            .map_err(|error| {
+                format!(
+                    "Serveur de controle USB injoignable ou reponse interrompue apres {} tentatives : {error}",
+                    DEVICE_TERMINAL_ACTION_MAX_RETRIES + 1
+                )
+            })?
+        }
+        _ => return Err(device_terminal_cli_usage()),
+    };
+    if !status.is_success() {
+        let detail = serde_json::from_slice::<Value>(&bytes)
+            .ok()
+            .and_then(|value| {
+                value
+                    .pointer("/error/message")
+                    .and_then(Value::as_str)
+                    .map(ToString::to_string)
+            })
+            .unwrap_or_else(|| String::from_utf8_lossy(&bytes).chars().take(500).collect());
+        return Err(format!("Controle USB refuse ({status}) : {detail}"));
+    }
+    match serde_json::from_slice::<Value>(&bytes) {
+        Ok(value) => println!(
+            "{}",
+            serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string())
+        ),
+        Err(_) => println!("{}", String::from_utf8_lossy(&bytes)),
+    }
+    Ok(())
+}
+
+fn device_terminal_cli_usage() -> String {
+    "Usage: cst-device list | cst-device action DEVICE_ID ACTION [ARGS_JSON] [--confirm] [--idempotency-key KEY] | cst-device status ACTION_ID".to_string()
 }
 
 fn default_node_name(public_base_url: &str) -> String {
@@ -1676,13 +3060,6 @@ fn default_node_name(public_base_url: &str) -> String {
         .ok()
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| public_base_url.replace([':', '/', '.'], "-"))
-}
-
-fn default_node_capacity() -> usize {
-    std::thread::available_parallelism()
-        .map(usize::from)
-        .unwrap_or(1)
-        .max(1)
 }
 
 fn default_static_dir() -> PathBuf {
@@ -1817,7 +3194,243 @@ async fn api_healthz(State(state): State<Arc<ServerState>>) -> Response {
         active_terminals: state.terminals.active_count(),
         active_chat_turns: state.chat.active_count(),
         capacity: state.config.node_capacity,
+        terminal_capacity: state.config.terminal_capacity,
+        cleanup_pending: cleanup_pending(&state),
     })
+}
+
+fn cleanup_pending(state: &ServerState) -> bool {
+    state.cleanup.requested_at.load(Ordering::Acquire) > 0
+}
+
+/// L'utilisateur demande un nettoyage depuis l'interface web. Le serveur se
+/// contente d'enregistrer la demande : le gardien Windows (`Protect-Switch-
+/// PrepAppDisk.ps1 -Mode Watch`) la voit via `/healthz` et execute le travail
+/// sur l'hote, puis publie le resultat via `POST /api/cleanup/result`.
+async fn api_cleanup_request(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(response) = check_admin_header(&state, &headers) {
+        return response;
+    }
+    state
+        .cleanup
+        .requested_at
+        .store(metrics::now_ts(), Ordering::Release);
+    json_response(serde_json::json!({
+        "ok": true,
+        "pending": true,
+        "requestedAt": metrics::now_ts(),
+    }))
+}
+
+async fn api_cleanup_status(State(state): State<Arc<ServerState>>, headers: HeaderMap) -> Response {
+    if let Err(response) = check_admin_header(&state, &headers) {
+        return response;
+    }
+    let requested_at = state.cleanup.requested_at.load(Ordering::Acquire);
+    let last_result = state
+        .cleanup
+        .last_result
+        .lock()
+        .ok()
+        .and_then(|guard| guard.clone());
+    json_response(serde_json::json!({
+        "pending": requested_at > 0,
+        "requestedAt": requested_at,
+        "lastResult": last_result,
+    }))
+}
+
+async fn api_cleanup_result(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Json(request): Json<serde_json::Value>,
+) -> Response {
+    if let Err(response) = check_admin_header(&state, &headers) {
+        return response;
+    }
+    state.cleanup.requested_at.store(0, Ordering::Release);
+    if let Ok(mut guard) = state.cleanup.last_result.lock() {
+        *guard = Some(request);
+    }
+    json_response(serde_json::json!({ "ok": true, "pending": false }))
+}
+
+async fn api_tracking_links(State(state): State<Arc<ServerState>>, headers: HeaderMap) -> Response {
+    if let Err(response) = request_actor(&state, &headers) {
+        return response;
+    }
+    match state.tracking.snapshot() {
+        Ok(snapshot) => json_response(snapshot),
+        Err(error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &error, &state.config),
+    }
+}
+
+async fn api_create_tracking_link(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Json(request): Json<CreateTrackingLinkRequest>,
+) -> Response {
+    if let Err(response) = request_actor(&state, &headers) {
+        return response;
+    }
+    match state.tracking.create(request) {
+        Ok(link) => (StatusCode::CREATED, Json(link)).into_response(),
+        Err(error) => api_error(StatusCode::BAD_REQUEST, &error, &state.config),
+    }
+}
+
+async fn api_delete_tracking_link(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    AxumPath(slug): AxumPath<String>,
+) -> Response {
+    if let Err(response) = request_actor(&state, &headers) {
+        return response;
+    }
+    match state.tracking.delete(&slug) {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => api_error(
+            StatusCode::NOT_FOUND,
+            "Lien de tracking introuvable",
+            &state.config,
+        ),
+        Err(error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &error, &state.config),
+    }
+}
+
+async fn api_duello_bank_snapshot(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(response) = check_maintenance_header(&state, &headers) {
+        return duello_bank_no_store(response);
+    }
+    match state.duello_bank.snapshot().await {
+        Ok(snapshot) => duello_bank_no_store(json_response(snapshot)),
+        Err(error) => duello_bank_error_response(&state, error),
+    }
+}
+
+async fn api_credit_duello_wallet(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    request: Result<Json<CreditDuelloWalletRequest>, JsonRejection>,
+) -> Response {
+    if let Err(response) = check_maintenance_header(&state, &headers) {
+        return duello_bank_no_store(response);
+    }
+    if !websocket_origin_allowed(&state.config, &headers) {
+        return duello_bank_no_store(api_error(
+            StatusCode::FORBIDDEN,
+            "origine de requete refusee",
+            &state.config,
+        ));
+    }
+    let Json(request) = match request {
+        Ok(request) => request,
+        Err(_) => {
+            return duello_bank_no_store(api_error(
+                StatusCode::BAD_REQUEST,
+                "requete JSON Banque Duello invalide",
+                &state.config,
+            ));
+        }
+    };
+    match state.duello_bank.credit(request).await {
+        Ok(result) => duello_bank_no_store(json_response(result)),
+        Err(error) => duello_bank_error_response(&state, error),
+    }
+}
+
+fn duello_bank_error_response(state: &Arc<ServerState>, error: DuelloBankError) -> Response {
+    let status = match error.kind {
+        DuelloBankErrorKind::BadRequest => StatusCode::BAD_REQUEST,
+        DuelloBankErrorKind::NotFound => StatusCode::NOT_FOUND,
+        DuelloBankErrorKind::Conflict => StatusCode::CONFLICT,
+        DuelloBankErrorKind::TooManyRequests => StatusCode::TOO_MANY_REQUESTS,
+        DuelloBankErrorKind::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+    };
+    duello_bank_no_store(api_error(status, &error.message, &state.config))
+}
+
+fn duello_bank_no_store(mut response: Response) -> Response {
+    response
+        .headers_mut()
+        .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+}
+
+async fn public_tracking_redirect(
+    State(state): State<Arc<ServerState>>,
+    AxumPath(slug): AxumPath<String>,
+) -> Response {
+    match state.tracking.register_click(&slug) {
+        Ok(Some(link)) => {
+            let mut response = Redirect::temporary(&link.destination_url).into_response();
+            response
+                .headers_mut()
+                .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+            response
+        }
+        Ok(None) => (StatusCode::NOT_FOUND, "Lien de tracking introuvable").into_response(),
+        Err(error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &error, &state.config),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ReferralQuery {
+    #[serde(default)]
+    refresh: bool,
+}
+
+async fn api_referral_snapshot(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Query(query): Query<ReferralQuery>,
+) -> Response {
+    if let Err(response) = request_actor(&state, &headers) {
+        return response;
+    }
+    match state.referral.snapshot(query.refresh).await {
+        Ok(snapshot) => json_response(snapshot),
+        Err(error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &error, &state.config),
+    }
+}
+
+async fn api_create_referral(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Json(request): Json<CreateReferralCodeRequest>,
+) -> Response {
+    if let Err(response) = request_actor(&state, &headers) {
+        return response;
+    }
+    match state.referral.create(request) {
+        Ok(code) => (StatusCode::CREATED, Json(code)).into_response(),
+        Err(error) => api_error(StatusCode::BAD_REQUEST, &error, &state.config),
+    }
+}
+
+async fn api_delete_referral(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    AxumPath(code): AxumPath<String>,
+) -> Response {
+    if let Err(response) = request_actor(&state, &headers) {
+        return response;
+    }
+    match state.referral.delete(&code) {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => api_error(
+            StatusCode::NOT_FOUND,
+            "Code de parrainage introuvable",
+            &state.config,
+        ),
+        Err(error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &error, &state.config),
+    }
 }
 
 fn is_draining(state: &ServerState) -> bool {
@@ -1868,6 +3481,7 @@ async fn api_health(State(state): State<Arc<ServerState>>, headers: HeaderMap) -
             active_chat_turns: state.chat.active_count(),
             available_account_ids,
             capacity: state.config.node_capacity,
+            terminal_capacity: state.config.terminal_capacity,
             started_at: state.started_at,
         }))
     })
@@ -1906,82 +3520,6 @@ async fn api_vps_capabilities(
         return response;
     }
     json_response(state.vps_deploy.capabilities())
-}
-
-async fn api_vps_google_status(
-    State(state): State<Arc<ServerState>>,
-    headers: HeaderMap,
-) -> Response {
-    if let Err(response) = check_maintenance_header(&state, &headers) {
-        return response;
-    }
-    let manager = state.vps_deploy.clone();
-    match tokio::task::spawn_blocking(move || manager.google_status()).await {
-        Ok(status) => json_response(status),
-        Err(error) => api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("Lecture Google Cloud interrompue: {error}"),
-            &state.config,
-        ),
-    }
-}
-
-async fn api_vps_google_auth(
-    State(state): State<Arc<ServerState>>,
-    headers: HeaderMap,
-) -> Response {
-    if let Err(response) = check_maintenance_header(&state, &headers) {
-        return response;
-    }
-    let manager = state.vps_deploy.clone();
-    match tokio::task::spawn_blocking(move || manager.start_google_auth()).await {
-        Ok(Ok(action)) => json_response(action),
-        Ok(Err(error)) => vps_deploy_api_error(&state, error),
-        Err(error) => api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("Connexion Google Cloud interrompue: {error}"),
-            &state.config,
-        ),
-    }
-}
-
-async fn api_vps_google_trial(
-    State(state): State<Arc<ServerState>>,
-    headers: HeaderMap,
-) -> Response {
-    if let Err(response) = check_maintenance_header(&state, &headers) {
-        return response;
-    }
-    let manager = state.vps_deploy.clone();
-    match tokio::task::spawn_blocking(move || manager.open_google_trial()).await {
-        Ok(Ok(action)) => json_response(action),
-        Ok(Err(error)) => vps_deploy_api_error(&state, error),
-        Err(error) => api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("Ouverture de Google Cloud interrompue: {error}"),
-            &state.config,
-        ),
-    }
-}
-
-async fn api_vps_google_start_deployment(
-    State(state): State<Arc<ServerState>>,
-    headers: HeaderMap,
-    Json(request): Json<StartGoogleCloudDeployRequest>,
-) -> Response {
-    if let Err(response) = check_maintenance_header(&state, &headers) {
-        return response;
-    }
-    let manager = state.vps_deploy.clone();
-    match tokio::task::spawn_blocking(move || manager.start_google_deployment(request)).await {
-        Ok(Ok(job)) => (StatusCode::CREATED, Json(job)).into_response(),
-        Ok(Err(error)) => vps_deploy_api_error(&state, error),
-        Err(error) => api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("Provisionnement Google Cloud interrompu: {error}"),
-            &state.config,
-        ),
-    }
 }
 
 async fn api_vps_deployments(
@@ -2100,6 +3638,10 @@ async fn api_put_settings(
         saved.workspaces = workspaces;
         saved.closed_workspace_ids = closed_workspace_ids;
     }
+    state
+        .chat
+        .runtime_sync()
+        .notify(RuntimeSyncTopic::AccountCompletions);
     json_response(saved)
 }
 
@@ -2181,9 +3723,26 @@ async fn api_limits(
     }
 
     match settings::account_limit_status(Some(query.force)).await {
-        Ok(value) => json_response(value),
+        Ok(mut value) => {
+            let unavailable = state.terminals.unavailable_account_ids();
+            for row in &mut value {
+                if row.provider == Provider::Freebuff && unavailable.contains(&row.id) {
+                    row.session_busy = true;
+                }
+            }
+            json_response(value)
+        }
         Err(error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &error, &state.config),
     }
+}
+
+async fn api_tokscale_submit(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+) -> Response {
+    auth_or(&state, &headers, || {
+        metrics::tokscale_submit_usage().map(json_response)
+    })
 }
 
 async fn api_usage(State(state): State<Arc<ServerState>>, headers: HeaderMap) -> Response {
@@ -2222,9 +3781,19 @@ async fn api_list_discussions(
         Ok(actor) => actor,
         Err(response) => return response,
     };
-    let dashboard = match discussions::list_discussions_dashboard() {
-        Ok(value) => value,
-        Err(error) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, &error, &state.config),
+    let dashboard = match tokio::task::spawn_blocking(discussions::list_discussions_dashboard).await
+    {
+        Ok(Ok(value)) => value,
+        Ok(Err(error)) => {
+            return api_error(StatusCode::INTERNAL_SERVER_ERROR, &error, &state.config)
+        }
+        Err(error) => {
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("analyse des discussions interrompue: {error}"),
+                &state.config,
+            )
+        }
     };
     match actor {
         RequestActor::Administrator => json_response(dashboard),
@@ -2234,19 +3803,122 @@ async fn api_list_discussions(
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct PromptHistoryQuery {
+    limit: Option<usize>,
+}
+
+/// Expose au client web le meme historique que la commande Tauri locale.
+/// Le plafond evite qu'une requete distante puisse declencher un rendu ou une
+/// reponse demesuree ; l'interface demande normalement 4 000 entrees.
+async fn api_list_prompt_history(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Query(query): Query<PromptHistoryQuery>,
+) -> Response {
+    let actor = match request_actor(&state, &headers) {
+        Ok(actor) => actor,
+        Err(response) => return response,
+    };
+    let limit = query.limit.map(|value| value.clamp(1, 10_000));
+    let history = match tokio::task::spawn_blocking(move || {
+        discussions::list_prompt_history_dashboard(limit)
+    })
+    .await
+    {
+        Ok(Ok(value)) => value,
+        Ok(Err(error)) => {
+            return api_error(StatusCode::INTERNAL_SERVER_ERROR, &error, &state.config)
+        }
+        Err(error) => {
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("analyse de l'historique interrompue: {error}"),
+                &state.config,
+            )
+        }
+    };
+
+    match actor {
+        RequestActor::Administrator => json_response(history),
+        RequestActor::User(identity) => json_response(filter_prompt_history_for_identity(
+            &state, &identity, history,
+        )),
+    }
+}
+
+fn filter_prompt_history_for_identity(
+    state: &Arc<ServerState>,
+    identity: &AuthIdentity,
+    mut history: discussions::PromptHistory,
+) -> discussions::PromptHistory {
+    let mut workspace_authorizations = HashMap::<String, bool>::new();
+    history.prompts.retain(|prompt| {
+        prompt.cwd.as_deref().is_some_and(|cwd| {
+            *workspace_authorizations
+                .entry(cwd.to_string())
+                .or_insert_with(|| {
+                    state
+                        .workspace_access
+                        .authorize_existing_environment(identity, cwd)
+                        .is_ok()
+                })
+        })
+    });
+    // Ne jamais exposer, meme dans les compteurs, le volume des demandes
+    // appartenant a des environnements auxquels cet utilisateur n'a pas acces.
+    history.total_prompts = history.prompts.len() as u64;
+    history.returned = history.prompts.len() as u64;
+    history
+}
+
+fn identity_owns_account(
+    state: &Arc<ServerState>,
+    identity: &AuthIdentity,
+    account_id: &str,
+) -> bool {
+    owned_account_ids_for_identity(state, identity).contains(account_id)
+}
+
+fn owned_account_ids_for_identity(
+    state: &Arc<ServerState>,
+    identity: &AuthIdentity,
+) -> HashSet<String> {
+    let Some(email) = state.auth.email_for_user_id(&identity.id).ok().flatten() else {
+        return HashSet::new();
+    };
+    let Ok(settings) = settings::load_settings_for_terminal() else {
+        return HashSet::new();
+    };
+    settings
+        .accounts
+        .iter()
+        .filter(|account| account.label.trim().eq_ignore_ascii_case(email.trim()))
+        .map(|account| account.id.clone())
+        .collect()
+}
+
 fn filter_discussions_for_identity(
     state: &Arc<ServerState>,
     identity: &AuthIdentity,
     mut dashboard: discussions::DiscussionsDashboard,
 ) -> discussions::DiscussionsDashboard {
+    let owned_account_ids = owned_account_ids_for_identity(state, identity);
+    let mut workspace_authorizations = HashMap::<String, bool>::new();
     for account in &mut dashboard.accounts {
+        let account_owner = owned_account_ids.contains(&account.account_id);
         account.discussions.retain(|discussion| {
-            discussion.cwd.as_deref().is_some_and(|cwd| {
-                state
-                    .workspace_access
-                    .authorize_existing_environment(identity, cwd)
-                    .is_ok()
-            })
+            account_owner
+                || discussion.cwd.as_deref().is_some_and(|cwd| {
+                    *workspace_authorizations
+                        .entry(cwd.to_string())
+                        .or_insert_with(|| {
+                            state
+                                .workspace_access
+                                .authorize_existing_environment(identity, cwd)
+                                .is_ok()
+                        })
+                })
         });
         account.discussion_count = account.discussions.len() as u64;
     }
@@ -2267,25 +3939,12 @@ fn authorize_discussion_for_identity(
     account_id: &str,
     session_id: &str,
 ) -> Result<(), Response> {
-    let dashboard = discussions::list_discussions_dashboard()
-        .map_err(|error| api_error(StatusCode::INTERNAL_SERVER_ERROR, &error, &state.config))?;
-    let discussion = dashboard
-        .accounts
-        .iter()
-        .find(|account| account.account_id == account_id)
-        .and_then(|account| {
-            account.discussions.iter().find(|discussion| {
-                discussion.session_id == session_id || discussion.rollout_id == session_id
-            })
-        })
-        .ok_or_else(|| {
-            api_error(
-                StatusCode::NOT_FOUND,
-                "Discussion introuvable ou inaccessible",
-                &state.config,
-            )
-        })?;
-    let cwd = discussion.cwd.as_deref().ok_or_else(|| {
+    let cwd = discussions::discussion_cwd_for_authorization(account_id, session_id)
+        .map_err(|error| api_error(StatusCode::NOT_FOUND, &error, &state.config))?;
+    if identity_owns_account(state, identity, account_id) {
+        return Ok(());
+    }
+    let cwd = cwd.as_deref().ok_or_else(|| {
         api_error(
             StatusCode::FORBIDDEN,
             "Cette discussion n'est liee a aucun environnement autorise",
@@ -2489,19 +4148,47 @@ async fn api_delete_discussion(
             return response;
         }
     }
-    match discussions::delete_discussion_for_account(
-        request.account_id,
-        request.session_id,
-        request.archive,
-    ) {
-        Ok(value) => json_response(value),
-        Err(error) => api_error(resource_error_status(&error), &error, &state.config),
+    let account_id = request.account_id;
+    let session_id = request.session_id;
+    let archive = request.archive;
+    match tokio::task::spawn_blocking(move || {
+        discussions::delete_discussion_for_account(account_id, session_id, archive)
+    })
+    .await
+    {
+        Ok(Ok(value)) => json_response(value),
+        Ok(Err(error)) => api_error(resource_error_status(&error), &error, &state.config),
+        Err(error) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("Suppression de discussion interrompue: {error}"),
+            &state.config,
+        ),
     }
 }
 
 /// Continuation INTER-PROVIDER (mode web) : renvoie le transcript semantique
 /// (chaine JSON) d'une discussion Codex ou Claude, a injecter comme amorce dans
 /// une session neuve du provider cible cote client.
+async fn api_import_codex_transcript_to_freebuff(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Json(request): Json<ImportCodexTranscriptRequest>,
+) -> Response {
+    if let Err(response) = check_admin_header(&state, &headers) {
+        return response;
+    }
+    match discussions::import_codex_transcript_between(
+        request.source_account_id,
+        request.session_id,
+        request.target_account_id,
+        request.folder_path,
+        request.transcript,
+    ) {
+        Ok(value) => json_response(value),
+        Err(error) => api_error(resource_error_status(&error), &error, &state.config),
+    }
+}
+
 async fn api_export_discussion_transcript(
     State(state): State<Arc<ServerState>>,
     headers: HeaderMap,
@@ -2525,6 +4212,16 @@ async fn api_export_discussion_transcript(
         Ok(value) => json_response(value),
         Err(error) => api_error(resource_error_status(&error), &error, &state.config),
     }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ImportCodexTranscriptRequest {
+    source_account_id: String,
+    session_id: String,
+    target_account_id: String,
+    folder_path: Option<String>,
+    transcript: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2831,6 +4528,12 @@ struct ControlPrivateMessageCampaignToolArguments {
     action: PrivateMessageCampaignAction,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct GetControlDeviceActionToolArguments {
+    action_id: String,
+}
+
 async fn api_control_private_message_campaign(
     State(state): State<Arc<ServerState>>,
     headers: HeaderMap,
@@ -2856,6 +4559,152 @@ async fn api_control_private_message_campaign(
         }
         Err(error) => private_message_api_error(&state, error),
     }
+}
+
+async fn api_list_control_devices(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(response) = device_action_context_from_headers(&state, &headers) {
+        return private_message_no_store(response);
+    }
+    match state.device_fleet.snapshot() {
+        Ok(snapshot) => private_message_no_store(json_response(snapshot)),
+        Err(error) => device_fleet_api_error(&state, error),
+    }
+}
+
+async fn api_control_device(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Json(request): Json<DeviceActionRequest>,
+) -> Response {
+    let context = match device_action_context_from_headers(&state, &headers) {
+        Ok(context) => context,
+        Err(response) => return private_message_no_store(response),
+    };
+    let queued = match context.queue_action(&state.device_fleet, request) {
+        Ok(action) => action,
+        Err(error) => return device_fleet_api_error(&state, error),
+    };
+    match context
+        .wait_action(&state.device_fleet, &queued.id, Duration::from_secs(35))
+        .await
+    {
+        Ok(action) => device_action_http_response(&state, action),
+        Err(error) => device_fleet_api_error(&state, error),
+    }
+}
+
+async fn api_device_action_status(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    AxumPath(action_id): AxumPath<String>,
+) -> Response {
+    let context = match device_action_context_from_headers(&state, &headers) {
+        Ok(context) => context,
+        Err(response) => return private_message_no_store(response),
+    };
+    match context.action_status(&state.device_fleet, &action_id) {
+        Ok(action) => device_action_http_response(&state, action),
+        Err(error) => device_fleet_api_error(&state, error),
+    }
+}
+
+async fn api_device_connector_heartbeat(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Json(request): Json<DeviceConnectorHeartbeatRequest>,
+) -> Response {
+    if let Err(response) = check_maintenance_header(&state, &headers) {
+        return private_message_no_store(response);
+    }
+    match state.device_fleet.heartbeat(request) {
+        Ok(snapshot) => private_message_no_store(json_response(snapshot)),
+        Err(error) => device_fleet_api_error(&state, error),
+    }
+}
+
+async fn api_device_connector_claim(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Json(request): Json<DeviceConnectorClaimRequest>,
+) -> Response {
+    if let Err(response) = check_maintenance_header(&state, &headers) {
+        return private_message_no_store(response);
+    }
+    match state.device_fleet.claim_next(&request.connector_id) {
+        Ok(job) => private_message_no_store(json_response(DeviceConnectorClaimResponse { job })),
+        Err(error) => device_fleet_api_error(&state, error),
+    }
+}
+
+async fn api_device_connector_report(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Json(request): Json<DeviceConnectorReportRequest>,
+) -> Response {
+    if let Err(response) = check_maintenance_header(&state, &headers) {
+        return private_message_no_store(response);
+    }
+    match state.device_fleet.report(request) {
+        Ok(action) => private_message_no_store(json_response(action)),
+        Err(error) => device_fleet_api_error(&state, error),
+    }
+}
+
+fn device_action_http_response(state: &Arc<ServerState>, action: DeviceActionRecord) -> Response {
+    match action.status {
+        DeviceActionStatus::Succeeded => {
+            private_message_no_store(json_response(action.result.unwrap_or_else(|| {
+                DeviceActionResult {
+                    action_id: action.id,
+                    device_id: action.device_id,
+                    action: action.action,
+                    success: true,
+                    detail: "Action appareil terminee".to_string(),
+                    stdout: None,
+                    stderr: None,
+                    data_base64: None,
+                    mime_type: None,
+                    started_at: action.created_at,
+                    finished_at: action.finished_at.unwrap_or(action.updated_at),
+                    truncated: false,
+                }
+            })))
+        }
+        DeviceActionStatus::Failed => {
+            let detail = action
+                .result
+                .as_ref()
+                .map(|result| result.detail.as_str())
+                .unwrap_or("Action appareil echouee");
+            private_message_no_store(api_error(
+                StatusCode::BAD_GATEWAY,
+                detail,
+                &state.config,
+            ))
+        }
+        DeviceActionStatus::Expired => private_message_no_store(api_error(
+            StatusCode::GATEWAY_TIMEOUT,
+            "Le resultat de l'action appareil est ambigu ou a expire ; elle n'a pas ete relancee",
+            &state.config,
+        )),
+        DeviceActionStatus::Queued | DeviceActionStatus::Claimed => {
+            private_message_no_store((StatusCode::ACCEPTED, Json(action)).into_response())
+        }
+    }
+}
+
+fn device_fleet_api_error(state: &Arc<ServerState>, error: DeviceFleetError) -> Response {
+    let status = match &error {
+        DeviceFleetError::Validation(_) => StatusCode::BAD_REQUEST,
+        DeviceFleetError::NotFound => StatusCode::NOT_FOUND,
+        DeviceFleetError::Conflict(_) => StatusCode::CONFLICT,
+        DeviceFleetError::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
+        DeviceFleetError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    private_message_no_store(api_error(status, &error.to_string(), &state.config))
 }
 
 async fn api_list_tiktok_dm_campaigns(
@@ -2923,7 +4772,16 @@ async fn api_list_tiktok_sender_accounts(
     let scrcpy_available = connector
         .as_ref()
         .is_some_and(|status| status.scrcpy_available);
-    let adb_error = connector.as_ref().and_then(|status| status.adb_error.clone());
+    let ws_scrcpy_available = connector
+        .as_ref()
+        .is_some_and(|status| status.ws_scrcpy_available);
+    let ws_scrcpy_online = bridge_online
+        && connector
+            .as_ref()
+            .is_some_and(|status| status.ws_scrcpy_online);
+    let adb_error = connector
+        .as_ref()
+        .and_then(|status| status.adb_error.clone());
     let connector_error = connector.as_ref().and_then(|status| status.error.clone());
     let setup_required = accounts.is_empty();
     private_message_no_store(json_response(json!({
@@ -2933,6 +4791,8 @@ async fn api_list_tiktok_sender_accounts(
         "bridgeOnline": bridge_online,
         "connectorOnline": connector_online,
         "scrcpyAvailable": scrcpy_available,
+        "wsScrcpyAvailable": ws_scrcpy_available,
+        "wsScrcpyOnline": ws_scrcpy_online,
         "adbError": adb_error,
         "connectorError": connector_error,
         "setupRequired": setup_required
@@ -3419,7 +5279,7 @@ async fn api_pool_stop(State(state): State<Arc<ServerState>>, headers: HeaderMap
 async fn api_start_terminal(
     State(state): State<Arc<ServerState>>,
     headers: HeaderMap,
-    Json(request): Json<StartTerminalRequest>,
+    Json(mut request): Json<StartTerminalRequest>,
 ) -> Response {
     // Auth d'abord (401 pour un appelant sans token), puis refus explicite en
     // 503 si le noeud est en drain. On NE passe PAS par auth_or ici : auth_or
@@ -3428,6 +5288,10 @@ async fn api_start_terminal(
     let actor = match request_actor(&state, &headers) {
         Ok(actor) => actor,
         Err(response) => return response,
+    };
+    request.source_terminal_key = match normalize_source_terminal_key(request.source_terminal_key) {
+        Ok(value) => value,
+        Err(error) => return api_error(StatusCode::BAD_REQUEST, &error, &state.config),
     };
     if is_draining(&state) {
         return api_error(
@@ -3487,10 +5351,17 @@ async fn api_start_terminal(
         )?;
         if !login_only {
             if let Some(identity) = identity.as_ref() {
-                start_state
-                    .workspace_access
-                    .claim_or_authorize_environment(identity, &value.workspace_path, None)
-                    .map_err(|error| error.message)?;
+                if let Err(error) = start_state.workspace_access.claim_or_authorize_environment(
+                    identity,
+                    &value.workspace_path,
+                    None,
+                ) {
+                    // Le PTY est deja lance a ce stade. Une autorisation qui
+                    // echoue ne doit pas retourner une erreur en laissant le
+                    // shell et Freebuff vivants dans le noeud.
+                    let _ = start_state.terminals.stop(value.id);
+                    return Err(error.message);
+                }
             }
         }
         Ok::<_, String>(value)
@@ -3505,6 +5376,19 @@ async fn api_start_terminal(
             &state.config,
         ),
     }
+}
+
+fn normalize_source_terminal_key(value: Option<String>) -> Result<Option<String>, String> {
+    let value = value
+        .map(|item| item.trim().to_string())
+        .filter(|item| !item.is_empty());
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.chars().count() > 160 || value.chars().any(char::is_control) {
+        return Err("Identifiant du terminal source invalide".to_string());
+    }
+    Ok(Some(value))
 }
 
 fn normalize_source_chat_key(value: Option<String>) -> Result<Option<String>, String> {
@@ -3590,6 +5474,7 @@ async fn api_start_chat_turn(
             mode: request.mode,
             model: request.model.clone(),
             reasoning_effort: request.reasoning_effort.clone(),
+            goal_key: None,
         }) {
         Ok(value) => value,
         Err(error) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, &error, &state.config),
@@ -3651,6 +5536,93 @@ fn bearer_from_headers(headers: &HeaderMap) -> &str {
         .and_then(|header| header.to_str().ok())
         .unwrap_or("");
     value.strip_prefix("Bearer ").unwrap_or(value).trim()
+}
+
+fn device_tool_result_response(id: Value, result: DeviceActionResult) -> Value {
+    let text = format!(
+        "Action {:?} terminee sur {} : {}",
+        result.action, result.device_id, result.detail
+    );
+    let mut structured = serde_json::to_value(&result).unwrap_or_else(|_| {
+        json!({
+            "actionId": &result.action_id,
+            "deviceId": &result.device_id,
+            "success": result.success,
+            "detail": &result.detail,
+        })
+    });
+    let mut content = vec![json!({ "type": "text", "text": text })];
+    if let (Some(data), Some(mime_type)) =
+        (result.data_base64.as_deref(), result.mime_type.as_deref())
+    {
+        content.push(json!({
+            "type": "image",
+            "data": data,
+            "mimeType": mime_type,
+        }));
+        if let Some(fields) = structured.as_object_mut() {
+            fields.remove("dataBase64");
+            fields.insert("hasImage".to_string(), Value::Bool(true));
+        }
+    }
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "result": {
+            "content": content,
+            "structuredContent": structured,
+            "isError": false,
+        }
+    })
+}
+
+fn device_tool_action_record_response(id: Value, action: DeviceActionRecord) -> Value {
+    match action.status {
+        DeviceActionStatus::Succeeded => match action.result {
+            Some(result) => device_tool_result_response(id, result),
+            None => chat_model_tools::tool_error_response(
+                id,
+                "Le connecteur a termine l'action sans resultat exploitable",
+            ),
+        },
+        DeviceActionStatus::Failed => {
+            let detail = action
+                .result
+                .as_ref()
+                .map(|result| result.detail.as_str())
+                .unwrap_or("L'action appareil a echoue");
+            chat_model_tools::tool_error_response(id, detail)
+        }
+        DeviceActionStatus::Expired => chat_model_tools::tool_error_response(
+            id,
+            "Le resultat de l'action est ambigu ou a expire. Par securite, une action mutante n'est jamais relancee automatiquement.",
+        ),
+        DeviceActionStatus::Queued | DeviceActionStatus::Claimed => {
+            chat_model_tools::tool_microsoft_data_response(
+                id,
+                "L'action est encore en cours. Suis cet actionId avec get_control_device_action et ne la relance pas, afin d'eviter une double execution.",
+                json!({ "action": action }),
+            )
+        }
+    }
+}
+
+fn mcp_device_action_idempotency_key(
+    token: &str,
+    call_id: &Value,
+    request: &DeviceActionRequest,
+) -> Result<String, serde_json::Error> {
+    let mut canonical_request = request.clone();
+    canonical_request.idempotency_key = None;
+    let call_id = serde_json::to_vec(call_id)?;
+    let request = serde_json::to_vec(&canonical_request)?;
+    let mut digest = Sha256::new();
+    digest.update(b"cst-chat-device-action-v2\0");
+    for component in [token.as_bytes(), call_id.as_slice(), request.as_slice()] {
+        digest.update((component.len() as u64).to_be_bytes());
+        digest.update(component);
+    }
+    Ok(format!("mcp:{:x}", digest.finalize()))
 }
 
 async fn wait_for_tiktok_submission(
@@ -3734,11 +5706,17 @@ async fn mcp_chat_tools(
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("");
             if name != AUTONOMOUS_AGENT_TOOL_NAME
+                && name != CREATE_GOAL_TOOL_NAME
+                && name != GET_GOAL_TOOL_NAME
+                && name != UPDATE_GOAL_TOOL_NAME
                 && name != UPDATE_AUTONOMOUS_AGENT_TOOL_NAME
                 && name != PAUSE_AUTONOMOUS_AGENT_TOOL_NAME
                 && name != ACTIVATE_SUPERVISOR_GENERAL_REPORT_TOOL_NAME
                 && name != APPLY_AUTONOMOUS_AGENT_POLICY_TOOL_NAME
                 && name != CREATE_CHAT_TOOL_NAME
+                && name != LIST_CONTROL_DEVICES_TOOL_NAME
+                && name != CONTROL_DEVICE_TOOL_NAME
+                && name != GET_CONTROL_DEVICE_ACTION_TOOL_NAME
                 && name != LIST_OUTLOOK_MESSAGES_TOOL_NAME
                 && name != LIST_CALENDAR_EVENTS_TOOL_NAME
                 && name != SEND_OUTLOOK_EMAIL_TOOL_NAME
@@ -3785,6 +5763,7 @@ async fn mcp_chat_tools(
                 | MANAGE_TIKTOK_SENDER_LOGIN_TOOL_NAME
                 | PREPARE_TIKTOK_DM_CAMPAIGN_TOOL_NAME
                 | SEND_TIKTOK_DM_CAMPAIGN_TOOL_NAME
+                | CONTROL_DEVICE_TOOL_NAME
                 | QUEUE_TIKTOK_FOLLOWER_EXTRACTION_TOOL_NAME => {
                     state.chat_tool_capabilities.claim_external_action(token)
                 }
@@ -3807,6 +5786,125 @@ async fn mcp_chat_tools(
                 .cloned()
                 .unwrap_or_else(|| json!({}));
             match name {
+                LIST_CONTROL_DEVICES_TOOL_NAME => {
+                    if !arguments
+                        .as_object()
+                        .is_some_and(|arguments| arguments.is_empty())
+                    {
+                        return json_response(chat_model_tools::tool_error_response(
+                            id,
+                            "La liste des appareils ne prend aucun argument",
+                        ));
+                    }
+                    match state.device_fleet.snapshot() {
+                        Ok(snapshot) => {
+                            let ready = snapshot
+                                .devices
+                                .iter()
+                                .filter(|device| device.ready)
+                                .count();
+                            json_response(chat_model_tools::tool_microsoft_data_response(
+                                id,
+                                &format!(
+                                    "{} appareil(s) USB detecte(s), dont {ready} pret(s). Connecteur {}.",
+                                    snapshot.devices.len(),
+                                    if snapshot.connector_online {
+                                        "en ligne"
+                                    } else {
+                                        "hors ligne"
+                                    }
+                                ),
+                                json!(snapshot),
+                            ))
+                        }
+                        Err(error) => json_response(chat_model_tools::tool_error_response(
+                            id,
+                            &error.to_string(),
+                        )),
+                    }
+                }
+                GET_CONTROL_DEVICE_ACTION_TOOL_NAME => {
+                    let request = match serde_json::from_value::<GetControlDeviceActionToolArguments>(
+                        arguments,
+                    ) {
+                        Ok(request) => request,
+                        Err(error) => {
+                            return json_response(chat_model_tools::tool_error_response(
+                                id,
+                                &format!("Arguments invalides pour le suivi USB : {error}"),
+                            ))
+                        }
+                    };
+                    let owner_id = context.user_id.as_deref().unwrap_or("server-admin");
+                    match state
+                        .device_fleet
+                        .action_status(owner_id, &request.action_id)
+                    {
+                        Ok(action) => json_response(device_tool_action_record_response(id, action)),
+                        Err(error) => json_response(chat_model_tools::tool_error_response(
+                            id,
+                            &error.to_string(),
+                        )),
+                    }
+                }
+                CONTROL_DEVICE_TOOL_NAME => {
+                    let mut request = match serde_json::from_value::<DeviceActionRequest>(arguments)
+                    {
+                        Ok(request) => request,
+                        Err(error) => {
+                            return json_response(chat_model_tools::tool_error_response(
+                                id,
+                                &format!("Arguments invalides pour le controle USB : {error}"),
+                            ))
+                        }
+                    };
+                    if !matches!(
+                        request.action,
+                        DeviceActionKind::Info | DeviceActionKind::Screenshot
+                    ) && !request.confirmed
+                    {
+                        return json_response(chat_model_tools::tool_error_response(
+                            id,
+                            "Cette action modifie ou ouvre l'appareil. Demande d'abord une confirmation explicite a l'utilisateur, puis rappelle l'outil avec confirmed=true. Pour shell, la confirmation doit porter sur la commande exacte et celle-ci ne doit jamais etre modifiee.",
+                        ));
+                    }
+                    request.idempotency_key =
+                        match mcp_device_action_idempotency_key(token, &id, &request) {
+                            Ok(key) => Some(key),
+                            Err(error) => {
+                                return json_response(chat_model_tools::tool_error_response(
+                                    id,
+                                    &format!(
+                                        "Action USB impossible a dedupliquer proprement : {error}"
+                                    ),
+                                ))
+                            }
+                        };
+                    let owner_id = context.user_id.as_deref().unwrap_or("server-admin");
+                    let queued = match state.device_fleet.queue_action(owner_id, request) {
+                        Ok(action) => action,
+                        Err(error) => {
+                            return json_response(chat_model_tools::tool_error_response(
+                                id,
+                                &error.to_string(),
+                            ))
+                        }
+                    };
+                    let completed = match state
+                        .device_fleet
+                        .wait_action(owner_id, &queued.id, Duration::from_secs(75))
+                        .await
+                    {
+                        Ok(action) => action,
+                        Err(error) => {
+                            return json_response(chat_model_tools::tool_error_response(
+                                id,
+                                &error.to_string(),
+                            ))
+                        }
+                    };
+                    json_response(device_tool_action_record_response(id, completed))
+                }
                 CREATE_CHAT_TOOL_NAME => {
                     let arguments =
                         match serde_json::from_value::<CreateChatToolArguments>(arguments) {
@@ -3835,19 +5933,149 @@ async fn mcp_chat_tools(
                         }
                     }
                 }
-                AUTONOMOUS_AGENT_TOOL_NAME => {
-                    let arguments = match serde_json::from_value::<CreateAutonomousAgentToolArguments>(
+                CREATE_GOAL_TOOL_NAME if context.scope == ChatToolScope::GoalsOnly => {
+                    let arguments = match serde_json::from_value::<CreateTerminalGoalToolArguments>(
                         arguments,
                     ) {
                         Ok(value) => value,
                         Err(error) => {
                             return json_response(chat_model_tools::tool_error_response(
                                 id,
-                                &format!("Arguments invalides pour la creation autonome : {error}"),
+                                &format!("Arguments invalides pour la creation du goal : {error}"),
                             ))
                         }
                     };
-                    let request = match arguments.into_request(context) {
+                    let key = match context.goal_key.clone() {
+                        Some(value) => value,
+                        None => {
+                            return json_response(chat_model_tools::tool_error_response(
+                                id,
+                                "Portee persistante du goal absente",
+                            ))
+                        }
+                    };
+                    let manager = state.terminal_goals.clone();
+                    match tokio::task::spawn_blocking(move || {
+                        manager.create(&key, &arguments.objective, arguments.token_budget)
+                    })
+                    .await
+                    {
+                        Ok(Ok(goal)) => {
+                            json_response(chat_model_tools::tool_terminal_goal_success_response(
+                                id, "cree", &goal,
+                            ))
+                        }
+                        Ok(Err(error)) => {
+                            json_response(chat_model_tools::tool_error_response(id, &error))
+                        }
+                        Err(error) => json_response(chat_model_tools::tool_error_response(
+                            id,
+                            &format!("Creation du goal interrompue : {error}"),
+                        )),
+                    }
+                }
+                CREATE_GOAL_TOOL_NAME => {
+                    let request = match serde_json::from_value::<CreateAutonomousGoalToolArguments>(
+                        arguments,
+                    ) {
+                        Ok(value) => value.into_request(context),
+                        Err(error) => Err(format!(
+                            "Arguments invalides pour la creation du goal : {error}"
+                        )),
+                    };
+                    let request = match request {
+                        Ok(value) => value,
+                        Err(error) => {
+                            return json_response(chat_model_tools::tool_error_response(id, &error))
+                        }
+                    };
+                    let manager = state.autonomous.clone();
+                    match tokio::task::spawn_blocking(move || manager.create_goal(request)).await {
+                        Ok(Ok(agent)) => json_response(
+                            chat_model_tools::tool_autonomous_goal_success_response(id, &agent),
+                        ),
+                        Ok(Err(error)) => {
+                            json_response(chat_model_tools::tool_error_response(id, &error))
+                        }
+                        Err(error) => json_response(chat_model_tools::tool_error_response(
+                            id,
+                            &format!("Creation autonome interrompue : {error}"),
+                        )),
+                    }
+                }
+                GET_GOAL_TOOL_NAME => {
+                    let key = match context.goal_key.as_deref() {
+                        Some(value) => value,
+                        None => {
+                            return json_response(chat_model_tools::tool_error_response(
+                                id,
+                                "Portee persistante du goal absente",
+                            ))
+                        }
+                    };
+                    match state.terminal_goals.get(key) {
+                        Ok(goal) => json_response(
+                            chat_model_tools::tool_terminal_goal_get_response(id, goal.as_ref()),
+                        ),
+                        Err(error) => {
+                            json_response(chat_model_tools::tool_error_response(id, &error))
+                        }
+                    }
+                }
+                UPDATE_GOAL_TOOL_NAME => {
+                    let arguments =
+                        match serde_json::from_value::<UpdateGoalToolArguments>(arguments) {
+                            Ok(value) => value,
+                            Err(error) => {
+                                return json_response(chat_model_tools::tool_error_response(
+                                    id,
+                                    &format!(
+                                        "Arguments invalides pour la mise a jour du goal : {error}"
+                                    ),
+                                ))
+                            }
+                        };
+                    let key = match context.goal_key.clone() {
+                        Some(value) => value,
+                        None => {
+                            return json_response(chat_model_tools::tool_error_response(
+                                id,
+                                "Portee persistante du goal absente",
+                            ))
+                        }
+                    };
+                    let manager = state.terminal_goals.clone();
+                    match tokio::task::spawn_blocking(move || {
+                        manager.update(&key, arguments.status)
+                    })
+                    .await
+                    {
+                        Ok(Ok(goal)) => {
+                            json_response(chat_model_tools::tool_terminal_goal_success_response(
+                                id,
+                                "mis a jour",
+                                &goal,
+                            ))
+                        }
+                        Ok(Err(error)) => {
+                            json_response(chat_model_tools::tool_error_response(id, &error))
+                        }
+                        Err(error) => json_response(chat_model_tools::tool_error_response(
+                            id,
+                            &format!("Mise a jour du goal interrompue : {error}"),
+                        )),
+                    }
+                }
+                AUTONOMOUS_AGENT_TOOL_NAME => {
+                    let request = match serde_json::from_value::<CreateAutonomousAgentToolArguments>(
+                        arguments,
+                    ) {
+                        Ok(value) => value.into_request(context),
+                        Err(error) => Err(format!(
+                            "Arguments invalides pour la creation autonome : {error}"
+                        )),
+                    };
+                    let request = match request {
                         Ok(value) => value,
                         Err(error) => {
                             return json_response(chat_model_tools::tool_error_response(id, &error))
@@ -4387,6 +6615,9 @@ async fn mcp_chat_tools(
                                     "Ouverture de scrcpy demandee sur l'appareil {}. La fenetre apparait sur le poste Windows qui execute le connecteur.",
                                     action.device_serial
                                 ),
+                                TikTokSenderSetupActionKind::StartWsScrcpy =>
+                                    "Demarrage de ws-scrcpy-web demande sur le poste Windows qui execute le connecteur."
+                                        .to_string(),
                             };
                             json_response(chat_model_tools::tool_microsoft_data_response(
                                 id,
@@ -5032,6 +7263,338 @@ async fn api_set_default_creative_account(
             &error,
             &state.config,
         ),
+    }
+}
+
+async fn api_freebuff_cloud_status(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(response) = check_admin_header(&state, &headers) {
+        return response;
+    }
+    json_response(freebuff_cloud::status())
+}
+
+async fn api_freebuff_cloud_connect(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    request: Result<Json<ConnectFreebuffCloudRequest>, JsonRejection>,
+) -> Response {
+    if let Err(response) = check_admin_header(&state, &headers) {
+        return response;
+    }
+    let Json(request) = match request {
+        Ok(request) => request,
+        Err(error) => return creative_json_rejection(&state, error),
+    };
+    match freebuff_cloud::connect(request.session_cookie).await {
+        Ok(value) => json_response(value),
+        Err(error) => api_error(
+            creative_generation_error_status(&error),
+            &error,
+            &state.config,
+        ),
+    }
+}
+
+async fn api_freebuff_cloud_disconnect(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(response) = check_admin_header(&state, &headers) {
+        return response;
+    }
+    match freebuff_cloud::disconnect() {
+        Ok(()) => json_response(json!({ "ok": true })),
+        Err(error) => api_error(
+            creative_generation_error_status(&error),
+            &error,
+            &state.config,
+        ),
+    }
+}
+
+async fn api_freebuff_cloud_projects(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(response) = check_admin_header(&state, &headers) {
+        return response;
+    }
+    match freebuff_cloud::projects().await {
+        Ok(value) => json_response(value),
+        Err(error) => api_error(
+            creative_generation_error_status(&error),
+            &error,
+            &state.config,
+        ),
+    }
+}
+
+async fn api_freebuff_cloud_create_blank_project(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    request: Result<Json<CreateBlankProjectRequest>, JsonRejection>,
+) -> Response {
+    if let Err(response) = check_admin_header(&state, &headers) {
+        return response;
+    }
+    let Json(request) = match request {
+        Ok(request) => request,
+        Err(error) => return creative_json_rejection(&state, error),
+    };
+    match freebuff_cloud::create_blank_project(request.name).await {
+        Ok(value) => json_response(value),
+        Err(error) => api_error(
+            creative_generation_error_status(&error),
+            &error,
+            &state.config,
+        ),
+    }
+}
+
+async fn api_freebuff_cloud_connect_repo(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    request: Result<Json<ConnectRepoRequest>, JsonRejection>,
+) -> Response {
+    if let Err(response) = check_admin_header(&state, &headers) {
+        return response;
+    }
+    let Json(request) = match request {
+        Ok(request) => request,
+        Err(error) => return creative_json_rejection(&state, error),
+    };
+    match freebuff_cloud::connect_repo(request.repo_full_name).await {
+        Ok(value) => json_response(value),
+        Err(error) => api_error(
+            creative_generation_error_status(&error),
+            &error,
+            &state.config,
+        ),
+    }
+}
+
+async fn api_freebuff_cloud_delete_project(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    request: Result<Json<DeleteProjectRequest>, JsonRejection>,
+) -> Response {
+    if let Err(response) = check_admin_header(&state, &headers) {
+        return response;
+    }
+    let Json(request) = match request {
+        Ok(request) => request,
+        Err(error) => return creative_json_rejection(&state, error),
+    };
+    match freebuff_cloud::delete_project(request.project_id).await {
+        Ok(value) => json_response(value),
+        Err(error) => api_error(
+            creative_generation_error_status(&error),
+            &error,
+            &state.config,
+        ),
+    }
+}
+
+async fn api_freebuff_cloud_connectable_repos(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(response) = check_admin_header(&state, &headers) {
+        return response;
+    }
+    match freebuff_cloud::connectable_repos().await {
+        Ok(value) => json_response(value),
+        Err(error) => api_error(
+            creative_generation_error_status(&error),
+            &error,
+            &state.config,
+        ),
+    }
+}
+
+/// Proxy SSE : relaie `/api/agent-runs/stream` de freebuff.com (avec le cookie
+/// de session) vers le client. Le cookie ne quitte jamais le serveur.
+async fn api_freebuff_cloud_stream(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Query(query): Query<AgentRunStreamQuery>,
+) -> Response {
+    if let Err(response) = check_admin_header(&state, &headers) {
+        return response;
+    }
+    let cookie = match freebuff_cloud::session_cookie() {
+        Ok(cookie) => cookie,
+        Err(error) => {
+            return api_error(
+                creative_generation_error_status(&error),
+                &error,
+                &state.config,
+            )
+        }
+    };
+    let url = freebuff_cloud::agent_run_stream_url(&query.message_id, query.run_id.as_deref());
+    let upstream = match reqwest::Client::new()
+        .get(&url)
+        .header(reqwest::header::COOKIE, cookie)
+        .header("accept", "text/event-stream")
+        .send()
+        .await
+    {
+        Ok(response) => response,
+        Err(_) => {
+            return api_error(
+                StatusCode::BAD_GATEWAY,
+                "Flux Freebuff Cloud injoignable",
+                &state.config,
+            )
+        }
+    };
+    if !upstream.status().is_success() {
+        return api_error(
+            StatusCode::BAD_GATEWAY,
+            &format!(
+                "Flux Freebuff Cloud indisponible (HTTP {})",
+                upstream.status().as_u16()
+            ),
+            &state.config,
+        );
+    }
+    let stream = upstream
+        .bytes_stream()
+        .map(|chunk| chunk.map_err(|error| std::io::Error::other(error.to_string())));
+    (
+        StatusCode::OK,
+        [
+            (CONTENT_TYPE, HeaderValue::from_static("text/event-stream; charset=utf-8")),
+            (CACHE_CONTROL, HeaderValue::from_static("no-store")),
+            (reqwest::header::HeaderName::from_static("X-Accel-Buffering"), HeaderValue::from_static("no")),
+        ],
+        Body::from_stream(stream),
+    )
+        .into_response()
+}
+
+#[derive(Deserialize)]
+struct TasksQuery {
+    #[serde(default)]
+    account: Option<String>,
+}
+
+/// Propriétaire de la liste de tâches ciblée par la requête. Un utilisateur de
+/// session n'accède qu'à sa propre liste ; le jeton administrateur peut viser
+/// un compte précis via `?account=<id|nom-d-utilisateur>` (ex. baptiste.faisy)
+/// ou, sans paramètre, la liste technique `server-admin`.
+fn api_tasks_owner(
+    state: &Arc<ServerState>,
+    headers: &HeaderMap,
+    query: &TasksQuery,
+) -> Result<String, Response> {
+    match request_actor(state, headers)? {
+        RequestActor::User(identity) => {
+            if let Some(account) = query.account.as_deref().filter(|value| !value.is_empty()) {
+                if account != identity.id {
+                    return Err(api_error(
+                        StatusCode::FORBIDDEN,
+                        "Un compte utilisateur n'accède qu'à ses propres tâches",
+                        &state.config,
+                    ));
+                }
+            }
+            Ok(identity.id)
+        }
+        RequestActor::Administrator => {
+            if let Some(account) = query.account.as_deref().filter(|value| !value.is_empty()) {
+                match state.auth.user_id_by_username(account) {
+                    Ok(Some(user_id)) => Ok(user_id),
+                    Ok(None) => Err(api_error(
+                        StatusCode::NOT_FOUND,
+                        "Compte introuvable pour ses tâches",
+                        &state.config,
+                    )),
+                    Err(error) => Err(api_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &error,
+                        &state.config,
+                    )),
+                }
+            } else {
+                Ok("server-admin".to_string())
+            }
+        }
+    }
+}
+
+async fn api_tasks_list(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Query(query): Query<TasksQuery>,
+) -> Response {
+    let owner = match api_tasks_owner(&state, &headers, &query) {
+        Ok(owner) => owner,
+        Err(response) => return response,
+    };
+    match crate::tasks::list(&owner) {
+        Ok(items) => json_response(items),
+        Err(error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &error, &state.config),
+    }
+}
+
+async fn api_tasks_add(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Query(query): Query<TasksQuery>,
+    body: Result<Json<serde_json::Value>, JsonRejection>,
+) -> Response {
+    let owner = match api_tasks_owner(&state, &headers, &query) {
+        Ok(owner) => owner,
+        Err(response) => return response,
+    };
+    let Json(task) = match body {
+        Ok(body) => body,
+        Err(error) => return creative_json_rejection(&state, error),
+    };
+    match crate::tasks::add(&owner, task) {
+        Ok(items) => json_response(items),
+        Err(error) => api_error(StatusCode::BAD_REQUEST, &error, &state.config),
+    }
+}
+
+async fn api_tasks_replace(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Query(query): Query<TasksQuery>,
+    body: Result<Json<serde_json::Value>, JsonRejection>,
+) -> Response {
+    let owner = match api_tasks_owner(&state, &headers, &query) {
+        Ok(owner) => owner,
+        Err(response) => return response,
+    };
+    let Json(items) = match body {
+        Ok(body) => body,
+        Err(error) => return creative_json_rejection(&state, error),
+    };
+    match crate::tasks::replace(&owner, items) {
+        Ok(items) => json_response(items),
+        Err(error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &error, &state.config),
+    }
+}
+
+async fn api_tasks_remove(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Query(query): Query<TasksQuery>,
+    AxumPath(id): AxumPath<String>,
+) -> Response {
+    let owner = match api_tasks_owner(&state, &headers, &query) {
+        Ok(owner) => owner,
+        Err(response) => return response,
+    };
+    match crate::tasks::remove(&owner, &id) {
+        Ok(items) => json_response(items),
+        Err(error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &error, &state.config),
     }
 }
 
@@ -5761,18 +8324,9 @@ async fn api_chat_models(
     if let Err(response) = check_admin_header(&state, &headers) {
         return response;
     }
-    match tokio::task::spawn_blocking(move || {
-        settings::load_account_model_catalog(&query.account_id)
-    })
-    .await
-    {
-        Ok(Ok(value)) => json_response(value),
-        Ok(Err(error)) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &error, &state.config),
-        Err(error) => api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            &error.to_string(),
-            &state.config,
-        ),
+    match settings::load_account_model_catalog(&query.account_id).await {
+        Ok(value) => json_response(value),
+        Err(error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &error, &state.config),
     }
 }
 
@@ -6669,6 +9223,81 @@ async fn api_write_terminal(
     }
 }
 
+/// Les terminaux Freebuff demarres directement par Freebuff Desktop (home occupe
+/// sur le poste) n'appartiennent pas au `RemoteTerminalManager` de Switch.
+/// On les synchronise ici en presence (pas de PTY pilotable) pour que la liste
+/// des terminaux ouverts les affiche, avec l'historique et la reprise vers un
+/// autre compte.
+fn external_freebuff_terminal_summaries(
+    switch_terminal_account_ids: &std::collections::HashSet<String>,
+) -> Vec<RemoteTerminalSummary> {
+    let Ok(settings) = settings::load_settings_for_terminal() else {
+        return Vec::new();
+    };
+    let mut summaries = Vec::new();
+    let now_unix = crate::metrics::now_ts();
+    for account in &settings.accounts {
+        if account.provider != Provider::Freebuff {
+            continue;
+        }
+        if switch_terminal_account_ids.contains(&account.id) {
+            continue;
+        }
+        let Ok(home) = settings::expand_home(&account.codex_home) else { continue };
+        if !crate::provider::freebuff_instance_busy(&home) {
+            continue;
+        }
+        summaries.push(RemoteTerminalSummary {
+            id: external_freebuff_terminal_id(&account.id),
+            account_id: account.id.clone(),
+            account_label: account.label.clone(),
+            agent_id: Some("freebuff".to_string()),
+            source_terminal_key: Some(format!("freebuff-external-{}", account.id)),
+            workspace_id: workspace_id_for_dir(&home),
+            workspace_path: home.to_string_lossy().to_string(),
+            started_at: now_unix,
+            login_only: false,
+            external: true,
+        });
+    }
+    summaries
+}
+
+/// Identifiant stable, sans collision avec les PTY Switch (qui commencent a 1)
+/// : la partie haute du mot et une valeur derivee du compte garantissent un id
+/// unique et deterministe pour la synchronisation de presence.
+fn external_freebuff_terminal_id(account_id: &str) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    account_id.hash(&mut hasher);
+    // Masque 32 bits conserve 63 bits disponibles d'un u64 non signe.
+    1u64 << 62 | (hasher.finish() >> 32 & 0x0000_0000_F000_0000) | (hasher.finish() & 0x00FF_FFFF)
+}
+
+async fn api_list_active_terminals(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+) -> Response {
+    let actor = match request_actor(&state, &headers) {
+        Ok(actor) => actor,
+        Err(response) => return response,
+    };
+    match state.terminals.active_for_actor(&actor) {
+        Ok(mut value) => {
+            // Merge des instances Freebuff Desktop externes du poste. Chaque
+            // compte occupe par Freebuff apparait comme un terminal externe
+            // synchronise (pas un PTY Switch), sauf s'il est deja serveur par
+            // un terminal que Switch pilote lui-meme.
+            let switch_owned = state.terminals.unavailable_account_ids();
+            value.extend(external_freebuff_terminal_summaries(&switch_owned));
+            value.sort_by_key(|summary| (summary.started_at, summary.id));
+            json_response(value)
+        }
+        Err(error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &error, &state.config),
+    }
+}
+
 async fn api_resize_terminal(
     State(state): State<Arc<ServerState>>,
     headers: HeaderMap,
@@ -7483,24 +10112,43 @@ async fn handle_terminal_socket(
     session: Arc<RemoteTerminalSession>,
 ) {
     let (mut sender, mut receiver) = socket.split();
+    let _ = send_ws(
+        &mut sender,
+        &ServerWsMessage::Status {
+            id,
+            status: "active".to_string(),
+            workspace_id: session.workspace_id.clone(),
+            workspace_path: session.workspace_path.to_string_lossy().to_string(),
+        },
+    )
+    .await;
     // Le premier socket recupere le receiver cree avant le spawn du PTY. Les
     // sockets suivants reprennent le receiver remis en attente a la fermeture,
     // ce qui couvre aussi la courte fenetre d'une reconnexion.
-    let mut events = take_terminal_event_receiver(&session.events, &session.pending_events);
-    let hello = ServerWsMessage::Status {
-        id,
-        status: "active".to_string(),
-        workspace_id: session.workspace_id.clone(),
-        workspace_path: session.workspace_path.to_string_lossy().to_string(),
-    };
-    let _ = send_ws(&mut sender, &hello).await;
-
+    let socket_generation = session.socket_generation.fetch_add(1, Ordering::AcqRel) + 1;
+    let TerminalEventCursor {
+        receiver: mut events,
+        prefetched: mut pending_event,
+    } = take_terminal_event_cursor(&session.events, &session.pending_events);
+    let mut terminal_ended = false;
     loop {
+        if let Some(event) = pending_event.take() {
+            let (event, next_pending) = coalesce_terminal_data(event, &mut events);
+            pending_event = next_pending;
+            terminal_ended = matches!(event, ServerWsMessage::Exit { .. });
+            if send_ws(&mut sender, &event).await.is_err() || terminal_ended {
+                break;
+            }
+            continue;
+        }
         tokio::select! {
             event = events.recv() => {
                 match event {
                     Ok(event) => {
-                        if send_ws(&mut sender, &event).await.is_err() {
+                        let (event, next_pending) = coalesce_terminal_data(event, &mut events);
+                        pending_event = next_pending;
+                        terminal_ended = matches!(event, ServerWsMessage::Exit { .. });
+                        if send_ws(&mut sender, &event).await.is_err() || terminal_ended {
                             break;
                         }
                     }
@@ -7512,16 +10160,34 @@ async fn handle_terminal_socket(
                 let Some(Ok(message)) = incoming else {
                     break;
                 };
-                if let Message::Text(text) = message {
+                if let Message::Ping(payload) = message {
+            let _ = sender.send(Message::Pong(payload)).await;
+            continue;
+        }                if let Message::Text(text) = message {
                     match serde_json::from_str::<ClientWsMessage>(&text) {
                         Ok(ClientWsMessage::Input { data }) => {
-                            let _ = state.terminals.write(id, data);
+                            if let Err(error) = state.terminals.write(id, data) {
+                                let event = ServerWsMessage::Error { id, message: error };
+                                let _ = send_ws(&mut sender, &event).await;
+                                if !state.terminals.contains(id) {
+                                    break;
+                                }
+                            }
                         }
                         Ok(ClientWsMessage::Resize { cols, rows }) => {
-                            let _ = state.terminals.resize(id, cols, rows);
+                            if let Err(error) = state.terminals.resize(id, cols, rows) {
+                                let event = ServerWsMessage::Error { id, message: error };
+                                let _ = send_ws(&mut sender, &event).await;
+                                if !state.terminals.contains(id) {
+                                    break;
+                                }
+                            }
                         }
                         Ok(ClientWsMessage::Stop) => {
-                            let _ = state.terminals.stop(id);
+                            if let Err(error) = state.terminals.stop(id) {
+                                let event = ServerWsMessage::Error { id, message: error };
+                                let _ = send_ws(&mut sender, &event).await;
+                            }
                             break;
                         }
                         Ok(ClientWsMessage::Ping) => {
@@ -7540,27 +10206,94 @@ async fn handle_terminal_socket(
         }
     }
 
-    restore_terminal_event_receiver(&session.pending_events, events);
+    if !terminal_ended
+        && state.terminals.contains(id)
+        && session.socket_generation.load(Ordering::Acquire) == socket_generation
+    {
+        restore_terminal_event_cursor(
+            &session.pending_events,
+            TerminalEventCursor {
+                receiver: events,
+                prefetched: pending_event,
+            },
+        );
+    }
 }
 
-fn take_terminal_event_receiver(
+fn coalesce_terminal_data(
+    first: ServerWsMessage,
+    events: &mut broadcast::Receiver<ServerWsMessage>,
+) -> (ServerWsMessage, Option<ServerWsMessage>) {
+    let ServerWsMessage::Data { id, mut data } = first else {
+        return (first, None);
+    };
+
+    if data.len() > TERMINAL_WS_DATA_BATCH_BYTES {
+        let mut split_at = TERMINAL_WS_DATA_BATCH_BYTES;
+        while !data.is_char_boundary(split_at) {
+            split_at -= 1;
+        }
+        let remainder = data.split_off(split_at);
+        return (
+            ServerWsMessage::Data { id, data },
+            Some(ServerWsMessage::Data {
+                id,
+                data: remainder,
+            }),
+        );
+    }
+
+    while data.len() < TERMINAL_WS_DATA_BATCH_BYTES {
+        match events.try_recv() {
+            Ok(ServerWsMessage::Data {
+                id: next_id,
+                data: next_data,
+            }) => {
+                if next_id != id
+                    || data.len().saturating_add(next_data.len()) > TERMINAL_WS_DATA_BATCH_BYTES
+                {
+                    return (
+                        ServerWsMessage::Data { id, data },
+                        Some(ServerWsMessage::Data {
+                            id: next_id,
+                            data: next_data,
+                        }),
+                    );
+                }
+                data.push_str(&next_data);
+            }
+            Ok(event) => return (ServerWsMessage::Data { id, data }, Some(event)),
+            Err(broadcast::error::TryRecvError::Lagged(_)) => continue,
+            Err(broadcast::error::TryRecvError::Empty | broadcast::error::TryRecvError::Closed) => {
+                break
+            }
+        }
+    }
+
+    (ServerWsMessage::Data { id, data }, None)
+}
+
+fn take_terminal_event_cursor(
     events: &broadcast::Sender<ServerWsMessage>,
-    pending_events: &Mutex<Option<broadcast::Receiver<ServerWsMessage>>>,
-) -> broadcast::Receiver<ServerWsMessage> {
+    pending_events: &Mutex<Option<TerminalEventCursor>>,
+) -> TerminalEventCursor {
     pending_events
         .lock()
         .ok()
         .and_then(|mut pending| pending.take())
-        .unwrap_or_else(|| events.subscribe())
+        .unwrap_or_else(|| TerminalEventCursor {
+            receiver: events.subscribe(),
+            prefetched: None,
+        })
 }
 
-fn restore_terminal_event_receiver(
-    pending_events: &Mutex<Option<broadcast::Receiver<ServerWsMessage>>>,
-    receiver: broadcast::Receiver<ServerWsMessage>,
+fn restore_terminal_event_cursor(
+    pending_events: &Mutex<Option<TerminalEventCursor>>,
+    cursor: TerminalEventCursor,
 ) {
     if let Ok(mut pending) = pending_events.lock() {
         if pending.is_none() {
-            *pending = Some(receiver);
+            *pending = Some(cursor);
         }
     }
 }
@@ -7625,6 +10358,32 @@ fn request_actor(state: &Arc<ServerState>, headers: &HeaderMap) -> Result<Reques
         "authentification requise",
         &state.config,
     ))
+}
+
+fn device_terminal_capability_from_headers(
+    state: &Arc<ServerState>,
+    headers: &HeaderMap,
+) -> Option<DeviceTerminalCapability> {
+    let bearer = headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    let provided = bearer.strip_prefix("Bearer ").unwrap_or(bearer).trim();
+    state.terminals.device_terminal_capability(provided)
+}
+
+fn device_action_context_from_headers(
+    state: &Arc<ServerState>,
+    headers: &HeaderMap,
+) -> Result<DeviceActionContext, Response> {
+    if let Some(capability) = device_terminal_capability_from_headers(state, headers) {
+        Ok(capability.action_context())
+    } else {
+        request_actor(state, headers).map(|actor| DeviceActionContext {
+            owner_id: actor.owner_id().to_string(),
+            access: DeviceActionAccess::OwnerAll,
+        })
+    }
 }
 
 fn require_user_actor(
@@ -7734,11 +10493,15 @@ fn api_error(status: StatusCode, message: &str, config: &ServerConfig) -> Respon
 fn agent_start_status(error: &str) -> StatusCode {
     if error.starts_with("capacite agents atteinte")
         || error.starts_with("capacite chats atteinte")
+        || error.starts_with("capacite terminaux atteinte")
     {
         StatusCode::TOO_MANY_REQUESTS
     } else if error.starts_with("memoire insuffisante") {
         StatusCode::SERVICE_UNAVAILABLE
-    } else if error.contains("deja vivant") || error.contains("déjà en cours") {
+    } else if error.contains("deja vivant")
+        || error.contains("déjà en cours")
+        || error.starts_with("Compte Freebuff indisponible")
+    {
         StatusCode::CONFLICT
     } else {
         StatusCode::INTERNAL_SERVER_ERROR
@@ -7994,6 +10757,27 @@ fn system_time_to_unix(value: SystemTime) -> Option<i64> {
 mod tests {
     use super::*;
 
+    fn device_test_config(node_id: &str, admin_token: &str) -> ServerConfig {
+        let data_dir = std::env::temp_dir().join(format!("cst-device-test-{}", Uuid::new_v4()));
+        ServerConfig {
+            bind: "0.0.0.0:8080".to_string(),
+            data_dir: data_dir.clone(),
+            static_dir: data_dir.join("dist"),
+            admin_token: admin_token.to_string(),
+            git_pat: String::new(),
+            public_base_url: "https://switch.test".to_string(),
+            node_id: node_id.to_string(),
+            node_label: node_id.to_string(),
+            node_capacity: 2,
+            terminal_capacity: 2,
+            workspaces_root: data_dir,
+            duello_referral_api_url: None,
+            duello_referral_api_key: None,
+            duello_app_url: "https://app.duello.fr/".to_string(),
+            duello_bank: DuelloBankConfig::from_values(None, None, None),
+        }
+    }
+
     #[test]
     fn expired_drain_lease_reopens_the_node() {
         let drain_until = AtomicI64::new(120);
@@ -8082,10 +10866,180 @@ mod tests {
     #[test]
     fn remote_live_terminal_id_is_reserved_atomically() {
         let manager = RemoteTerminalManager::default();
-        let reservation = manager.reserve_id(Some(77)).unwrap();
-        assert!(manager.reserve_id(Some(77)).is_err());
+        let reservation = manager.reserve_id(Some(77), None).unwrap();
+        assert!(manager.reserve_id(Some(77), None).is_err());
         drop(reservation);
-        assert!(manager.reserve_id(Some(77)).is_ok());
+        assert!(manager.reserve_id(Some(77), None).is_ok());
+    }
+
+    #[test]
+    fn committed_remote_terminal_reservation_is_released_after_spawn() {
+        let manager = RemoteTerminalManager::default();
+        let reservation = manager.reserve_id(Some(1), Some("freebuff-a")).unwrap();
+        reservation.commit();
+        assert!(manager.reserve_id(Some(1), Some("freebuff-a")).is_ok());
+    }
+
+    #[test]
+    fn remote_freebuff_account_start_is_reserved_atomically() {
+        let manager = RemoteTerminalManager::default();
+        let reservation = manager.reserve_id(Some(1), Some("freebuff-a")).unwrap();
+        assert!(manager.reserve_id(Some(2), Some("freebuff-a")).is_err());
+        assert!(manager.reserve_id(Some(3), Some("freebuff-b")).is_ok());
+        drop(reservation);
+        assert!(manager.reserve_id(Some(4), Some("freebuff-a")).is_ok());
+    }
+
+    #[test]
+    fn freebuff_device_capability_is_per_terminal_and_uses_loopback() {
+        let config = device_test_config("node-a", "admin-secret-a");
+        let manager = RemoteTerminalManager::with_max_active(2);
+        let first = manager
+            .reserve_device_terminal_token(41, "human-owner")
+            .unwrap();
+        let second = manager
+            .reserve_device_terminal_token(42, "human-owner")
+            .unwrap();
+
+        assert!(first.token.starts_with("cstd_"));
+        assert_ne!(first.token, second.token);
+        assert_ne!(first.capability.origin_id, second.capability.origin_id);
+        assert!(Uuid::parse_str(&first.capability.origin_id).is_ok());
+        assert_eq!(first.capability.owner_id, "human-owner");
+        assert_eq!(first.capability.terminal_id, 41);
+        assert_eq!(
+            first.capability.action_context(),
+            DeviceActionContext {
+                owner_id: "human-owner".to_string(),
+                access: DeviceActionAccess::OriginOnly(first.capability.origin_id.clone()),
+            }
+        );
+        assert_eq!(
+            manager.device_terminal_capability(&first.token),
+            Some(first.capability.clone())
+        );
+        assert!(manager.device_terminal_capability("cstd_wrong").is_none());
+        let first_token = first.token.clone();
+        drop(first);
+        assert!(manager.device_terminal_capability(&first_token).is_none());
+        let second_token = second.token.clone();
+        let second_capability = second.capability.clone();
+        second.commit();
+        assert_eq!(
+            manager.device_terminal_capability(&second_token),
+            Some(second_capability)
+        );
+        assert_eq!(
+            config.device_terminal_api_url().unwrap(),
+            "http://127.0.0.1:8080/api/device-fleet"
+        );
+    }
+
+    #[test]
+    fn freebuff_terminal_origins_isolate_dedupe_status_and_revoke_immediately() {
+        let device_fleet = DeviceFleetManager::new(Duration::from_secs(300));
+        device_fleet
+            .heartbeat(DeviceConnectorHeartbeatRequest {
+                connector_id: "usb-test".to_string(),
+                devices: vec![device_fleet::ControlDevice {
+                    id: "android:ABC123".to_string(),
+                    platform: device_fleet::DevicePlatform::Android,
+                    transport: device_fleet::DeviceTransport::Usb,
+                    serial: "ABC123".to_string(),
+                    name: Some("Test phone".to_string()),
+                    model: None,
+                    os_version: None,
+                    state: device_fleet::DeviceConnectionState::Ready,
+                    ready: true,
+                    jailbreak_ready: false,
+                    capabilities: vec![DeviceActionKind::Info],
+                    connector_id: Some("usb-test".to_string()),
+                    last_seen_at: metrics::now_ts(),
+                    error: None,
+                }],
+                tools: device_fleet::DeviceFleetTools::default(),
+                error: None,
+            })
+            .unwrap();
+        let manager =
+            RemoteTerminalManager::with_max_active(2).with_device_fleet(device_fleet.clone());
+        let first = manager
+            .reserve_device_terminal_token(41, "human-owner")
+            .unwrap();
+        let second = manager
+            .reserve_device_terminal_token(42, "human-owner")
+            .unwrap();
+        let first_context = first.capability.action_context();
+        let second_context = second.capability.action_context();
+        let request: DeviceActionRequest = serde_json::from_value(json!({
+            "deviceId": "android:ABC123",
+            "action": "info",
+            "idempotencyKey": "freebuff:same-retry-key",
+        }))
+        .unwrap();
+
+        let first_action = first_context
+            .queue_action(&device_fleet, request.clone())
+            .unwrap();
+        let second_action = second_context.queue_action(&device_fleet, request).unwrap();
+        assert_ne!(first_action.id, second_action.id);
+        assert!(matches!(
+            second_context.action_status(&device_fleet, &first_action.id),
+            Err(DeviceFleetError::NotFound)
+        ));
+
+        let first_token = first.token.clone();
+        drop(first);
+        assert!(manager.device_terminal_capability(&first_token).is_none());
+        assert!(matches!(
+            first_context.action_status(&device_fleet, &first_action.id),
+            Err(DeviceFleetError::NotFound)
+        ));
+        let owner_context = DeviceActionContext {
+            owner_id: "human-owner".to_string(),
+            access: DeviceActionAccess::OwnerAll,
+        };
+        assert_eq!(
+            owner_context
+                .action_status(&device_fleet, &first_action.id)
+                .unwrap()
+                .status,
+            DeviceActionStatus::Expired
+        );
+    }
+
+    #[test]
+    fn remote_terminal_capacity_accepts_twenty_and_rejects_the_twenty_first() {
+        let manager = RemoteTerminalManager::with_max_active(20);
+        let reservations = (1..=20)
+            .map(|id| manager.reserve_id(Some(id), None).unwrap())
+            .collect::<Vec<_>>();
+        assert!(manager.reserve_id(Some(21), None).is_err());
+        drop(reservations);
+        assert!(manager.reserve_id(Some(21), None).is_ok());
+    }
+
+    #[test]
+    fn zero_remote_terminal_capacity_has_no_numeric_limit() {
+        let manager = RemoteTerminalManager::with_max_active(0);
+        let reservations = (1..=64)
+            .map(|id| manager.reserve_id(Some(id), None).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(reservations.len(), 64);
+    }
+
+    #[test]
+    fn source_terminal_keys_are_trimmed_and_bounded() {
+        assert_eq!(
+            normalize_source_terminal_key(Some("  terminal-mobile-1  ".to_string())).unwrap(),
+            Some("terminal-mobile-1".to_string())
+        );
+        assert_eq!(
+            normalize_source_terminal_key(Some("  ".to_string())).unwrap(),
+            None
+        );
+        assert!(normalize_source_terminal_key(Some("x".repeat(161))).is_err());
+        assert!(normalize_source_terminal_key(Some("terminal\nmobile".to_string())).is_err());
     }
 
     #[test]
@@ -8114,7 +11068,10 @@ mod tests {
     #[test]
     fn terminal_output_emitted_before_socket_is_replayed() {
         let (events, initial_receiver) = broadcast::channel(8);
-        let pending = Mutex::new(Some(initial_receiver));
+        let pending = Mutex::new(Some(TerminalEventCursor {
+            receiver: initial_receiver,
+            prefetched: None,
+        }));
 
         events
             .send(ServerWsMessage::Data {
@@ -8123,8 +11080,9 @@ mod tests {
             })
             .expect("the retained receiver must keep pre-connection output");
 
-        let mut receiver = take_terminal_event_receiver(&events, &pending);
-        match receiver
+        let mut cursor = take_terminal_event_cursor(&events, &pending);
+        match cursor
+            .receiver
             .try_recv()
             .expect("pre-connection output must be replayed")
         {
@@ -8139,10 +11097,13 @@ mod tests {
     #[test]
     fn terminal_output_emitted_between_sockets_is_replayed() {
         let (events, initial_receiver) = broadcast::channel(8);
-        let pending = Mutex::new(Some(initial_receiver));
+        let pending = Mutex::new(Some(TerminalEventCursor {
+            receiver: initial_receiver,
+            prefetched: None,
+        }));
 
-        let receiver = take_terminal_event_receiver(&events, &pending);
-        restore_terminal_event_receiver(&pending, receiver);
+        let cursor = take_terminal_event_cursor(&events, &pending);
+        restore_terminal_event_cursor(&pending, cursor);
 
         events
             .send(ServerWsMessage::Data {
@@ -8151,8 +11112,9 @@ mod tests {
             })
             .expect("the restored receiver must keep reconnect output");
 
-        let mut resumed = take_terminal_event_receiver(&events, &pending);
+        let mut resumed = take_terminal_event_cursor(&events, &pending);
         match resumed
+            .receiver
             .try_recv()
             .expect("disconnect output must be replayed")
         {
@@ -8162,6 +11124,258 @@ mod tests {
             }
             other => panic!("unexpected terminal event: {other:?}"),
         }
+    }
+
+    #[test]
+    fn terminal_data_batch_prefetched_event_survives_reconnect_after_send_failure() {
+        let (events, initial_receiver) = broadcast::channel(8);
+        let pending = Mutex::new(Some(TerminalEventCursor {
+            receiver: initial_receiver,
+            prefetched: None,
+        }));
+
+        events
+            .send(ServerWsMessage::Error {
+                id: 10,
+                message: "frontiere".to_string(),
+            })
+            .unwrap();
+        events
+            .send(ServerWsMessage::Data {
+                id: 10,
+                data: "apres".to_string(),
+            })
+            .unwrap();
+
+        let mut cursor = take_terminal_event_cursor(&events, &pending);
+        let (event, prefetched) = coalesce_terminal_data(
+            ServerWsMessage::Data {
+                id: 10,
+                data: "avant".to_string(),
+            },
+            &mut cursor.receiver,
+        );
+        match event {
+            ServerWsMessage::Data { id, data } => {
+                assert_eq!(id, 10);
+                assert_eq!(data, "avant");
+            }
+            other => panic!("unexpected terminal event: {other:?}"),
+        }
+
+        // Simule l'echec de `send_ws` du batch courant : la frontiere deja
+        // prelevee doit rester liee au receiver pour le socket suivant.
+        cursor.prefetched = prefetched;
+        restore_terminal_event_cursor(&pending, cursor);
+
+        let mut resumed = take_terminal_event_cursor(&events, &pending);
+        match resumed
+            .prefetched
+            .take()
+            .expect("the prefetched boundary must survive reconnect")
+        {
+            ServerWsMessage::Error { id, message } => {
+                assert_eq!(id, 10);
+                assert_eq!(message, "frontiere");
+            }
+            other => panic!("unexpected terminal event: {other:?}"),
+        }
+        match resumed.receiver.try_recv().unwrap() {
+            ServerWsMessage::Data { id, data } => {
+                assert_eq!(id, 10);
+                assert_eq!(data, "apres");
+            }
+            other => panic!("unexpected terminal event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn terminal_data_batch_coalesces_immediately_queued_utf8_fragments() {
+        let (events, mut receiver) = broadcast::channel(8);
+        events
+            .send(ServerWsMessage::Data {
+                id: 11,
+                data: "é".to_string(),
+            })
+            .unwrap();
+        events
+            .send(ServerWsMessage::Data {
+                id: 11,
+                data: " ☕".to_string(),
+            })
+            .unwrap();
+
+        let (event, pending) = coalesce_terminal_data(
+            ServerWsMessage::Data {
+                id: 11,
+                data: "caf".to_string(),
+            },
+            &mut receiver,
+        );
+
+        assert!(pending.is_none());
+        match event {
+            ServerWsMessage::Data { id, data } => {
+                assert_eq!(id, 11);
+                assert_eq!(data, "café ☕");
+            }
+            other => panic!("unexpected terminal event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn terminal_data_batch_stops_before_every_control_event() {
+        let boundaries = [
+            ServerWsMessage::Error {
+                id: 12,
+                message: "erreur".to_string(),
+            },
+            ServerWsMessage::Status {
+                id: 12,
+                status: "active".to_string(),
+                workspace_id: "workspace".to_string(),
+                workspace_path: "/workspace".to_string(),
+            },
+            ServerWsMessage::Exit { id: 12 },
+        ];
+
+        for boundary in boundaries {
+            let expected_boundary = std::mem::discriminant(&boundary);
+            let (events, mut receiver) = broadcast::channel(8);
+            events.send(boundary).unwrap();
+            events
+                .send(ServerWsMessage::Data {
+                    id: 12,
+                    data: "apres".to_string(),
+                })
+                .unwrap();
+
+            let (event, pending) = coalesce_terminal_data(
+                ServerWsMessage::Data {
+                    id: 12,
+                    data: "avant".to_string(),
+                },
+                &mut receiver,
+            );
+
+            match event {
+                ServerWsMessage::Data { id, data } => {
+                    assert_eq!(id, 12);
+                    assert_eq!(data, "avant");
+                }
+                other => panic!("unexpected terminal event: {other:?}"),
+            }
+            let pending = pending.expect("the control event must remain pending");
+            assert_eq!(std::mem::discriminant(&pending), expected_boundary);
+            match receiver.try_recv().unwrap() {
+                ServerWsMessage::Data { id, data } => {
+                    assert_eq!(id, 12);
+                    assert_eq!(data, "apres");
+                }
+                other => panic!("unexpected terminal event: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn terminal_data_batch_keeps_overflow_for_the_next_frame() {
+        let (events, mut receiver) = broadcast::channel(8);
+        events
+            .send(ServerWsMessage::Data {
+                id: 13,
+                data: "b".to_string(),
+            })
+            .unwrap();
+        events
+            .send(ServerWsMessage::Data {
+                id: 13,
+                data: "é".to_string(),
+            })
+            .unwrap();
+
+        let (event, pending) = coalesce_terminal_data(
+            ServerWsMessage::Data {
+                id: 13,
+                data: "a".repeat(TERMINAL_WS_DATA_BATCH_BYTES - 2),
+            },
+            &mut receiver,
+        );
+
+        match event {
+            ServerWsMessage::Data { id, data } => {
+                assert_eq!(id, 13);
+                assert_eq!(data.len(), TERMINAL_WS_DATA_BATCH_BYTES - 1);
+                assert!(data.ends_with('b'));
+            }
+            other => panic!("unexpected terminal event: {other:?}"),
+        }
+        match pending.expect("the overflowing UTF-8 fragment must remain pending") {
+            ServerWsMessage::Data { id, data } => {
+                assert_eq!(id, 13);
+                assert_eq!(data, "é");
+            }
+            other => panic!("unexpected terminal event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn terminal_data_batch_splits_oversized_first_fragment_on_utf8_boundary() {
+        let (_events, mut receiver) = broadcast::channel(1);
+        let original = format!("{}éfin", "a".repeat(TERMINAL_WS_DATA_BATCH_BYTES - 1));
+
+        let (event, pending) = coalesce_terminal_data(
+            ServerWsMessage::Data {
+                id: 14,
+                data: original.clone(),
+            },
+            &mut receiver,
+        );
+
+        let ServerWsMessage::Data {
+            id,
+            data: first_data,
+        } = event
+        else {
+            panic!("the first frame must remain a data event");
+        };
+        assert_eq!(id, 14);
+        assert!(first_data.len() <= TERMINAL_WS_DATA_BATCH_BYTES);
+
+        let Some(ServerWsMessage::Data {
+            id,
+            data: remaining_data,
+        }) = pending
+        else {
+            panic!("the oversized fragment must keep a data remainder");
+        };
+        assert_eq!(id, 14);
+        assert!(remaining_data.starts_with('é'));
+        assert_eq!(format!("{first_data}{remaining_data}"), original);
+    }
+
+    #[test]
+    fn incremental_utf8_decoder_keeps_split_multibyte_sequences() {
+        let mut decode = incremental_utf8_decoder();
+        // « é » = 0xC3 0xA9 coupe entre les deux octets.
+        assert_eq!(decode(&[b'c', 0xC3]), "c");
+        assert_eq!(decode(&[0xA9, b't']), "ét");
+        // Emoji « 👍 » = 4 octets coupe apres le troisieme.
+        let bytes = [0xF0, 0x9F, 0x91, 0x8D, b'x'];
+        assert_eq!(decode(&bytes[..3]), "");
+        assert_eq!(decode(&bytes[3..]), "👍x");
+    }
+
+    #[test]
+    fn incremental_utf8_decoder_is_lossy_on_invalid_byte() {
+        let mut decode = incremental_utf8_decoder();
+        assert_eq!(decode(&[b'a', 0xFF, b'b']), "a\u{FFFD}b");
+    }
+
+    #[test]
+    fn incremental_utf8_decoder_keeps_split_sequence_after_invalid_byte() {
+        let mut decode = incremental_utf8_decoder();
+        assert_eq!(decode(&[b'a', 0xFF, 0xC3]), "a\u{FFFD}");
+        assert_eq!(decode(&[0xA9, b'x']), "éx");
     }
 
     #[test]

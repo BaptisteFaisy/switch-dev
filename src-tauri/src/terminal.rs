@@ -1,8 +1,13 @@
 use crate::{
     metrics,
-    settings::{expand_home, load_settings_for_terminal, AccountProfile, AppSettings},
+    resource_profile::{
+        configure_terminal_resources, configured_terminal_capacity, TERMINAL_READER_STACK_BYTES,
+    },
+    settings::{expand_home, load_settings_for_terminal, AccountProfile, AppSettings, Provider},
 };
-use portable_pty::{CommandBuilder, MasterPty, NativePtySystem, PtySize, PtySystem};
+use portable_pty::{
+    Child as PtyChild, CommandBuilder, MasterPty, NativePtySystem, PtySize, PtySystem,
+};
 use serde::Serialize;
 use std::{
     collections::{HashMap, HashSet},
@@ -17,11 +22,30 @@ use std::{
 };
 use tauri::{AppHandle, Emitter, State};
 
-#[derive(Default, Clone)]
+// Modules externes qui utilisent ce fichier :
+//
+// - `src/platform.ts` lit `terminal_output_snapshot` depuis le buffer memoire
+//   `remoteTerminalOutput` (mode web uniquement, pas de commande Tauri ici).
+// - `src/main.ts` garde ses appels `replay*LoginOutput` derriere
+//   `if (!isRemoteMode()) return;`, donc aucun appel desktop n'atteint cette
+//   hypothetique commande.
+//
+// Il n'y a donc PAS de #[tauri::command] `terminal_output_snapshot` dans ce
+// fichier, et c'est volontaire.
+
+#[derive(Clone)]
 pub struct TerminalManager {
     sessions: Arc<Mutex<HashMap<u64, Arc<TerminalSession>>>>,
     reservations: Arc<Mutex<HashSet<u64>>>,
+    starting_freebuff_accounts: Arc<Mutex<HashSet<String>>>,
     next_id: Arc<AtomicU64>,
+    max_active: usize,
+}
+
+impl Default for TerminalManager {
+    fn default() -> Self {
+        Self::with_max_active(configured_terminal_capacity())
+    }
 }
 
 struct TerminalSession {
@@ -32,22 +56,79 @@ struct TerminalSession {
     account_id: String,
     account_label: String,
     recorded_end: AtomicBool,
+    // Derniere taille (lignes, colonnes) envoyee au PTY. Evite de redimensionner
+    // un PTY a l'identique : chaque resize peut declencher un SIGWINCH que les
+    // TUI traduisent en redessin complet, donc en sortie parasite qui maintient
+    // artificiellement la pastille « Reflechit » orange.
+    last_size: Mutex<Option<(u16, u16)>>,
 }
 
 impl Drop for TerminalSession {
     fn drop(&mut self) {
         if let Ok(mut child) = self.child.lock() {
-            let _ = child.kill();
+            let _ = terminate_terminal_process_tree(child.as_mut());
         }
     }
 }
 
+/// Ferme le shell PTY et tous les processus qu'il a lances. Sous Unix,
+/// portable-pty cree le shell comme leader d'une nouvelle session (`setsid`) :
+/// son PID est donc aussi le groupe qu'il faut terminer. Sans cela, fermer une
+/// tuile supprimait seulement bash et laissait Freebuff actif avec son verrou.
+pub(crate) fn terminate_terminal_process_tree(child: &mut dyn PtyChild) -> std::io::Result<()> {
+    let Some(pid) = child.process_id() else {
+        return child.kill();
+    };
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let status = Command::new("taskkill.exe")
+            .args(["/PID", pid.to_string().as_str(), "/T", "/F"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        if status.is_ok_and(|status| status.success()) {
+            return Ok(());
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        let process_group = format!("-{pid}");
+        let status = Command::new("kill")
+            .args(["-KILL", "--", process_group.as_str()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        if status.is_ok_and(|status| status.success()) {
+            return Ok(());
+        }
+    }
+
+    child.kill()
+}
+
 struct TerminalIdReservation {
     reservations: Arc<Mutex<HashSet<u64>>>,
+    starting_freebuff_accounts: Arc<Mutex<HashSet<String>>>,
+    freebuff_account_id: Option<String>,
     id: u64,
 }
 
 impl TerminalManager {
+    fn with_max_active(max_active: usize) -> Self {
+        Self {
+            sessions: Arc::new(Mutex::new(HashMap::new())),
+            reservations: Arc::new(Mutex::new(HashSet::new())),
+            starting_freebuff_accounts: Arc::new(Mutex::new(HashSet::new())),
+            next_id: Arc::new(AtomicU64::new(0)),
+            max_active,
+        }
+    }
+
     pub fn active_agent_runs(&self) -> Vec<metrics::ActiveAgentRun> {
         let Ok(guard) = self.sessions.lock() else {
             return Vec::new();
@@ -62,7 +143,11 @@ impl TerminalManager {
             .collect()
     }
 
-    fn reserve_id(&self, requested: Option<u64>) -> Result<TerminalIdReservation, String> {
+    fn reserve_id(
+        &self,
+        requested: Option<u64>,
+        freebuff_account_id: Option<&str>,
+    ) -> Result<TerminalIdReservation, String> {
         let mut reservations = self
             .reservations
             .lock()
@@ -71,6 +156,13 @@ impl TerminalManager {
             .sessions
             .lock()
             .map_err(|_| "Etat terminal verrouille".to_string())?;
+        let active_or_starting = sessions.len().saturating_add(reservations.len());
+        if self.max_active > 0 && active_or_starting >= self.max_active {
+            return Err(format!(
+                "capacite terminaux atteinte: {active_or_starting}/{} terminaux actifs",
+                self.max_active
+            ));
+        }
         let id = if let Some(id) = requested {
             if reservations.contains(&id) || sessions.contains_key(&id) {
                 return Err(format!("Identifiant terminal deja vivant: {id}"));
@@ -84,11 +176,34 @@ impl TerminalManager {
                 }
             }
         };
+        let freebuff_account_id = freebuff_account_id.map(ToString::to_string);
+        if let Some(account_id) = freebuff_account_id.as_deref() {
+            if sessions
+                .values()
+                .any(|session| session.account_id == account_id)
+            {
+                return Err(
+                    "Compte Freebuff indisponible : un terminal est deja ouvert".to_string()
+                );
+            }
+            let mut starting = self
+                .starting_freebuff_accounts
+                .lock()
+                .map_err(|_| "Reservations Freebuff verrouillees".to_string())?;
+            if !starting.insert(account_id.to_string()) {
+                return Err(
+                    "Compte Freebuff indisponible : un terminal est deja en cours d'ouverture"
+                        .to_string(),
+                );
+            }
+        }
         drop(sessions);
         reservations.insert(id);
         drop(reservations);
         Ok(TerminalIdReservation {
             reservations: self.reservations.clone(),
+            starting_freebuff_accounts: self.starting_freebuff_accounts.clone(),
+            freebuff_account_id,
             id,
         })
     }
@@ -96,7 +211,16 @@ impl TerminalManager {
 
 impl TerminalIdReservation {
     fn commit(self) {
-        // Le live-id est desormais porte par `sessions`.
+        // La session porte maintenant l'identifiant vivant ; les ensembles de
+        // reservation ne doivent pas rester bloques apres un spawn reussi.
+        if let Ok(mut reservations) = self.reservations.lock() {
+            reservations.remove(&self.id);
+        }
+        if let Some(account_id) = self.freebuff_account_id.as_deref() {
+            if let Ok(mut starting) = self.starting_freebuff_accounts.lock() {
+                starting.remove(account_id);
+            }
+        }
     }
 }
 
@@ -104,6 +228,11 @@ impl Drop for TerminalIdReservation {
     fn drop(&mut self) {
         if let Ok(mut reservations) = self.reservations.lock() {
             reservations.remove(&self.id);
+        }
+        if let Some(account_id) = self.freebuff_account_id.as_deref() {
+            if let Ok(mut starting) = self.starting_freebuff_accounts.lock() {
+                starting.remove(account_id);
+            }
         }
     }
 }
@@ -158,13 +287,22 @@ pub fn start_terminal(
         None
     };
 
-    // Reserve avant toute operation couteuse : deux appels concurrents ne
-    // peuvent plus spawner sous le meme identifiant puis s'ecraser dans la map.
-    let id_reservation = state.reserve_id(id)?;
-    let id = id_reservation.id;
-
     let account_home = expand_home(&account.codex_home)?;
     std::fs::create_dir_all(&account_home).map_err(|error| error.to_string())?;
+    if provider == Provider::Freebuff && crate::provider::freebuff_instance_busy(&account_home) {
+        return Err(format!(
+            "Compte Freebuff indisponible : {} possede deja un terminal ouvert",
+            account.label
+        ));
+    }
+    // Reserve avant toute operation couteuse : deux appels concurrents ne
+    // peuvent plus spawner sous le meme identifiant ni sous le meme home
+    // Freebuff avant que le verrou natif du CLI ait eu le temps d'apparaitre.
+    let id_reservation = state.reserve_id(
+        id,
+        (provider == Provider::Freebuff).then_some(account.id.as_str()),
+    )?;
+    let id = id_reservation.id;
     // L'authentification est independante de tout projet : son terminal
     // temporaire reste dans le home isole du compte. Les terminaux de travail
     // continuent d'exiger un environnement explicitement choisi.
@@ -211,6 +349,9 @@ pub fn start_terminal(
     builder.env("COLORTERM", "truecolor");
     builder.cwd(project_dir.as_os_str());
     builder.env("PWD", &workspace_path);
+    configure_terminal_resources(&mut builder);
+    #[cfg(target_os = "linux")]
+    crate::resource_profile::install_build_limits();
 
     if let Some(proxy) = proxy {
         for key in [
@@ -225,20 +366,26 @@ pub fn start_terminal(
         }
     }
 
-    let child = pair
+    let mut child = pair
         .slave
         .spawn_command(builder)
         .map_err(|error| error.to_string())?;
     drop(pair.slave);
 
-    let mut reader = pair
-        .master
-        .try_clone_reader()
-        .map_err(|error| error.to_string())?;
-    let writer = pair
-        .master
-        .take_writer()
-        .map_err(|error| error.to_string())?;
+    let mut reader = match pair.master.try_clone_reader() {
+        Ok(reader) => reader,
+        Err(error) => {
+            let _ = terminate_terminal_process_tree(child.as_mut());
+            return Err(error.to_string());
+        }
+    };
+    let writer = match pair.master.take_writer() {
+        Ok(writer) => writer,
+        Err(error) => {
+            let _ = terminate_terminal_process_tree(child.as_mut());
+            return Err(error.to_string());
+        }
+    };
 
     let session = Arc::new(TerminalSession {
         writer: Mutex::new(writer),
@@ -248,6 +395,7 @@ pub fn start_terminal(
         account_id: account.id.clone(),
         account_label: account.label.clone(),
         recorded_end: AtomicBool::new(false),
+        last_size: Mutex::new(Some((rows.max(8), cols.max(20)))),
     });
 
     {
@@ -256,6 +404,10 @@ pub fn start_terminal(
             .lock()
             .map_err(|_| "Etat terminal verrouille".to_string())?;
         if sessions.contains_key(&id) {
+            drop(sessions);
+            if let Ok(mut child) = session.child.lock() {
+                let _ = terminate_terminal_process_tree(child.as_mut());
+            }
             return Err(format!("Identifiant terminal deja vivant: {id}"));
         }
         sessions.insert(id, session.clone());
@@ -264,36 +416,63 @@ pub fn start_terminal(
 
     let sessions = state.sessions.clone();
     let reader_app = app.clone();
-    thread::spawn(move || {
-        let mut buffer = [0_u8; 8192];
-        loop {
-            match reader.read(&mut buffer) {
-                Ok(0) => break,
-                Ok(size) => {
-                    let data = String::from_utf8_lossy(&buffer[..size]).to_string();
-                    let _ = reader_app.emit("pty-data", PtyDataEvent { id, data });
+    let reader_thread = thread::Builder::new()
+        .name(format!("cst-terminal-reader-{id}"))
+        .stack_size(TERMINAL_READER_STACK_BYTES)
+        .spawn(move || {
+            let mut buffer = [0_u8; 8192];
+            loop {
+                match reader.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(size) => {
+                        let data = String::from_utf8_lossy(&buffer[..size]).to_string();
+                        let _ = reader_app.emit("pty-data", PtyDataEvent { id, data });
+                    }
+                    Err(_) => break,
                 }
-                Err(_) => break,
             }
-        }
 
-        let ended = sessions
+            let ended = sessions
+                .lock()
+                .ok()
+                .and_then(|mut sessions| sessions.remove(&id));
+            if let Some(session) = ended {
+                finish_session(&session);
+            }
+            let _ = reader_app.emit("pty-exit", PtyExitEvent { id });
+        });
+    if let Err(error) = reader_thread {
+        let ended = state
+            .sessions
             .lock()
             .ok()
             .and_then(|mut sessions| sessions.remove(&id));
         if let Some(session) = ended {
             finish_session(&session);
         }
-        let _ = reader_app.emit("pty-exit", PtyExitEvent { id });
-    });
+        return Err(format!("Lecture du terminal impossible: {error}"));
+    }
 
-    emit_banner(
+    if let Err(error) = emit_banner(
         &app,
         id,
         &account,
         proxy.map(|proxy| proxy.label.as_str()),
         Some(&project_dir),
-    )?;
+    ) {
+        let ended = state
+            .sessions
+            .lock()
+            .ok()
+            .and_then(|mut sessions| sessions.remove(&id));
+        if let Some(session) = ended {
+            finish_session(&session);
+            if let Ok(mut child) = session.child.lock() {
+                let _ = terminate_terminal_process_tree(child.as_mut());
+            }
+        }
+        return Err(error);
+    }
     let command = if login_only {
         // Ne lance jamais la commande normale du compte apres une reconnexion.
         command
@@ -302,12 +481,25 @@ pub fn start_terminal(
     };
     if let Some(command) = command {
         let line = format!("{}\r", command.trim());
-        session
+        let write_result = session
             .writer
             .lock()
-            .map_err(|_| "Writer terminal verrouille".to_string())?
-            .write_all(line.as_bytes())
-            .map_err(|error| error.to_string())?;
+            .map_err(|_| "Writer terminal verrouille".to_string())
+            .and_then(|mut writer| writer.write_all(line.as_bytes()).map_err(|error| error.to_string()));
+        if let Err(error) = write_result {
+            let ended = state
+                .sessions
+                .lock()
+                .ok()
+                .and_then(|mut sessions| sessions.remove(&id));
+            if let Some(session) = ended {
+                finish_session(&session);
+                if let Ok(mut child) = session.child.lock() {
+                    let _ = terminate_terminal_process_tree(child.as_mut());
+                }
+            }
+            return Err(error);
+        }
     }
 
     Ok(StartTerminalResponse {
@@ -342,30 +534,48 @@ pub fn resize_terminal(
     rows: u16,
 ) -> Result<(), String> {
     let session = get_session(&state, id)?;
+    let rows = rows.max(8);
+    let cols = cols.max(20);
+    {
+        let mut last = session
+            .last_size
+            .lock()
+            .map_err(|_| "Taille terminal verrouillee".to_string())?;
+        if *last == Some((rows, cols)) {
+            // Même taille : inutile de redimensionner le PTY (et de provoquer un
+            // SIGWINCH) pour un changement qui n'en est pas un.
+            return Ok(());
+        }
+    }
     let result = {
         let master = session
             .master
             .lock()
             .map_err(|_| "PTY verrouille".to_string())?;
         master.resize(PtySize {
-            rows: rows.max(8),
-            cols: cols.max(20),
+            rows,
+            cols,
             pixel_width: 0,
             pixel_height: 0,
         })
     };
 
-    result.map_err(|error| error.to_string())
+    result.map_err(|error| error.to_string())?;
+    if let Ok(mut last) = session.last_size.lock() {
+        *last = Some((rows, cols));
+    }
+    Ok(())
 }
 
 #[tauri::command]
 pub fn stop_terminal(state: State<'_, TerminalManager>, id: u64) -> Result<(), String> {
-    let Some(session) = state
+    let session = state
         .sessions
         .lock()
         .map_err(|_| "Etat terminal verrouille".to_string())?
-        .remove(&id)
-    else {
+        .get(&id)
+        .cloned();
+    let Some(session) = session else {
         return Ok(());
     };
 
@@ -374,11 +584,24 @@ pub fn stop_terminal(state: State<'_, TerminalManager>, id: u64) -> Result<(), S
             .child
             .lock()
             .map_err(|_| "Process terminal verrouille".to_string())?;
-        finish_session(&session);
-        child.kill()
+        terminate_terminal_process_tree(child.as_mut())
     };
+    result.map_err(|error| error.to_string())?;
 
-    result.map_err(|error| error.to_string())
+    let removed = state
+        .sessions
+        .lock()
+        .ok()
+        .and_then(|mut sessions| {
+            let matches = sessions
+                .get(&id)
+                .is_some_and(|candidate| Arc::ptr_eq(candidate, &session));
+            matches.then(|| sessions.remove(&id)).flatten()
+        });
+    if let Some(removed) = removed {
+        finish_session(&removed);
+    }
+    Ok(())
 }
 
 fn finish_session(session: &Arc<TerminalSession>) {
@@ -546,10 +769,48 @@ mod tests {
     #[test]
     fn live_terminal_id_is_reserved_atomically() {
         let manager = TerminalManager::default();
-        let reservation = manager.reserve_id(Some(42)).unwrap();
-        assert!(manager.reserve_id(Some(42)).is_err());
+        let reservation = manager.reserve_id(Some(42), None).unwrap();
+        assert!(manager.reserve_id(Some(42), None).is_err());
         drop(reservation);
-        assert!(manager.reserve_id(Some(42)).is_ok());
+        assert!(manager.reserve_id(Some(42), None).is_ok());
+    }
+
+    #[test]
+    fn committed_terminal_reservation_is_released_after_spawn() {
+        let manager = TerminalManager::default();
+        let reservation = manager.reserve_id(Some(1), Some("freebuff-a")).unwrap();
+        reservation.commit();
+        assert!(manager.reserve_id(Some(1), Some("freebuff-a")).is_ok());
+    }
+
+    #[test]
+    fn freebuff_account_start_is_reserved_atomically() {
+        let manager = TerminalManager::default();
+        let reservation = manager.reserve_id(Some(1), Some("freebuff-a")).unwrap();
+        assert!(manager.reserve_id(Some(2), Some("freebuff-a")).is_err());
+        assert!(manager.reserve_id(Some(3), Some("freebuff-b")).is_ok());
+        drop(reservation);
+        assert!(manager.reserve_id(Some(4), Some("freebuff-a")).is_ok());
+    }
+
+    #[test]
+    fn terminal_capacity_accepts_twenty_and_rejects_the_twenty_first() {
+        let manager = TerminalManager::with_max_active(20);
+        let reservations = (1..=20)
+            .map(|id| manager.reserve_id(Some(id), None).unwrap())
+            .collect::<Vec<_>>();
+        assert!(manager.reserve_id(Some(21), None).is_err());
+        drop(reservations);
+        assert!(manager.reserve_id(Some(21), None).is_ok());
+    }
+
+    #[test]
+    fn zero_terminal_capacity_has_no_numeric_limit() {
+        let manager = TerminalManager::with_max_active(0);
+        let reservations = (1..=64)
+            .map(|id| manager.reserve_id(Some(id), None).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(reservations.len(), 64);
     }
 
     #[test]

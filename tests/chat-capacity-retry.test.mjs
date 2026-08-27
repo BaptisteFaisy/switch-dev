@@ -3,10 +3,12 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
+  CHAT_RESOURCE_RETRY_DELAY_MS,
   MODEL_CAPACITY_CONTINUE_PROMPT,
   MODEL_CAPACITY_RETRY_LIMIT,
   TRANSIENT_STREAM_RETRY_LIMIT,
   isModelCapacityError,
+  isNodeCapacityError,
   isTransientStreamError,
   modelCapacityRetryDelayMs,
   modelCapacityRetryPrompt,
@@ -14,6 +16,8 @@ import {
 
 const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
 const backend = readFileSync(new URL("../src-tauri/src/chat.rs", import.meta.url), "utf8");
+const terminals = readFileSync(new URL("../src-tauri/src/resource_profile.rs", import.meta.url), "utf8");
+const compose = readFileSync(new URL("../compose.yaml", import.meta.url), "utf8");
 
 test("reconnait une saturation de modele sans la confondre avec le quota", () => {
   assert.equal(
@@ -24,6 +28,35 @@ test("reconnait une saturation de modele sans la confondre avec le quota", () =>
   assert.equal(isModelCapacityError("You've hit your usage limit. Try again later."), false);
   assert.equal(isModelCapacityError("CST node capacity reached"), false);
   assert.equal(isModelCapacityError("Maximum context length exceeded"), false);
+});
+
+test("ne borne plus les chats par un compteur et temporise seulement la pression memoire", () => {
+  assert.equal(CHAT_RESOURCE_RETRY_DELAY_MS, 5_000);
+  assert.equal(isNodeCapacityError("capacite chats atteinte: 6/6 tours actifs"), true);
+  assert.equal(isNodeCapacityError("memoire insuffisante sur l'hote"), true);
+  assert.equal(isNodeCapacityError("Aucun noeud de chat disponible."), true);
+  assert.equal(isNodeCapacityError("Selected model is at capacity"), false);
+  assert.match(backend, /DEFAULT_MAX_ACTIVE_CHAT_TURNS: usize = 0/);
+  assert.match(backend, /TOKIO_WORKER_THREADS/);
+  assert.match(backend, /MALLOC_ARENA_MAX", "1/);
+  assert.match(backend, /self\.max_active > 0 && active >= self\.max_active/);
+  assert.match(main, /pauseChatResourceAdmission\(\)/);
+  assert.doesNotMatch(main, /DEFAULT_CHAT_CONCURRENCY_LIMIT|EXPERT_MAX_TERMINALS/);
+  assert.match(main, /drainNextGlobalChatCapacityQueue/);
+  assert.match(main, /pane\.queuedSubmissions\.unshift\(submission\)/);
+});
+
+test("le conteneur partage une enveloppe globale de 7 Gio sans plafond de sessions", () => {
+  assert.match(terminals, /DEFAULT_MAX_ACTIVE_TERMINALS: usize = 0/);
+  assert.match(compose, /CST_NODE_CAPACITY: \$\{CST_NODE_CAPACITY:-0\}/);
+  assert.match(compose, /CST_CHAT_MAX_ACTIVE: \$\{CST_CHAT_MAX_ACTIVE:-0\}/);
+  assert.match(compose, /CST_TERMINAL_CAPACITY: \$\{CST_TERMINAL_CAPACITY:-0\}/);
+  assert.match(compose, /CST_CLAUDE_MAX_SESSIONS: \$\{CST_CLAUDE_MAX_SESSIONS:-0\}/);
+  assert.match(compose, /mem_limit: \$\{CST_MEM_LIMIT:-0\}/);
+  assert.match(compose, /memswap_limit: \$\{CST_MEMSWAP_LIMIT:-0\}/);
+  // L'enveloppe de 7 Gio reste documentee dans le compose : elle est appliquee
+  // par l'environnement de deploiement (CST_MEM_LIMIT) plutot qu'en defaut.
+  assert.match(compose, /Enveloppe globale de 7 Gio pour tous les chats et terminaux/);
 });
 
 test("espace trois reprises automatiques avec un backoff borne", () => {

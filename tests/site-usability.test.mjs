@@ -67,10 +67,10 @@ test("les deux menus séparent les chats à gauche des outils à droite", () => 
   const menu = nav.slice(menuStart, menuEnd);
   const atRest = `${nav.slice(0, menuStart)}${nav.slice(menuEnd + "</div>".length)}`;
 
-  for (const id of ["messagingToggle", "tasksToggle", "scheduledChatToggle", "tutorialToggle", "promptsToggle", "sideDiscussions", "dashboardToggle", "limitsToggle", "chatSideMoreToggle"]) {
+  for (const id of ["messagingToggle", "tasksToggle", "scheduledChatToggle", "proxyToggle", "promptsToggle", "sideDiscussions", "dashboardToggle", "limitsToggle", "chatSideMoreToggle"]) {
     assert.match(atRest, new RegExp(`id="${id}"`));
   }
-  for (const id of ["messagingToggle", "tasksToggle", "scheduledChatToggle", "tutorialToggle", "promptsToggle", "sideDiscussions", "dashboardToggle", "limitsToggle", "settingsToggle", "themeToggle"]) {
+  for (const id of ["messagingToggle", "tasksToggle", "scheduledChatToggle", "proxyToggle", "promptsToggle", "sideDiscussions", "dashboardToggle", "limitsToggle", "settingsToggle", "themeToggle"]) {
     assert.match(main, new RegExp(`#${id}"\\)\\?\\.addEventListener\\("click"`));
   }
   assert.match(atRest, /data-task-nav-count/);
@@ -116,7 +116,14 @@ test("les deux menus séparent les chats à gauche des outils à droite", () => 
   assert.match(main, /event\.key === "ArrowLeft"[\s\S]*?event\.key === "ArrowRight"/);
   assert.match(style, /\.chat-context-sidebar-resizer \{[^}]*cursor:\s*col-resize;[^}]*touch-action:\s*none;/s);
   assert.match(style, /\.chat-app-layout\.is-context-sidebar-compact \.chat-context-sidebar \.chat-context-copy/);
-  assert.match(style, /@media \(max-width: 860px\) \{[\s\S]*?\.chat-context-sidebar \{ display:\s*none;/);
+  assert.match(
+    style,
+    /@media \(max-width: 860px\) \{[\s\S]*?\.chat-context-sidebar \{[^}]*position:\s*fixed;[^}]*inset:\s*0 0 0 auto;[^}]*transform:\s*translateX\(102%\);/,
+  );
+  assert.match(
+    style,
+    /body\.chat-context-sidebar-open[\s\S]*?\.chat-context-sidebar \{[^}]*visibility:\s*visible;[^}]*pointer-events:\s*auto;[^}]*transform:\s*translateX\(0\);/,
+  );
   assert.match(style, /@media \(max-width: 860px\) \{[\s\S]*?\.chat-context-sidebar-resizer \{ display:\s*none;/);
   assert.match(style, /\.chat-side-more-menu\[hidden\] \{ display: none; \}/);
   assert.match(style, /\.chat-side-more-menu \{[^}]*max-height:[^;]+;[^}]*overflow-y: auto;[^}]*overscroll-behavior-y: contain;/s);
@@ -195,6 +202,25 @@ test("la navigation mobile expose cinq destinations et une action adaptee au cha
   assert.match(style, /padding-top: calc\(var\(--m-topbar-h\)/);
   assert.match(style, /chat-panel--expert:not\(\.active\)/);
   assert.match(style, /\.chat-admin-actions \{\s*display: none !important;/);
+});
+
+test("les chats et le centre d'activite redeviennent accessibles apres le dernier terminal", () => {
+  assert.match(main, /data-m="drawer"[^>]*aria-label="Voir tous les chats"/);
+  assert.match(main, /data-m="context"[^>]*aria-label="Ouvrir la colonne de droite"/);
+  assert.match(main, /case "context":[\s\S]*?classList\.toggle\("chat-context-sidebar-open"\)/);
+  assert.match(
+    main,
+    /classList\.toggle\(\s*"m-terminal-focus",\s*activeView === "terminal" && !!activeTerminal\(\),\s*\)/,
+  );
+  assert.match(
+    style,
+    /@media \(max-width: 860px\) \{[\s\S]*?\.chat-context-sidebar \{[^}]*position:\s*fixed;[^}]*inset:\s*0 0 0 auto;[^}]*visibility:\s*hidden;[^}]*transform:\s*translateX\(102%\);/,
+  );
+  assert.match(
+    style,
+    /body\.chat-context-sidebar-open[\s\S]*?\.chat-context-sidebar \{[^}]*visibility:\s*visible;[^}]*pointer-events:\s*auto;[^}]*transform:\s*translateX\(0\);/,
+  );
+  assert.match(style, /body\.chat-context-sidebar-open \.chat-sidebar-scrim/);
 });
 
 test("le web active automatiquement l'unique environnement du serveur", () => {

@@ -66,6 +66,9 @@ export const rankRemoteAllocations = <T extends PrioritizedNode>(
       }];
     }
 
+    // `ready`/`draining` sont des signaux de maintenance ajoutés après le
+    // premier protocole de santé. Un nœud ancien ou une réponse de proxy peut
+    // les omettre : dans ce cas `ok: true` reste la preuve de disponibilité.
     if (health.ok === false || health.ready === false || health.draining === true) {
       return [];
     }
@@ -77,12 +80,15 @@ export const rankRemoteAllocations = <T extends PrioritizedNode>(
       return [];
     }
 
-    const capacity = Math.max(1, finiteNonNegative(health.capacity));
+    // `capacity: 0` signifie « sans plafond numerique » : la memoire du noeud
+    // reste son garde-fou et il ne doit jamais etre classe comme sature par un
+    // simple nombre de chats ou de terminaux.
+    const capacity = finiteNonNegative(health.capacity);
     const active = workloadCount(health, workload);
-    const saturated = active >= capacity;
+    const saturated = capacity > 0 && active >= capacity;
     return [{
       ...observation,
-      score: active / capacity + finiteNonNegative(node.priority) / 100,
+      score: (capacity > 0 ? active / capacity : active) + finiteNonNegative(node.priority) / 100,
       saturated,
       healthKnown: true,
       tier: saturated ? 1 : 0,

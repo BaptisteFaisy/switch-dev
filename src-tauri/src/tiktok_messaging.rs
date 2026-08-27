@@ -112,6 +112,10 @@ pub struct TikTokConnectorStatus {
     pub devices: Vec<TikTokAndroidDevice>,
     #[serde(default)]
     pub scrcpy_available: bool,
+    #[serde(default)]
+    pub ws_scrcpy_available: bool,
+    #[serde(default)]
+    pub ws_scrcpy_online: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub adb_error: Option<String>,
     pub account_count: usize,
@@ -142,6 +146,10 @@ pub struct TikTokConnectorHeartbeatRequest {
     pub devices: Vec<TikTokAndroidDevice>,
     #[serde(default)]
     pub scrcpy_available: bool,
+    #[serde(default)]
+    pub ws_scrcpy_available: bool,
+    #[serde(default)]
+    pub ws_scrcpy_online: bool,
     #[serde(default)]
     pub adb_error: Option<String>,
     #[serde(default)]
@@ -233,6 +241,7 @@ pub enum TikTokSenderSetupActionKind {
     OpenLogin,
     MatchAccounts,
     OpenScrcpy,
+    StartWsScrcpy,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -783,11 +792,15 @@ impl TikTokDmManager {
         request: QueueTikTokSenderSetupRequest,
     ) -> Result<TikTokSenderSetupAction, TikTokDmError> {
         let owner_id = policy::validate_owner_id(owner_id)?;
-        let requested_device = request
-            .device_serial
-            .as_deref()
-            .map(policy::validate_device_serial)
-            .transpose()?;
+        let requested_device = if request.action == TikTokSenderSetupActionKind::StartWsScrcpy {
+            None
+        } else {
+            request
+                .device_serial
+                .as_deref()
+                .map(policy::validate_device_serial)
+                .transpose()?
+        };
         let connector = self.connector_status()?.ok_or_else(|| {
             TikTokDmError::Conflict(
                 "Le pont Android Windows est hors ligne. Demarrez l'application desktop."
@@ -800,7 +813,11 @@ impl TikTokDmManager {
                     .to_string(),
             ));
         }
-        if request.action != TikTokSenderSetupActionKind::OpenScrcpy && !connector.agent_healthy {
+        if !matches!(
+            request.action,
+            TikTokSenderSetupActionKind::OpenScrcpy | TikTokSenderSetupActionKind::StartWsScrcpy
+        ) && !connector.agent_healthy
+        {
             return Err(TikTokDmError::Conflict(
                 "TikMatrix est hors ligne ou son agent local ne repond pas.".to_string(),
             ));
@@ -812,7 +829,19 @@ impl TikTokDmManager {
                     .to_string(),
             ));
         }
-        let device_serial = match requested_device {
+        if request.action == TikTokSenderSetupActionKind::StartWsScrcpy
+            && !connector.ws_scrcpy_available
+            && !connector.ws_scrcpy_online
+        {
+            return Err(TikTokDmError::Conflict(
+                "ws-scrcpy-web est arrete et son lanceur est introuvable sur le poste Windows. Configurez CST_WS_SCRCPY_PATH ou installez WsScrcpyWeb."
+                    .to_string(),
+            ));
+        }
+        let device_serial = if request.action == TikTokSenderSetupActionKind::StartWsScrcpy {
+            String::new()
+        } else {
+            match requested_device {
             Some(serial) => {
                 if !connector
                     .device_serials
@@ -839,6 +868,7 @@ impl TikTokDmManager {
                     ))
                 }
             },
+            }
         };
 
         let mut current = self.lock_store()?;
@@ -1025,6 +1055,8 @@ impl TikTokDmManager {
             device_serials,
             devices,
             scrcpy_available: request.scrcpy_available,
+            ws_scrcpy_available: request.ws_scrcpy_available,
+            ws_scrcpy_online: request.ws_scrcpy_online,
             adb_error: sanitize_detail(request.adb_error),
             account_count,
             accounts,
@@ -1671,6 +1703,8 @@ struct TikMatrixSnapshot {
 struct LocalAndroidSnapshot {
     devices: Vec<TikTokAndroidDevice>,
     scrcpy_available: bool,
+    ws_scrcpy_available: bool,
+    ws_scrcpy_online: bool,
     error: Option<String>,
 }
 
@@ -1722,12 +1756,13 @@ pub async fn run_tiktok_connector() {
     loop {
         let mut submitted_work = false;
         let mut snapshot = inspect_tikmatrix(&client).await;
-        let local_android = tokio::task::spawn_blocking(inspect_local_android)
+        let mut local_android = tokio::task::spawn_blocking(inspect_local_android)
             .await
             .unwrap_or_else(|error| LocalAndroidSnapshot {
                 error: Some(format!("Inventaire ADB interrompu : {error}")),
                 ..LocalAndroidSnapshot::default()
             });
+        local_android.ws_scrcpy_online = probe_ws_scrcpy().await;
         snapshot.devices = merge_android_devices(snapshot.devices, local_android.devices.clone());
         snapshot.device_serials = snapshot
             .devices
@@ -1741,6 +1776,8 @@ pub async fn run_tiktok_connector() {
             device_serials: snapshot.device_serials.clone(),
             devices: snapshot.devices.clone(),
             scrcpy_available: local_android.scrcpy_available,
+            ws_scrcpy_available: local_android.ws_scrcpy_available,
+            ws_scrcpy_online: local_android.ws_scrcpy_online,
             adb_error: local_android.error.clone(),
             account_count: snapshot.account_count,
             accounts: snapshot.accounts.clone(),
@@ -1824,6 +1861,8 @@ pub async fn run_tiktok_connector() {
                                 device_serials: snapshot.device_serials.clone(),
                                 devices: snapshot.devices.clone(),
                                 scrcpy_available: local_android.scrcpy_available,
+                                ws_scrcpy_available: local_android.ws_scrcpy_available,
+                                ws_scrcpy_online: local_android.ws_scrcpy_online,
                                 adb_error: local_android.error.clone(),
                                 account_count: snapshot.account_count,
                                 accounts: snapshot.accounts.clone(),
@@ -1878,6 +1917,8 @@ pub async fn run_tiktok_connector() {
                                     device_serials: snapshot.device_serials.clone(),
                                     devices: snapshot.devices.clone(),
                                     scrcpy_available: local_android.scrcpy_available,
+                                    ws_scrcpy_available: local_android.ws_scrcpy_available,
+                                    ws_scrcpy_online: local_android.ws_scrcpy_online,
                                     adb_error: local_android.error.clone(),
                                     account_count: snapshot.account_count,
                                     accounts: snapshot.accounts.clone(),
@@ -2046,6 +2087,10 @@ async fn submit_tiktok_sender_setup(
     client: &reqwest::Client,
     job: &TikTokSenderSetupJob,
 ) -> Result<String, String> {
+    if job.action == TikTokSenderSetupActionKind::StartWsScrcpy {
+        let url = ensure_ws_scrcpy_started().await?;
+        return Ok(format!("ws-scrcpy-web est pret sur {url}."));
+    }
     if job.action == TikTokSenderSetupActionKind::OpenScrcpy {
         let local = tokio::task::spawn_blocking(inspect_local_android)
             .await
@@ -2121,6 +2166,9 @@ async fn submit_tiktok_sender_setup(
             ))
         }
         TikTokSenderSetupActionKind::OpenScrcpy => unreachable!("traite avant TikMatrix"),
+        TikTokSenderSetupActionKind::StartWsScrcpy => {
+            unreachable!("traite avant TikMatrix")
+        }
     }
 }
 
@@ -2218,10 +2266,12 @@ fn tikmatrix_android_device(value: &Value) -> Option<TikTokAndroidDevice> {
 #[cfg(feature = "desktop")]
 fn inspect_local_android() -> LocalAndroidSnapshot {
     let scrcpy_available = resolve_scrcpy_path().is_some();
+    let ws_scrcpy_available = resolve_ws_scrcpy_path().is_some();
     let candidates = adb_candidates();
     if candidates.is_empty() {
         return LocalAndroidSnapshot {
             scrcpy_available,
+            ws_scrcpy_available,
             error: Some(
                 "ADB est introuvable. Installez Android Platform Tools ou configurez CST_ADB_PATH."
                     .to_string(),
@@ -2237,6 +2287,8 @@ fn inspect_local_android() -> LocalAndroidSnapshot {
                 return LocalAndroidSnapshot {
                     devices: parse_adb_devices(&String::from_utf8_lossy(&output.stdout)),
                     scrcpy_available,
+                    ws_scrcpy_available,
+                    ws_scrcpy_online: false,
                     error: None,
                 };
             }
@@ -2253,6 +2305,7 @@ fn inspect_local_android() -> LocalAndroidSnapshot {
     }
     LocalAndroidSnapshot {
         scrcpy_available,
+        ws_scrcpy_available,
         error: last_error,
         ..LocalAndroidSnapshot::default()
     }
@@ -2426,6 +2479,163 @@ fn resolve_scrcpy_path() -> Option<PathBuf> {
         }
     }
     candidates.into_iter().find(|path| path.is_file())
+}
+
+#[cfg(feature = "desktop")]
+const WS_SCRCPY_EMBED_URL: &str = "http://127.0.0.1:8000/embed.html";
+
+#[cfg(feature = "desktop")]
+fn push_ws_scrcpy_directory_candidates(candidates: &mut Vec<PathBuf>, root: &Path) {
+    candidates.push(root.join("ws-scrcpy-web.exe"));
+    candidates.push(root.join("ws-scrcpy-web-launcher.exe"));
+    candidates.push(root.join("current").join("ws-scrcpy-web-launcher.exe"));
+    candidates.push(root.join("start.cmd"));
+}
+
+#[cfg(feature = "desktop")]
+fn supported_ws_scrcpy_launcher(path: &Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    let file_name = path
+        .file_name()
+        .map(|value| value.to_string_lossy())
+        .unwrap_or_default();
+    file_name.eq_ignore_ascii_case("start.cmd")
+        || path
+            .extension()
+            .is_some_and(|value| value.to_string_lossy().eq_ignore_ascii_case("exe"))
+}
+
+#[cfg(feature = "desktop")]
+fn resolve_ws_scrcpy_path() -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(configured) = std::env::var_os("CST_WS_SCRCPY_PATH").map(PathBuf::from) {
+        if configured.is_dir() {
+            push_ws_scrcpy_directory_candidates(&mut candidates, &configured);
+        } else {
+            candidates.push(configured);
+        }
+    }
+    if let Some(program_files) = std::env::var_os("ProgramFiles").map(PathBuf::from) {
+        let root = program_files.join("WsScrcpyWeb");
+        candidates.push(root.join("ws-scrcpy-web.exe"));
+        candidates.push(root.join("current").join("ws-scrcpy-web-launcher.exe"));
+        candidates.push(root.join("start.cmd"));
+    }
+    candidates
+        .into_iter()
+        .find(|path| supported_ws_scrcpy_launcher(path))
+}
+
+#[cfg(feature = "desktop")]
+async fn probe_ws_scrcpy() -> bool {
+    let client = match reqwest::Client::builder()
+        .connect_timeout(Duration::from_millis(300))
+        .timeout(Duration::from_millis(800))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+    {
+        Ok(client) => client,
+        Err(_) => return false,
+    };
+    let response = match client.get(WS_SCRCPY_EMBED_URL).send().await {
+        Ok(response) if response.status().is_success() => response,
+        _ => return false,
+    };
+    let body = match response.text().await {
+        Ok(body) => body,
+        Err(_) => return false,
+    };
+    body.contains("ws-scrcpy-web stream") && body.contains("data-embed-entry")
+}
+
+#[cfg(feature = "desktop")]
+fn launch_ws_scrcpy() -> Result<(), String> {
+    #[cfg(not(target_os = "windows"))]
+    {
+        Err(
+            "Le lancement automatique de ws-scrcpy-web est disponible uniquement sur Windows."
+                .to_string(),
+        )
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let launcher = resolve_ws_scrcpy_path().ok_or_else(|| {
+            "Le lanceur ws-scrcpy-web est introuvable. Configurez CST_WS_SCRCPY_PATH ou installez WsScrcpyWeb."
+                .to_string()
+        })?;
+        let current_dir = launcher
+            .parent()
+            .ok_or_else(|| "Le dossier du lanceur ws-scrcpy-web est invalide".to_string())?;
+        let is_cmd = launcher
+            .file_name()
+            .is_some_and(|value| value.to_string_lossy().eq_ignore_ascii_case("start.cmd"));
+        let mut command = if is_cmd {
+            let comspec = std::env::var_os("COMSPEC")
+                .map(PathBuf::from)
+                .filter(|path| {
+                    path.is_file()
+                        && path.file_name().is_some_and(|value| {
+                            value.to_string_lossy().eq_ignore_ascii_case("cmd.exe")
+                        })
+                })
+                .ok_or_else(|| "COMSPEC ne designe pas un cmd.exe Windows valide".to_string())?;
+            let launcher_text = launcher.to_string_lossy();
+            if launcher_text.contains('"') {
+                return Err("Le chemin du lanceur ws-scrcpy-web est invalide".to_string());
+            }
+            let mut command = quiet_command(&comspec);
+            command
+                .args(["/D", "/S", "/C"])
+                .arg(format!("call \"{launcher_text}\""));
+            command
+        } else {
+            quiet_command(&launcher)
+        };
+        command
+            .current_dir(current_dir)
+            .env("WS_SCRCPY_WEB_PORT", "8000")
+            .env("WS_SCRCPY_NO_BROWSER", "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map(|_| ())
+            .map_err(|error| format!("Demarrage de ws-scrcpy-web impossible : {error}"))
+    }
+}
+
+#[cfg(feature = "desktop")]
+async fn ensure_ws_scrcpy_started() -> Result<String, String> {
+    if probe_ws_scrcpy().await {
+        return Ok(WS_SCRCPY_EMBED_URL.to_string());
+    }
+    tokio::task::spawn_blocking(launch_ws_scrcpy)
+        .await
+        .map_err(|error| format!("Lancement de ws-scrcpy-web interrompu : {error}"))??;
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            break;
+        }
+        tokio::time::sleep((deadline - now).min(Duration::from_millis(250))).await;
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        if tokio::time::timeout(remaining, probe_ws_scrcpy())
+            .await
+            .unwrap_or(false)
+        {
+            return Ok(WS_SCRCPY_EMBED_URL.to_string());
+        }
+    }
+    Err("ws-scrcpy-web a ete lance, mais son ecran integre n'est pas devenu disponible sur 127.0.0.1:8000 dans les 15 secondes."
+        .to_string())
 }
 
 #[cfg(feature = "desktop")]
@@ -3477,6 +3687,8 @@ mod tests {
                 device_serials: vec!["emulator-5554".to_string()],
                 devices: Vec::new(),
                 scrcpy_available: true,
+                ws_scrcpy_available: true,
+                ws_scrcpy_online: false,
                 adb_error: None,
                 account_count: 1,
                 accounts: vec![TikTokSenderAccount {
@@ -3524,6 +3736,53 @@ mod tests {
     }
 
     #[test]
+    fn start_ws_scrcpy_serializes_and_queues_without_device_or_tikmatrix() {
+        assert_eq!(
+            serde_json::to_value(TikTokSenderSetupActionKind::StartWsScrcpy).unwrap(),
+            serde_json::json!("start_ws_scrcpy")
+        );
+        let (root, manager) = manager("start-ws-scrcpy");
+        manager
+            .heartbeat(TikTokConnectorHeartbeatRequest {
+                connector_id: "windows-test".to_string(),
+                agent_healthy: false,
+                device_serials: Vec::new(),
+                devices: Vec::new(),
+                scrcpy_available: false,
+                ws_scrcpy_available: true,
+                ws_scrcpy_online: false,
+                adb_error: None,
+                account_count: 0,
+                accounts: Vec::new(),
+                current_campaign_id: None,
+                error: Some("TikMatrix arrete".to_string()),
+            })
+            .unwrap();
+
+        let first = manager
+            .queue_sender_setup(
+                "owner-1",
+                QueueTikTokSenderSetupRequest {
+                    action: TikTokSenderSetupActionKind::StartWsScrcpy,
+                    device_serial: None,
+                },
+            )
+            .unwrap();
+        let duplicate = manager
+            .queue_sender_setup(
+                "owner-1",
+                QueueTikTokSenderSetupRequest {
+                    action: TikTokSenderSetupActionKind::StartWsScrcpy,
+                    device_serial: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(first.device_serial, "");
+        assert_eq!(first.id, duplicate.id);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn sender_login_actions_are_device_bound_idempotent_and_lease_bound() {
         let (root, manager) = manager("sender-login");
         assert!(
@@ -3540,6 +3799,8 @@ mod tests {
                 device_serials: vec!["emulator-5554".to_string()],
                 devices: Vec::new(),
                 scrcpy_available: true,
+                ws_scrcpy_available: true,
+                ws_scrcpy_online: false,
                 adb_error: None,
                 account_count: 0,
                 accounts: Vec::new(),

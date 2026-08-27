@@ -3,6 +3,8 @@ import test from "node:test";
 
 import {
   TerminalInputBuffer,
+  terminalInputDelivery,
+  terminalReconnectPlan,
   terminalTransportErrorMessage,
 } from "../src/terminal-transport.ts";
 
@@ -33,6 +35,42 @@ test("fermer un terminal supprime sa saisie en attente", () => {
   buffer.clear(12);
 
   assert.equal(buffer.take(12), "");
+});
+
+test("la taille de la file compte les caracteres pour le badge d'etat", () => {
+  const buffer = new TerminalInputBuffer();
+  assert.equal(buffer.size(7), 0);
+
+  buffer.append(7, "abc");
+  buffer.append(7, "dé");
+
+  assert.equal(buffer.size(7), 5);
+  assert.equal(buffer.take(7), "abcdé");
+  assert.equal(buffer.size(7), 0);
+});
+
+test("une reconnexion WebSocket utilise REST sans bloquer la saisie", () => {
+  assert.equal(terminalInputDelivery("open", false, false), "socket");
+  assert.equal(terminalInputDelivery("connecting", false, false), "post");
+  assert.equal(terminalInputDelivery("closed", false, false), "post");
+  assert.equal(terminalInputDelivery("connecting", true, false), "buffer");
+  assert.equal(terminalInputDelivery("connecting", false, true), "buffer");
+});
+
+test("la reconnexion d'un terminal vivant ne s'epuise jamais", () => {
+  let plan = terminalReconnectPlan(0);
+  assert.deepEqual(plan, { attempt: 1, delayMs: 250 });
+
+  for (let index = 0; index < 200; index += 1) {
+    plan = terminalReconnectPlan(plan.attempt);
+  }
+
+  assert.equal(plan.attempt, 32);
+  assert.equal(plan.delayMs, 10_000);
+  assert.deepEqual(terminalReconnectPlan(Number.POSITIVE_INFINITY), {
+    attempt: 1,
+    delayMs: 250,
+  });
 });
 
 test("une panne fetch devient un message terminal utile", () => {

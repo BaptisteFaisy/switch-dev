@@ -103,6 +103,90 @@ const SYSTEM_SUPERVISOR_GUIDANCE_COOLDOWN_SECONDS: i64 = 45 * 60;
 const SYSTEM_SUPERVISOR_REDIRECT_MIN_RUNTIME_SECONDS: i64 = 20 * 60;
 const STARTUP_RECOVERY_STAGGER_SECONDS: i64 = 10;
 const MAX_CONCURRENT_AGENT_RUNS_PER_PROJECT: usize = 2;
+
+/// Etalement (stagger) des lancements d'agents sur une bande passante limitee.
+/// Valeur != 0 (ms) active un decalage deterministe entre les demarrages
+/// quand d'autres runs sont deja en vol, pour lisser la charge sur la
+/// connexion (ex. 10 Mbit/s). Par defaut inactif pour conserver le
+/// comportement historique. Exemple :
+///   CST_AUTONOMOUS_AGENT_STAGGER_MS=1500
+/// Laisse sans effet si aucun autre agent n'a de run en vol ; la valeur est
+/// bornee a [250, 60_000] ms.
+const AGENT_STAGGER_ENV: &str = "CST_AUTONOMOUS_AGENT_STAGGER_MS";
+const AGENT_STAGGER_MIN_MS: u64 = 250;
+const AGENT_STAGGER_MAX_MS: u64 = 60_000;
+
+/// Budget bande passante (octets/s) pour le regulateur dynamique des agents
+/// autonomes. Tant que le debit effectif (descendant + montant) reste sous ce
+/// seuil, on ne laisse autant d'agents que la connexion peut le porter ; au
+///-dessus, les nouveaux lancements sont retenus jusqu'a ce que la ligne se
+/// libere. `0` desactive la regulation (comportement historique). Valeur
+/// suggeree pour une connexion 10 Mbit/s (1,25 Mo/s) : 1_000_000 (vise ~80%
+/// de la capacite pour garder une marge de latence).
+const BANDWIDTH_ENV: &str = "CST_AUTONOMOUS_BANDWIDTH_MAX_BYTES_S";
+
+fn configured_bandwidth_max_bytes_s() -> u64 {
+    std::env::var(BANDWIDTH_ENV)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|value| *value != 0)
+        .unwrap_or(0)
+}
+
+fn configured_agent_stagger_ms() -> u64 {
+    std::env::var(AGENT_STAGGER_ENV)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|value| *value != 0)
+        .map(|value| value.clamp(AGENT_STAGGER_MIN_MS, AGENT_STAGGER_MAX_MS))
+        .unwrap_or(0)
+}
+
+/// Decalage deterministe (stable dans le temps) d'un agent dans la fenetre
+/// configuree, derive de son identifiant : deux agents differents n'atterrissent
+/// jamais pile au meme tick, sans ajouter de dependance PRNG ni rendre les
+/// tests non-deterministes.
+fn agent_launch_stagger_ms(agent_id: &str) -> u64 {
+    let window = configured_agent_stagger_ms();
+    if window == 0 {
+        return 0;
+    }
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    use std::hash::Hasher;
+    hasher.write(agent_id.as_bytes());
+    let hash = hasher.finish();
+    1 + (hash % window)
+}
+
+/// Vrai si au moins un agent (autre que `agent_id`) a un run en vol (tour,
+/// demarrage ou validation), indiquant que la connexion est partiellement
+/// occupee et que l'etalement est utile.
+fn other_agents_are_running<'a>(
+    agents: impl Iterator<Item = &'a AutonomousAgentSnapshot>,
+    agent_id: &str,
+) -> bool {
+    agents
+        .filter(|other| other.id != agent_id)
+        .any(agent_has_in_flight_work)
+}
+
+/// Retient le lancement d'un agent sur un tick donne afin d'etaler les
+/// demarrages. La fenetre (en secondes) est derivee du reglage milliseconde
+/// (arrondi a 1 s minimum) ; chaque agent occupe un creneau stable
+/// (hash(id) % fenetre) et n'est autorise que lorsque `now % fenetre == creneau`.
+/// Deterministe : aucun impact sur la logique lorsque non configure.
+fn agent_should_hold_launch(agent_id: &str, now: i64, stagger_ms: u64) -> bool {
+    if stagger_ms == 0 {
+        return false;
+    }
+    let now_u = now.max(0) as u64;
+    let window_secs = (stagger_ms / 1000).clamp(1, 60);
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    use std::hash::Hasher;
+    hasher.write(agent_id.as_bytes());
+    let slot = hasher.finish() % window_secs;
+    now_u % window_secs != slot
+} 
 const SYSTEM_SUPERVISOR_NAME: &str = "Superviseur des agents autonomes";
 const SYSTEM_SUPERVISOR_OBJECTIVE: &str = "Verifier chaque heure que tous les agents autonomes actives fonctionnent correctement, compiler tous leurs comptes rendus non lus dans un compte rendu general classe par priorite, les reorienter vers leur mission principale en cas d'inaction ou de travail en tunnel, puis corriger de maniere sure les bugs logiciels qui les empechent d'avancer.";
 const SYSTEM_SUPERVISOR_ROLE: &str = "Tu es le superviseur systeme, le redacteur du compte rendu general et le coach d'execution de la flotte autonome. A chaque cycle, commence par synthetiser sans omission les comptes rendus non lus fournis par le moteur et classe les informations par priorite critique, haute, moyenne puis basse. Compare ensuite l'objectif durable de chaque agent avec sa memoire, son carnet, ses preuves et son activite reelle. Detecte notamment l'absence prolongee d'action concrete, la repetition sans progres, le perfectionnement d'un detail marginal et la derive vers un sous-sujet qui ne sert plus l'objectif. Quand les preuves sont suffisantes, emets une consigne structuree de supervision : le moteur l'inscrira dans la memoire de l'agent et pourra relancer un tour durablement enlise. Selectionne aussi l'incident logiciel le plus important, confirme sa cause, applique une correction sure quand elle est possible et valide-la. Ne modifie jamais directement autonomous-agents.json, ne reecris jamais l'objectif utilisateur, ne contourne jamais une review humaine et ne reprends jamais un agent mis en pause ou termine volontairement. Si tout est sain et aligne, effectue seulement un controle leger.";
@@ -687,6 +771,8 @@ struct AutonomousAgentInner {
     store: Mutex<AutonomousAgentStore>,
     validation_runs: Mutex<HashMap<String, Arc<ValidationRun>>>,
     tool_server: std::sync::OnceLock<AutonomousToolServerFactory>,
+    /// Capteur de debit reseau pour le regulateur bande passante.
+    network_meter: Mutex<crate::network_meter::NetworkMeter>,
 }
 
 /// Construit le serveur d'outils MCP d'un cycle d'agent. La fabrique vit dans
@@ -1265,6 +1351,7 @@ impl AutonomousAgentManager {
             store: Mutex::new(store),
             validation_runs: Mutex::new(HashMap::new()),
             tool_server: std::sync::OnceLock::new(),
+            network_meter: Mutex::new(crate::network_meter::NetworkMeter::default()),
         });
         spawn_worker(Arc::downgrade(&inner));
         for (account_id, session_id) in stale_discussions {
@@ -1441,6 +1528,24 @@ impl AutonomousAgentManager {
     pub fn create(
         &self,
         request: CreateAutonomousAgentRequest,
+    ) -> Result<AutonomousAgentSnapshot, String> {
+        self.create_with_policy(request, false)
+    }
+
+    /// Variante utilisee par l'outil `create_goal`. A la difference de la
+    /// creation generale d'agents autonomes, un chat ne peut posseder qu'un
+    /// goal inacheve pour un meme proprietaire et un meme compte.
+    pub fn create_goal(
+        &self,
+        request: CreateAutonomousAgentRequest,
+    ) -> Result<AutonomousAgentSnapshot, String> {
+        self.create_with_policy(request, true)
+    }
+
+    fn create_with_policy(
+        &self,
+        request: CreateAutonomousAgentRequest,
+        unique_unfinished_goal: bool,
     ) -> Result<AutonomousAgentSnapshot, String> {
         let objective = validate_objective(&request.objective)?;
         let name = validate_agent_name(request.name.as_deref(), &objective)?;
@@ -1673,6 +1778,23 @@ impl AutonomousAgentManager {
         );
         let created = agent.clone();
         self.inner.mutate_store(|store| {
+            if unique_unfinished_goal {
+                let source_chat_key = agent.source_chat_key.as_deref().ok_or_else(|| {
+                    "Le chat doit posseder une cle persistante pour creer un goal".to_string()
+                })?;
+                if store.agents.iter().any(|candidate| {
+                    !candidate.system_managed
+                        && candidate.account_id == agent.account_id
+                        && candidate.owner_id == agent.owner_id
+                        && candidate.source_chat_key.as_deref() == Some(source_chat_key)
+                        && candidate.status != AutonomousAgentStatus::Completed
+                }) {
+                    return Err(
+                        "Un goal autonome inacheve existe deja pour ce chat et ce compte"
+                            .to_string(),
+                    );
+                }
+            }
             if let Some(proposal_id) = source_proposal_id.as_deref() {
                 let source_agent = store
                     .agents
@@ -3288,10 +3410,29 @@ impl AutonomousAgentInner {
         }
     }
 
+    /// Vrai quand le debit reseau mesure depasse le budget configure
+    /// (CST_AUTONOMOUS_BANDWIDTH_MAX_BYTES_S). Tant que la ligne est sous le
+    /// seuil, on laisse autant d'agents que possible ; au-dessus, on retient
+    /// les nouveaux lancements. Toujours faux si non configure.
+    fn bandwidth_saturated(&self) -> bool {
+        let max = configured_bandwidth_max_bytes_s();
+        if max == 0 {
+            return false;
+        }
+        let Ok(meter) = self.network_meter.lock() else {
+            return false;
+        };
+        meter.latest_bytes_per_sec() >= max as f64
+    }
+
     fn work_items(&self, now: i64) -> Vec<WorkerItem> {
         let Ok(store) = self.store.lock() else {
             return Vec::new();
         };
+        // Calcule une fois par tick pour eviter de relire le capteur pour
+        // chaque agent. Poller n'ouvre pas de nouveau traffic ; seul demarrer
+        // en consomme, d'ou la retenue uniquement sur les Start.
+        let saturated = self.bandwidth_saturated();
         store
             .agents
             .iter()
@@ -3313,6 +3454,27 @@ impl AutonomousAgentInner {
                 }
                 if agent.next_run_at.is_some_and(|next| next <= now) {
                     if agent_start_blocked(&store, &agent.id, now) {
+                        return None;
+                    }
+                    // Etalement bande passante : tant qu'un autre agent a un
+                    // run en vol, ce lancement est differe d'un decalage
+                    // deterministe (par agent) pour lisser la charge sur la
+                    // connexion. Inactif par defaut (non configure).
+                    if configured_agent_stagger_ms() > 0
+                        && !agent_has_in_flight_work(agent)
+                        && other_agents_are_running(store.agents.iter(), &agent.id)
+                        && agent_should_hold_launch(
+                            &agent.id,
+                            now,
+                            configured_agent_stagger_ms(),
+                        )
+                    {
+                        return None;
+                    }
+                    // Le debit mesure sature la connexion : on retient le
+                    // lancement (il sera retente au prochain tick quand la
+                    // ligne se liberera).
+                    if saturated {
                         return None;
                     }
                     return Some(WorkerItem::Start {
@@ -3379,6 +3541,12 @@ fn spawn_worker(inner: Weak<AutonomousAgentInner>) {
                     break;
                 };
                 let now = metrics::now_ts();
+                // Echantillonne le debit reseau (capteur bande passante). Tant
+                // que non configure (CST_AUTONOMOUS_BANDWIDTH_MAX_BYTES_S), la
+                // mesure est collectee mais sans effet sur l'ordonnancement.
+                if let Ok(mut meter) = inner.network_meter.lock() {
+                    meter.tick();
+                }
                 if last_event_scan.elapsed() >= Duration::from_secs(EVENT_SCAN_INTERVAL_SECONDS) {
                     scan_workspace_events(&inner, now);
                     last_event_scan = Instant::now();
@@ -8753,6 +8921,7 @@ mod tests {
                 }),
                 validation_runs: Mutex::new(HashMap::new()),
                 tool_server: std::sync::OnceLock::new(),
+                network_meter: Mutex::new(crate::network_meter::NetworkMeter::default()),
             }),
         };
 
@@ -9189,6 +9358,7 @@ mod tests {
             created_at: None,
             provider: settings::Provider::Codex,
             inference_provider: None,
+            api_key: None,
             codex_home: format!("/accounts/{id}"),
             project_dir: None,
             proxy_id: None,
@@ -9198,6 +9368,7 @@ mod tests {
             model: Some(model.to_string()),
             reasoning_effort: Some("medium".to_string()),
             fast_mode: false,
+            completed_on: None,
         }
     }
 
@@ -9271,6 +9442,7 @@ mod tests {
             }),
             validation_runs: Mutex::new(HashMap::new()),
             tool_server: std::sync::OnceLock::new(),
+            network_meter: Mutex::new(crate::network_meter::NetworkMeter::default()),
         });
         let capacity_error =
             "Selected model is at capacity. Please try a different model.".to_string();
@@ -9765,6 +9937,7 @@ mod tests {
                 }),
                 validation_runs: Mutex::new(HashMap::new()),
                 tool_server: std::sync::OnceLock::new(),
+                network_meter: Mutex::new(crate::network_meter::NetworkMeter::default()),
             }),
         };
 
@@ -9814,6 +9987,7 @@ mod tests {
                 }),
                 validation_runs: Mutex::new(HashMap::new()),
                 tool_server: std::sync::OnceLock::new(),
+                network_meter: Mutex::new(crate::network_meter::NetworkMeter::default()),
             }),
         };
         let snapshot = |id, text: &str| ChatTurnSnapshot {
@@ -10011,6 +10185,7 @@ mod tests {
                 }),
                 validation_runs: Mutex::new(HashMap::new()),
                 tool_server: std::sync::OnceLock::new(),
+                network_meter: Mutex::new(crate::network_meter::NetworkMeter::default()),
             }),
         };
         let scheduled_at = metrics::now_ts() + 3_600;
@@ -10061,6 +10236,7 @@ mod tests {
                 }),
                 validation_runs: Mutex::new(HashMap::new()),
                 tool_server: std::sync::OnceLock::new(),
+                network_meter: Mutex::new(crate::network_meter::NetworkMeter::default()),
             }),
         };
 
@@ -10395,6 +10571,7 @@ mod tests {
                 }),
                 validation_runs: Mutex::new(HashMap::new()),
                 tool_server: std::sync::OnceLock::new(),
+                network_meter: Mutex::new(crate::network_meter::NetworkMeter::default()),
             }),
         };
 
@@ -10511,6 +10688,7 @@ mod tests {
                 }),
                 validation_runs: Mutex::new(HashMap::new()),
                 tool_server: std::sync::OnceLock::new(),
+                network_meter: Mutex::new(crate::network_meter::NetworkMeter::default()),
             }),
         };
 
@@ -10565,6 +10743,7 @@ mod tests {
                 }),
                 validation_runs: Mutex::new(HashMap::new()),
                 tool_server: std::sync::OnceLock::new(),
+                network_meter: Mutex::new(crate::network_meter::NetworkMeter::default()),
             }),
         };
 
@@ -10682,6 +10861,7 @@ mod tests {
             }),
             validation_runs: Mutex::new(HashMap::new()),
             tool_server: std::sync::OnceLock::new(),
+            network_meter: Mutex::new(crate::network_meter::NetworkMeter::default()),
         });
 
         finish_validation(
@@ -10736,6 +10916,7 @@ mod tests {
             }),
             validation_runs: Mutex::new(HashMap::new()),
             tool_server: std::sync::OnceLock::new(),
+            network_meter: Mutex::new(crate::network_meter::NetworkMeter::default()),
         };
 
         let result: Result<(), String> = inner.mutate_store(|store| {
@@ -10767,6 +10948,7 @@ mod tests {
             }),
             validation_runs: Mutex::new(HashMap::new()),
             tool_server: std::sync::OnceLock::new(),
+            network_meter: Mutex::new(crate::network_meter::NetworkMeter::default()),
         });
 
         assert!(inner.work_items(metrics::now_ts()).is_empty());
@@ -11011,5 +11193,68 @@ mod tests {
         fs::write(dir.join("README.md"), "dirty\n").unwrap();
         assert!(validate_git_publication_baseline(&dir).is_err());
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn agent_should_hold_launch_is_inactive_by_default() {
+        // Sans stagger (0), aucun lancement n'est retenu.
+        for id in ["a", "b", "c", "supervisor"] {
+            assert!(!agent_should_hold_launch(id, 10, 0));
+            assert!(!agent_should_hold_launch(id, 11, 0));
+        }
+    }
+
+    #[test]
+    fn agent_should_hold_launch_spreads_agents_in_the_configured_window() {
+        // Fenetre de 2 s : chaque agent n'est autorise que sur un creneau stable
+        // (hash(id) % 2) et l'ensemble est reparti.
+        let ids = ["alpha", "beta", "gamma", "delta", "epsilon", "a", "b"];
+        let mut autorised_counts = std::collections::HashMap::<&str, u32>::new();
+        for id in &ids {
+            let mut hits = 0;
+            for t in 0..20_000u64 {
+                if !agent_should_hold_launch(id, t as i64, 2000) {
+                    hits += 1;
+                }
+            }
+            // environ 1 creneau sur 2 (fenetre 2 s) -> entre 35% et 65%.
+            assert!(
+                (0.35..=0.65).contains(&(hits as f64 / 20_000.0)),
+                "{id}: {hits}/20000"
+            );
+            autorised_counts.insert(*id, hits);
+        }
+        // Deux agents differents ne partagent pas tous les creneaux : au moins
+        // une divergence dans leurs comptes prouve une repartition.
+        let mut distinct = autorised_counts.values().collect::<std::collections::HashSet<_>>();
+        distinct.insert(&0);
+        assert!(distinct.len() >= 2, "les agents ne sont pas repartis");
+    }
+
+    #[test]
+    fn other_agents_are_running_detects_in_flight_runs() {
+        let mut agent = sample_agent(AutonomousAgentStatus::Active);
+        agent.id = "d1".to_string();
+        agent.current_turn_id = Some(57);
+
+        let mut other_idle = sample_agent(AutonomousAgentStatus::Active);
+        other_idle.id = "d3".to_string();
+        // Le candidat n'est pas compte, un agent tiers en tour l'est.
+        assert!(other_agents_are_running(
+            [&other_idle, &agent].into_iter().map(|a| &*a),
+            "d2"
+        ));
+        // L'agent lui-meme ne se compte jamais.
+        assert!(!other_agents_are_running(
+            [&agent].into_iter().map(|a| &*a),
+            "d1"
+        ));
+        // Aucun run en vol : ni tour, ni demarrage, ni validation.
+        let mut idle = sample_agent(AutonomousAgentStatus::Active);
+        idle.id = "someone".to_string();
+        assert!(!other_agents_are_running(
+            [&idle].into_iter().map(|a| &*a),
+            "someone-else"
+        ));
     }
 }

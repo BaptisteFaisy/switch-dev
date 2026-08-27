@@ -73,7 +73,7 @@ const renderSkillCard = (
         ? "Coller le skill dans la session Codex active (relis puis Entrée)"
         : "Aucune session Codex active";
   return `
-    <div class="skill-card">
+    <div class="skill-card" data-skill-id="${escapeHtml(skill.id)}" tabindex="-1">
       <div class="skill-card-head">
         <strong>${escapeHtml(skill.name)}</strong>
         ${skill.custom ? `<span class="skill-origin"><i data-lucide="sparkles"></i>Personnel</span>` : ""}

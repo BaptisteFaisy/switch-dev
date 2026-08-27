@@ -1496,6 +1496,37 @@
   background: #f1f3f0;
 }
 
+:root[data-theme="light"] .freebuff-terminal-account-switch {
+  border-color: var(--line);
+  color: var(--muted);
+}
+
+:root[data-theme="light"] .expert-terminal-keyboard-badge {
+  border-color: var(--line);
+  background: #fbfcfa;
+  color: var(--muted);
+}
+
+:root[data-theme="light"] .expert-terminal-keyboard-badge:hover {
+  color: var(--text);
+}
+
+:root[data-theme="light"] .expert-terminal-keyboard-badge[data-terminal-keyboard-tone="ok"] {
+  color: #2f7d43;
+  border-color: rgba(47, 125, 67, 0.4);
+}
+
+:root[data-theme="light"] .expert-terminal-keyboard-badge[data-terminal-keyboard-tone="warn"] {
+  color: #9a6b12;
+  border-color: rgba(154, 107, 18, 0.4);
+}
+
+:root[data-theme="light"] .freebuff-terminal-account-switch select {
+  border-color: var(--line);
+  background: #fbfcfa;
+  color: var(--text);
+}
+
 :root[data-theme="light"] .expert-terminal-pane.active .expert-terminal-pane-head {
   background: #e7ebe7;
 }

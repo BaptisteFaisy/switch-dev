@@ -10,7 +10,7 @@ $DataDir = Join-Path $env:APPDATA "codex-switch-terminal-server"
 $EnvFile = Join-Path $DataDir "server.local.env.ps1"
 $PidFile = Join-Path $DataDir "server.pid"
 $ServerScript = Join-Path $ScriptDir "start-local-server.ps1"
-$Port = 8080
+$Port = 18080
 $LocalUrl = "http://127.0.0.1:$Port"
 
 function Get-LanIp {

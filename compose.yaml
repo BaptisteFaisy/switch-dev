@@ -1,7 +1,10 @@
+# Cette pile sur SSD/T7 ou pc-fixe est exclusivement l'environnement Switch de
+# developpement. La version stable/production est hebergee sur le VPS Azure.
 name: codex-switch-terminal
 
 services:
   cst:
+    container_name: codex-switch-terminal-prepapp
     image: ${CST_IMAGE:-codex-switch-terminal:local}
     build:
       context: .
@@ -10,19 +13,108 @@ services:
         CST_GIT_COMMIT: ${CST_GIT_COMMIT:-local}
     restart: unless-stopped
     init: true
+    # RAM-disk tmpfs du conteneur (/dev/shm) : c'est la que les fichiers
+    # temporaires des agents sont montes quand CST_ORCHESTRATION_SANDBOX_DIR y
+    # pointe. Beaucoup plus rapide que le SSD ; agrandir selon la RAM dispo
+    # (200 agents x worktrees Git = plusieurs Go). Tout est volatile : vide au
+    # redemarrage, ce qui est sans consequence (worktrees regenerebles).
+    shm_size: ${CST_SHM_SIZE:-4g}
     env_file:
       - ${CST_ENV_FILE:-deploy/cst-container.env}
     ports:
-      - "127.0.0.1:${CST_HOST_PORT:-8080}:8080"
+      # SSH bidirectionnel poste <-> conteneur : le pont est activé par défaut
+      # à chaque lancement du service ; sshd du conteneur est exposé
+      # uniquement sur le loopback de l'hote (acces via `ssh -p 2224
+      # cst@127.0.0.1`, cles preparees par scripts/setup-container-ssh.ps1).
+      # 2224 : 22 = sshd WSL, 2222 = serveur OpenSSH Windows, 2223 = sshd Duello
+      # (WSL). 2224 est donc le premier port loopback libre sur ce poste.
+      - "127.0.0.1:${CST_SSH_PORT:-2224}:22"
+    expose:
+      # Le HTTP reste interne à la pile. social-gateway est l'unique façade
+      # loopback afin de réunir Switch et le dashboard social sous la même origine.
+      - "8080"
+    extra_hosts:
+      # Permet au conteneur de joindre le poste hote en SSH (`ssh local`,
+      # direction conteneur -> poste). Deja fourni par Docker Desktop ; requis
+      # sur les runtimes Linux/Colima.
+      - "host.docker.internal:host-gateway"
+    environment:
+      # Cible du `ssh local` du conteneur : le serveur OpenSSH Windows ecoute
+      # sur 2222 (le port 22 de l'hote appartient au sshd WSL). Les valeurs
+      # par defaut dans l'entrypoint restent 22/jeanp pour les deploiements
+      # generiques ; compose ajuste ici pour le poste local.
+      CST_SSH_LOCAL_PORT: ${CST_SSH_LOCAL_PORT:-2222}
+      CST_SSH_LOCAL_USER: ${CST_SSH_LOCAL_USER:-jeanp}
+      # 0 = aucun plafond numerique de chats ou de terminaux. L'admission et le
+      # cgroup ci-dessous utilisent uniquement l'enveloppe memoire globale.
+      CST_NODE_CAPACITY: ${CST_NODE_CAPACITY:-0}
+      CST_CHAT_MAX_ACTIVE: ${CST_CHAT_MAX_ACTIVE:-0}
+      CST_TERMINAL_CAPACITY: ${CST_TERMINAL_CAPACITY:-0}
+      CST_CHAT_MIN_CONTAINER_HEADROOM_MIB: ${CST_CHAT_MIN_CONTAINER_HEADROOM_MIB:-512}
+      CST_CHAT_MIN_HOST_AVAILABLE_MIB: ${CST_CHAT_MIN_HOST_AVAILABLE_MIB:-768}
+      CST_CHAT_NODE_HEAP_MIB: ${CST_CHAT_NODE_HEAP_MIB:-256}
+      CST_CHAT_BUILD_JOBS: ${CST_CHAT_BUILD_JOBS:-1}
+      CST_CHAT_WORKER_THREADS: ${CST_CHAT_WORKER_THREADS:-2}
+      CST_TERMINAL_NODE_HEAP_MIB: ${CST_TERMINAL_NODE_HEAP_MIB:-256}
+      CST_TERMINAL_BUILD_JOBS: ${CST_TERMINAL_BUILD_JOBS:-1}
+      CST_TERMINAL_WORKER_THREADS: ${CST_TERMINAL_WORKER_THREADS:-2}
+      # Orchestrations multi-agents : pilotage asynchrone par un pool de threads
+      # (4 par defaut) et nombre de workers par defaut (3). Chaque worker est un
+      # chat qui code dans son propre worktree Git sur le meme projet.
+      # CST_ORCHESTRATION_CONCURRENCY borne le nombre total de tours d'agents en
+      # vol (8 par defaut, 1..=200) : c'est le reglage qui pilote la memoire du
+      # SSD quand on deploye 200 agents - au-dela, les runs attendent leur tour.
+      CST_ORCHESTRATION_DRIVERS: ${CST_ORCHESTRATION_DRIVERS:-4}
+      CST_ORCHESTRATION_WORKERS: ${CST_ORCHESTRATION_WORKERS:-3}
+      CST_ORCHESTRATION_CONCURRENCY: ${CST_ORCHESTRATION_CONCURRENCY:-8}
+      # Fichiers temporaires des agents (worktrees Git, clones, patches,
+      # handoffs) sur le RAM-disk tmpfs /dev/shm du conteneur : ~10x plus
+      # rapide que le SSD SATA. L'etat persiste (orchestrated-runs.json) reste
+      # sur le SSD. Mettre a vide pour revenir au SSD, ou pointer ailleurs.
+      CST_ORCHESTRATION_SANDBOX_DIR: ${CST_ORCHESTRATION_SANDBOX_DIR:-/dev/shm/cst-orchestrated-runs}
+      # Compte special b.ai : la cle CST_BAI_API_KEY est portee par l'env_file
+      # (deploy/cst-container.env, gitignore) — ne pas la surcharger ici, une
+      # valeur vide dans environment ecraserait celle de l'env_file. Le compte
+      # (DeepSeek Flash, intensite max) apparait automatiquement au demarrage
+      # quand la cle est renseignee.
+      CST_CLAUDE_MAX_SESSIONS: ${CST_CLAUDE_MAX_SESSIONS:-0}
+      CST_CLAUDE_IDLE_SECONDS: ${CST_CLAUDE_IDLE_SECONDS:-180}
+      # Le serveur HTTP n'a pas besoin d'un worker Tokio par coeur. Les agents
+      # heritent ensuite de CST_CHAT_WORKER_THREADS=2 via chat.rs.
+      TOKIO_WORKER_THREADS: ${CST_SERVER_WORKER_THREADS:-4}
+      MALLOC_ARENA_MAX: "1"
+      # Le drain automatique CPU/memoire est desactive : les limites Docker
+      # protegent l'hote sans refuser l'ouverture de nouveaux chats.
+      CST_MEMORY_WATCHDOG_ENABLED: ${CST_MEMORY_WATCHDOG_ENABLED:-0}
+      CST_MEMORY_WATCHDOG_CPU_PERCENT: ${CST_MEMORY_WATCHDOG_CPU_PERCENT:-0}
+      CST_MEMORY_WATCHDOG_POLL_SECONDS: ${CST_MEMORY_WATCHDOG_POLL_SECONDS:-5}
     volumes:
-      - ${CST_DATA_PATH:-./.cst-data}:/srv/cst
-    # 0 = pas de plafond (comportement historique en local, ou la RAM est large).
-    # Sur un hote contraint, fixer CST_MEM_LIMIT (ex: 6144m) evite qu'une derive
-    # du runtime consomme toute la RAM puis tout le swap de la machine : le noyau
-    # ne declenche alors aucun OOM-kill et l'hote entier part en thrashing.
-    # Le deploiement VPS applique ce plafond automatiquement (compose.yaml.j2).
+      # Un volume ext4 natif evite le cout DrvFS/NTFS sur les milliers de
+      # petits fichiers de sessions. CST_DATA_PATH permet toujours d'imposer
+      # explicitement un bind-mount pour le debug.
+      # Le serveur multi-chats utilise le stockage historique ext4 WSL par defaut.
+      - ${CST_DATA_PATH:-/home/jeanp/Documents/Switch-PrepApp/data}:/srv/cst
+      # Les cles SSH du pont bidirectionnel restent cote hote, dans .cst-data/ssh,
+      # la ou scripts/setup-container-ssh.ps1 les ecrit. Bind-mount par-dessus le
+      # sous-dossier /srv/cst/ssh du volume : l'echange de cles reste possible
+      # depuis Windows sans basculer tout /srv/cst en DrvFS/NTFS.
+      - ${CST_SSH_DIR:-./.cst-data/ssh}:/srv/cst/ssh
+    # Enveloppe globale de 7 Gio pour tous les chats et terminaux. Le meme
+    # plafond memory+swap evite de masquer un depassement dans le swap.
     mem_limit: ${CST_MEM_LIMIT:-0}
-    memswap_limit: ${CST_MEM_LIMIT:-0}
+    memswap_limit: ${CST_MEMSWAP_LIMIT:-0}
+    cpus: ${CST_CPU_LIMIT:-6.0}
+    # Aucune limite PID : les builds lourds et les nombreux agents/descendants
+    # ne doivent plus declencher « Resource temporarily unavailable » (EAGAIN)
+    # lors d'un fork/thread. La memoire reste bornee par mem_limit ci-dessus.
+    # Le pilote json-file est illimite par defaut. Trois fichiers de 10 Mio
+    # bornent les journaux du conteneur a environ 30 Mio sur le VHD WSL.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+        compress: "true"
     stop_grace_period: 45s
     security_opt:
       - no-new-privileges:true
@@ -32,3 +124,96 @@ services:
       timeout: 4s
       start_period: 20s
       retries: 8
+
+  social:
+    container_name: codex-switch-terminal-social
+    build:
+      context: ./social-analytics
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    init: true
+    env_file:
+      - ${SOCIAL_ENV_FILE:-social-analytics/social.env}
+    environment:
+      PORT: "8090"
+      SOCIAL_DATA_DIR: /data
+      SOCIAL_TIMEZONE: ${SOCIAL_TIMEZONE:-Europe/Paris}
+      SOCIAL_DEMO_MODE: "false"
+      SOCIAL_DEMO_SEED: "false"
+      SWITCH_AUTH_URL: http://cst:8080/api/auth/me
+    expose:
+      - "8090"
+    volumes:
+      - social-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+        compress: "true"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8090/readyz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 4s
+      start_period: 10s
+      retries: 8
+
+  social-gateway:
+    container_name: codex-switch-terminal-development-gateway
+    build:
+      context: ./social-gateway
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    init: true
+    env_file:
+      - ${SOCIAL_GATEWAY_ENV_FILE:-social-gateway/gateway.env}
+    environment:
+      LISTEN_PORT: "8081"
+      MAIN_UPSTREAM_URL: http://cst:8080
+      SOCIAL_UPSTREAM_URL: http://social:8090
+      FORWARDED_PROTO: https
+      SOCIAL_REQUEST_TIMEOUT_MS: "30000"
+      SOCIAL_SYNC_TIMEOUT_MS: "600000"
+      MAIN_REQUEST_TIMEOUT_MS: "600000"
+    depends_on:
+      cst:
+        condition: service_healthy
+      social:
+        condition: service_healthy
+    ports:
+      # Façade HTTP unique de Switch développement. Tailscale Serve continue
+      # de viser le même port loopback ; aucun Funnel ni port public n'est ajouté.
+      - "127.0.0.1:${CST_HOST_PORT:-18080}:8081"
+    read_only: true
+    tmpfs:
+      - /tmp:size=8m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+        compress: "true"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8081/readyz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 7s
+      start_period: 20s
+      retries: 8
+
+volumes:
+  cst-data:
+    name: codex-switch-terminal-data
+    external: true
+  social-data:
+    name: codex-switch-terminal-social-data

@@ -9,26 +9,16 @@ const mainStyles = readFileSync(new URL("../src/style.css", import.meta.url), "u
 
 test("le Tuto est une vue accessible sur ordinateur et mobile", () => {
   assert.match(main, /\| "tutorial"/);
-  assert.match(main, /id="tutorialToggle"[^>]*title="Découvrir le fonctionnement de Switch"/);
-  assert.match(main, /data-view="tutorial"[^>]*>[\s\S]*?<span>Tuto<\/span>/);
+  assert.match(main, /id="proxyToggle"[^>]*title="Gérer les proxys des comptes"/);
+  assert.match(main, /data-act="proxies"[^>]*>[\s\S]*?<span>Proxy<\/span>/);
   assert.match(main, /type TutorialModule = typeof import\("\.\/tutorial"\)/);
   assert.match(main, /if \(view === "tutorial" && !tutorialModule\)/);
   assert.match(main, /case "tutorial":\s*return tutorialModule\?\.renderTutorialPanel\(\) \?\? "";/);
   assert.match(main, /case "tutorial":\s*return "Tuto · Découvrir Switch";/);
-  assert.match(main, /#tutorialToggle"\)\?\.addEventListener\("click", \(\) => \{\s*setActiveView\("tutorial"\);/);
+  assert.match(main, /#proxyToggle"\)\?\.addEventListener\("click", \(\) => \{\s*openProxyManagerModal\(\);/);
   assert.match(main, /tutorialModule\?\.bindTutorialUi\(\{\s*currentView: activeView,\s*navigate: setActiveView,/);
   const mobileGrid = main.slice(main.indexOf('<div class="m-sheet-grid">'));
-  assert.match(mobileGrid, /<div class="m-sheet-grid">\s*<button[^>]+data-view="tutorial"/);
-});
-
-test("le nouveau parcours est signalé jusqu’à son démarrage", () => {
-  assert.match(main, /const tutorialHasStarted = \(\): boolean =>/);
-  assert.match(main, /codex-switch-terminal\.tutorial-progress\.v1/);
-  assert.match(main, /tutorialNeedsAttention \? '<b class="tutorial-nav-badge"/);
-  assert.match(main, /data-tutorial-nav-badge>Nouveau<\/b>/);
-  assert.match(main, /tutorialBadge\.hidden = tutorialHasStarted\(\)/);
-  assert.match(mainStyles, /\.tutorial-nav-badge/);
-  assert.match(mainStyles, /tutorialNavBadgePulse/);
+  assert.match(mobileGrid, /<div class="m-sheet-grid">\s*<button[^>]+data-act="proxies"/);
 });
 
 test("le tableau d'accueil conserve et permet de reprendre la progression", () => {

@@ -163,9 +163,22 @@
   height: 12px;
 }
 
-.stats-refresh {
+.stats-action-row {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.stats-refresh,
+.stats-tokscale-submit {
   min-width: 118px;
   justify-content: center;
+}
+
+.stats-tokscale-submit {
+  border-color: #6f9d85;
+  color: #c7ead5;
 }
 
 .stats-metric-grid {

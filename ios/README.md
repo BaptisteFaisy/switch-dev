@@ -4,6 +4,21 @@ Ce dossier contient une application UIKit native minimale pour iPhone et iPad.
 Elle charge l'interface servie par `cst-server` dans une `WKWebView`, comme le
 client Android existant, sans dupliquer le moteur Rust sur le telephone.
 
+## Environnements Switch
+
+La copie sur le **SSD Samsung T7** et l'instance locale **pc-fixe** sont la
+version de **développement**. La version **stable / production** est celle
+hébergée sur le **VPS Microsoft Azure**. Les mots « stable », « production »
+et « prod » ne désignent jamais la copie SSD/locale.
+
+## Regle d'acces (securite)
+
+L'URL `https://pc-fixe-cst.tail3a8bdf.ts.net/` est reservee au **VPS Azure** :
+c'est le seul tiers autorise a s'y connecter. Aucun acces public ne doit etre
+ouvert sur cette instance (pas de Tailscale Funnel, pas de port publie sur
+Internet) ; un acces externe passe par le tailnet prive avec le VPS Azure comme
+seul tiers autorise.
+
 ## Fonctionnalites
 
 - iOS/iPadOS 15 ou version ulterieure.
@@ -25,7 +40,7 @@ Le serveur par defaut est configure dans
 `CodexTerminal/Info.plist`, cle `CSTServerURL` :
 
 ```text
-https://cst-google-trial.tail3a8bdf.ts.net
+https://azure-duello.tail3a8bdf.ts.net
 ```
 
 ## Prerequis

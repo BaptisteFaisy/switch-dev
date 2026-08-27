@@ -49,6 +49,19 @@ export const shouldPinActiveExpertChatDuringTurn = (
 ): boolean => mode === "available" && wasVisible && isActive;
 
 /**
+ * Apres un rechargement, les epingles de visibilite sont volontairement
+ * ephemeres alors que le panneau et le tour serveur sont restaures separement.
+ * Le premier rattachement doit donc rendre le chat occupe a nouveau visible.
+ * Un chat deja rattache n'est pas re-epingle afin de respecter une reduction
+ * explicite faite pendant la session courante.
+ */
+export const shouldPinRestoredBusyExpertChat = (
+  mode: ExpertChatDisplayMode,
+  currentTurnBusy: boolean,
+  candidateTurnBusy: boolean,
+): boolean => mode === "available" && !currentTurnBusy && candidateTurnBusy;
+
+/**
  * Un second clic sur le chat orange deja actif agit comme une reduction dans
  * le mode « Disponibles ». Un premier clic, un chat vert ou le mode complet
  * conservent leur comportement d'ouverture habituel.

@@ -29,7 +29,7 @@ Sur le PC serveur :
 
 1. Installe et connecte **Tailscale** si le serveur est dans le tailnet prive.
 2. Ouvre **Safari** et visite l'URL HTTPS de `cst-server`, par exemple
-   `https://cst-google-trial.tail3a8bdf.ts.net`.
+   `https://azure-duello.tail3a8bdf.ts.net`.
 3. Connecte-toi avec le token admin.
 4. Touche **Partager**, puis **Plus** si necessaire.
 5. Choisis **Sur l'ecran d'accueil**.

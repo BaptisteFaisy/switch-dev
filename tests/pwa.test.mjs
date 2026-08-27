@@ -36,6 +36,9 @@ test("le service worker ne met jamais les API privees en cache", async () => {
   assert.match(worker, /url\.origin !== self\.location\.origin/);
   assert.match(worker, /url\.pathname\.startsWith\("\/api\/"\)/);
   assert.match(worker, /url\.pathname\.startsWith\("\/ws\/"\)/);
+  assert.match(worker, /url\.pathname === "\/social"/);
+  assert.match(worker, /url\.pathname\.startsWith\("\/social\/"\)/);
+  assert.match(worker, /isSocialApplicationRequest\(url\)/);
   assert.match(worker, /url\.pathname === "\/reset-update\.html"/);
   assert.match(worker, /request\.mode === "navigate"/);
   assert.match(worker, /const networkFirstNavigation = async/);
@@ -45,22 +48,39 @@ test("le service worker ne met jamais les API privees en cache", async () => {
   assert.match(worker, /caches\.match\("\/offline\.html"\)/);
 });
 
-test("un cache PWA fige se repare tout seul au prochain chargement", async () => {
+test("un cache PWA fige s'active sans renaviguer le client", async () => {
   const worker = await read("public/service-worker.js");
   // Une version de worker permet de forcer un nouveau script (compare octet par
   // octet, re-telecharge hors cache), meme si l'URL enregistree garde un vieux build.
   assert.match(worker, /const SW_VERSION = /);
-  // A l'activation : purge l'index perime du cache courant puis recharge les
-  // onglets ouverts pour reprendre l'index et le JS frais.
+  // A l'activation : purge l'index perime puis prend le controle sans lancer de
+  // navigation. Attendre client.navigate() dans waitUntil() bloque Chromium.
   assert.match(worker, /await current\.delete\("\/"\)/);
-  assert.match(worker, /self\.clients\.matchAll\(\{\s*type: "window",\s*includeUncontrolled: true,?\s*\}\)/);
-  assert.match(worker, /client\.navigate\(client\.url\)/);
-  assert.match(worker, /client\.url\.includes\("\/reset-update\.html"\)/);
+  assert.match(worker, /await self\.clients\.claim\(\)/);
+  assert.doesNotMatch(worker, /client\.navigate\(/);
 
   // Cote page : une verification du script est forcee a chaque chargement pour
   // ne pas attendre le throttle de 24 h du navigateur.
   const source = await read("src/pwa.ts");
   assert.match(source, /registration\.update\(\)/);
+});
+
+test("le chunk d'entree est importe dynamiquement pour reparer un index perime", async () => {
+  const config = await read("vite.config.ts");
+  // Le point d'entree n'est plus un <script src> statique : un index.html
+  // perime (garde en cache par le service worker) qui reference un chunk deja
+  // purge ne laisse plus le boot-splash tourner indefiniment. L'import() rejete
+  // declenche un rechargement unique vers le build courant.
+  assert.match(config, /cst-dynamic-entry-chunk/);
+  assert.match(config, /enforce: "post"/);
+  assert.match(config, /transformIndexHtml/);
+  assert.match(config, /\.catch\(\(\) =>/);
+  assert.match(config, /cst-chunk-build/);
+  assert.match(config, /window\.location\.replace\(u\.toString\(\)\)/);
+  // Le <script src="/src/main.ts"> statique reste la source : Vite le rewrite
+  // en chunk hashe, puis ce plugin le convertit en import() dynamique.
+  const indexHtml = await read("index.html");
+  assert.match(indexHtml, /<script type="module" src="\/src\/main\.ts"><\/script>/);
 });
 
 test("l'aide Safari reconnait aussi le user-agent iPad de bureau", async () => {

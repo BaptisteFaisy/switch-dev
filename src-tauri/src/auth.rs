@@ -384,6 +384,19 @@ impl AuthManager {
 
     /// Catalogue public des utilisateurs pour les fonctions collaboratives.
     /// Les e-mails, fournisseurs OAuth et secrets restent dans le module auth.
+    /// Retourne l'e-mail interne d'un utilisateur authentifie pour les controles
+    /// d'appartenance cote serveur. Ce champ ne fait jamais partie d'une identite
+    /// publique ni d'une reponse collaborative.
+    pub(crate) fn email_for_user_id(&self, user_id: &str) -> Result<Option<String>, String> {
+        let state = self.lock().map_err(|error| error.message)?;
+        Ok(state
+            .store
+            .users
+            .iter()
+            .find(|user| user.id == user_id)
+            .map(|user| user.email.clone()))
+    }
+
     pub(crate) fn public_identities(&self) -> Result<Vec<AuthIdentity>, String> {
         let state = self.lock().map_err(|error| error.message)?;
         let mut identities = state
@@ -420,6 +433,26 @@ impl AuthManager {
                 username: user.username.clone(),
                 avatar_url: user.avatar_url.clone(),
             }))
+    }
+
+    /// Résout un identifiant de compte (id exact, sinon nom d'utilisateur sans
+    /// tenir compte de la casse) vers l'id de l'utilisateur. Permet au jeton
+    /// administrateur de viser la liste de tâches d'un compte précis.
+    pub(crate) fn user_id_by_username(&self, identifier: &str) -> Result<Option<String>, String> {
+        let state = self.lock().map_err(|error| error.message)?;
+        let identifier = identifier.trim();
+        if identifier.is_empty() {
+            return Ok(None);
+        }
+        Ok(state
+            .store
+            .users
+            .iter()
+            .find(|user| {
+                user.id == identifier
+                    || user.username.to_lowercase() == identifier.to_lowercase()
+            })
+            .map(|user| user.id.clone()))
     }
 
     fn public_config(&self) -> Result<PublicAuthConfig, AuthError> {

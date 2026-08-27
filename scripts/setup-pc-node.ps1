@@ -2,7 +2,7 @@ param(
   [string]$NodeId = "pc-fixe",
   [string]$NodeLabel = "PC fixe",
   [int]$Capacity = [Math]::Max(1, [Environment]::ProcessorCount - 2),
-  [int]$Port = 8080,
+  [int]$Port = 18080,
   [string]$OracleUrl = "",
   [string]$TaskName = "Codex Switch Terminal Node",
   [switch]$SkipBuild

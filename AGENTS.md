@@ -1,8 +1,36 @@
-# VPS deployment safeguards
+# Règles d’accès aux fichiers
 
-- Duello is an external production workload. A Codex Switch Terminal rebuild must never stop, recreate, remove, rebuild, or prune it.
-- Keep Duello in its own Docker Compose project (`duello`) under `/opt/duello`. Its containers must carry the label `com.codex-switch-terminal.rebuild-policy=exclude`.
-- Before and after a CST deployment, verify that every container carrying that label is still running with the same container ID.
-- Never use project-agnostic cleanup commands such as `docker compose down` without an explicit file/project, `docker system prune --all`, or bulk container/image deletion on the VPS.
-- Rebuilding the CST application is distinct from recreating the VM. A VM deletion, disk replacement, or provider reimage cannot preserve Duello in place; back it up and migrate it to separate storage or another VPS before such an operation.
+Les opérations de lecture et d’écriture doivent rester dans le projet courant. Toute demande concernant un chemin situé hors du projet doit être signalée à l’utilisateur et nécessite une autorisation explicite ; cette autorisation ne permet pas de contourner les restrictions de l’outil ou de l’environnement.
 
+# Tâches à faire
+
+Quand l'utilisateur demande d'ajouter une tâche à faire, l'écrire dans
+**Switch** (VPS) : onglet **Tâches**, sur le compte **baptiste.faisy**.
+Depuis la mise en place de l'API serveur (`src-tauri/src/tasks.rs`), on peut
+also l'ajouter à distance :
+
+- `POST /api/tasks?account=baptiste.faisy` avec l'en-tête
+  `Authorization: Bearer <jeton admin>` et un corps JSON
+  `{ "id": "...", "title": "...", "priority": "normal", "dueDate": null }`
+  (liste : `GET /api/tasks?account=...`, remplacement : `PUT /api/tasks`,
+  suppression : `DELETE /api/tasks/<id>?account=...`).
+- Le compte se résout par id ou nom d'utilisateur ; sans paramètre, le jeton
+  admin vise la liste technique `server-admin`.
+- Le client web synchronise l'onglet Tâches avec le serveur : le serveur est
+  la source de vérité, le localStorage reste le cache hors-ligne.
+
+Exemple de tâche enregistrée (en attente) :
+- **Rebuild le serveur du VPS** pour appliquer le fix du cookie de session
+  Freebuff Cloud (normalisation `__Secure-next-auth.session-token` côté
+  serveur dans `freebuff_cloud.rs`) — le fix est côté serveur, redéployer
+  le binaire suffit, le client web seul ne suffit pas.
+
+# Procédure obligatoire avant build et publication
+
+- Avant chaque build, analyser l’état des modifications et le diff afin de distinguer les nouveaux changements des artefacts ou changements déjà traités.
+- Avant chaque commit, isoler strictement les changements de la fonctionnalité demandée ; ne jamais inclure les modifications préexistantes ou sans rapport, même si elles touchent les mêmes fichiers.
+- Ne jamais reconstruire ou publier un état non vérifié ; relancer les vérifications pertinentes après toute nouvelle modification.
+- Après chaque modification fonctionnelle, préparer un commit Git dédié avec un message explicite et vérifier qu’il ne contient aucun changement sans rapport.
+- Le push GitHub est obligatoire pour valider une modification destinée au dépôt distant, mais il doit être effectué uniquement après confirmation explicite de l’utilisateur juste avant `git push`.
+- Avant un commit, vérifier le diff et l’historique récent ; ne jamais inclure de secrets, fichiers générés ou modifications sans rapport.
+- Avant tout déploiement distant, analyser le diff depuis le dernier commit, valider le build et les tests, puis demander une confirmation explicite pour l’action réseau.

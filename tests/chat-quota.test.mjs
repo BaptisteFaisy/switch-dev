@@ -6,6 +6,7 @@ import {
   bestQuotaAccountForNewChat,
   combinedQuotaUsage,
   deduplicateQuotaAccountsForDisplay,
+  isQuotaAuthenticationError,
   isQuotaExhaustionError,
   OPEN_CHAT_QUOTA_RESERVATION_PERCENT,
   quotaAfterOpenChatReservations,
@@ -70,6 +71,34 @@ test("les limites visibles sont reactivees toutes les 30 secondes", () => {
     main,
     /runWhenPageVisible\(\(\) => void refreshLimitStatus\(\)\)[\s\S]*?LIMIT_POLL_INTERVAL_MS/,
   );
+});
+
+test("ignore un quota en cache lorsque l'authentification du compte est invalide", () => {
+  const accounts = [
+    { id: "courant", hasTokens: true, weeklyUsedPercent: 100 },
+    { id: "sans-token", hasTokens: false, weeklyUsedPercent: 0 },
+    {
+      id: "invalide",
+      hasTokens: true,
+      weeklyUsedPercent: 10,
+      error: "Could not parse your authentication token. Please try signing in again. (401 Unauthorized)",
+    },
+    { id: "sain", hasTokens: true, weeklyUsedPercent: 60 },
+  ];
+
+  assert.equal(isQuotaAuthenticationError(accounts[2].error), true);
+  assert.equal(isQuotaAuthenticationError("HTTP 403 Forbidden"), true);
+  assert.equal(isQuotaAuthenticationError("temporary network timeout"), false);
+  assert.equal(
+    bestQuotaAccount(accounts, "courant", ["sans-token", "invalide", "sain"])?.account.id,
+    "sain",
+  );
+  assert.equal(
+    bestQuotaAccountForNewChat(accounts, ["sans-token", "invalide", "sain"], [])?.account.id,
+    "sain",
+  );
+  assert.equal(bestQuotaAccount(accounts, "courant", ["sans-token"]), null);
+  assert.equal(bestQuotaAccount(accounts, "courant", ["invalide"]), null);
 });
 
 test("les limites s'affichent depuis un cache pendant le rafraichissement serveur", () => {
@@ -262,7 +291,7 @@ test("un quota epuise transfere automatiquement la discussion sans bouton", () =
   assert.match(automaticTransfer, /quotaSuggestionFor\(currentTurn, currentDiscussion\)/);
   assert.match(
     automaticTransfer,
-    /await continueDiscussionWith\(currentDiscussion, suggestion\.accountId, pane, \{\s*preserveNavigation: true,\s*\}\)/,
+    /await continueDiscussionWith\(currentDiscussion, suggestion\.accountId, pane, \{[\s\S]*?preserveNavigation: true,[\s\S]*?activateTarget: pane === null,[\s\S]*?\}\)/,
   );
   assert.ok(
     (main.match(/automaticallyTransferQuotaExhaustedDiscussion\(/g) ?? []).length >= 5,
@@ -295,7 +324,7 @@ test("le polling de quota arrete une commande bloquee avant le transfert", () =>
   );
 });
 
-test("une relance automatique conserve le chat et le workspace affiches", () => {
+test("une relance automatique conserve le workspace et affiche la cible du main-chat", () => {
   const automaticStart = main.indexOf("const automaticallyTransferQuotaExhaustedDiscussion =");
   const automaticEnd = main.indexOf("\nconst readChatPreferences", automaticStart);
   const continuationStart = main.indexOf("const continueDiscussionWith =");
@@ -324,6 +353,7 @@ test("une relance automatique conserve le chat et le workspace affiches", () => 
   const resume = main.slice(resumeStart, resumeEnd);
 
   assert.match(automaticTransfer, /preserveNavigation: true/);
+  assert.match(automaticTransfer, /activateTarget: pane === null/);
   assert.match(
     continuation,
     /options\.preserveNavigation\s*\? preserveDiscussionFolder\(discussion\)\s*: restoreDiscussionFolder\(discussion\)/,
@@ -331,8 +361,13 @@ test("une relance automatique conserve le chat et le workspace affiches", () => 
   assert.doesNotMatch(preservedFolder, /activateDiscussionFolder|setCurrentWorkspace|setChatWorkspaceFilter/);
   assert.match(
     resume,
-    /const activateReusePane = !!reusePane && !preserveNavigation && activeView !== "chat"/,
+    /const activateReusePane = !!reusePane[\s\S]*?\(!preserveNavigation \|\| activateTarget\)[\s\S]*?activeView !== "chat"/,
   );
+  assert.match(
+    resume,
+    /if \(activateTarget\) \{\s*activeExpertChatKey = pane\.key;\s*moveExpertChatPageToPane\(pane\);\s*activeView = "chat";/,
+  );
+  assert.match(resume, /const targetMustBeRendered = activateTarget \|\|/);
   assert.match(resume, /const keepReusedPaneVisible = preserveNavigation/);
   assert.match(resume, /automaticQuotaResumeVisibilityPins\.add\(pane\.key\)/);
   assert.match(
@@ -345,24 +380,46 @@ test("une relance automatique conserve le chat et le workspace affiches", () => 
   );
 });
 
-test("la fenetre source ferme seulement apres l'archivage reussi", () => {
-  const closeStart = main.indexOf("const closeTransferredDiscussionSource =");
-  const archiveStart = main.indexOf("const archiveTransferredDiscussion =", closeStart);
-  const archiveEnd = main.indexOf("\nconst transferredDiscussionStatus", archiveStart);
-  assert.notEqual(closeStart, -1);
-  assert.notEqual(archiveStart, -1);
-  assert.notEqual(archiveEnd, -1);
+test("une bascule de quota conserve la source jusqu'au retrait manuel", () => {
+  const detachStart = main.indexOf("const detachTransferredDiscussionSourceFromOpenViews =");
+  const detachEnd = main.indexOf("\nconst syncStatusTextDom", detachStart);
+  const continuationStart = main.indexOf("const continueDiscussionWith =");
+  const continuationEnd = main.indexOf("\nconst discussionHasRunningTurn", continuationStart);
+  const finalizationStart = main.indexOf("const finalizeTransferredDiscussion =");
+  const finalizationEnd = main.indexOf("\nconst releaseTransferredDiscussion", finalizationStart);
+  const releaseStart = main.indexOf("const releaseTransferredDiscussion =");
+  const releaseEnd = main.indexOf("\nconst expertPaneForDiscussion", releaseStart);
+  const automaticStart = main.indexOf("const automaticallyTransferQuotaExhaustedDiscussion =");
+  const automaticEnd = main.indexOf("\nconst readChatPreferences", automaticStart);
+  const manualArchiveStart = main.indexOf("const archiveDiscussionById =");
+  const manualArchiveEnd = main.indexOf("\nconst openDiscussionArchiveModal", manualArchiveStart);
+  assert.notEqual(detachStart, -1);
+  assert.notEqual(detachEnd, -1);
+  assert.notEqual(continuationStart, -1);
+  assert.notEqual(continuationEnd, -1);
+  assert.notEqual(finalizationStart, -1);
+  assert.notEqual(finalizationEnd, -1);
+  assert.notEqual(releaseStart, -1);
+  assert.notEqual(releaseEnd, -1);
+  assert.notEqual(automaticStart, -1);
+  assert.notEqual(automaticEnd, -1);
+  assert.notEqual(manualArchiveStart, -1);
+  assert.notEqual(manualArchiveEnd, -1);
 
-  const closeSource = main.slice(closeStart, archiveStart);
-  const archiveSource = main.slice(archiveStart, archiveEnd);
-  assert.match(closeSource, /candidate\.accountId === discussion\.accountId/);
-  assert.match(closeSource, /stopExpertChatSync\(pane\)/);
-  assert.match(closeSource, /expertChatPanes = expertChatPanes\.filter/);
-  assert.ok(
-    archiveSource.indexOf('invoke<{ count?: number }>("delete_discussion"') <
-      archiveSource.indexOf("closeTransferredDiscussionSource(discussion)"),
-    "la source ne doit fermer qu'apres la confirmation du backend",
-  );
+  const detach = main.slice(detachStart, detachEnd);
+  const continuation = main.slice(continuationStart, continuationEnd);
+  const finalization = main.slice(finalizationStart, finalizationEnd);
+  const release = main.slice(releaseStart, releaseEnd);
+  const automatic = main.slice(automaticStart, automaticEnd);
+  const manualArchive = main.slice(manualArchiveStart, manualArchiveEnd);
+  assert.match(detach, /chatDiscussion = null/);
+  assert.match(detach, /chatTurn = null/);
+  assert.doesNotMatch(detach, /delete_discussion|archive: true/);
+  assert.doesNotMatch(finalization, /delete_discussion|archive: true/);
+  assert.doesNotMatch(automatic, /delete_discussion|archive: true/);
+  assert.match(release, /detachTransferredDiscussionSourceFromOpenViews\(discussion\)/);
+  assert.match(manualArchive, /"delete_discussion"/);
+  assert.match(manualArchive, /archive:\s*!permanentDelete/);
   assert.match(
     main,
     /return snapshot\.status !== "failed" && snapshot\.status !== "cancelled"/,

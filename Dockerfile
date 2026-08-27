@@ -12,7 +12,11 @@ COPY index.html tsconfig.json vite.config.ts ./
 COPY scripts ./scripts
 COPY src ./src
 COPY public ./public
-RUN npm run build:frontend
+# Le prebuild:frontend lance un garde-fou de source PowerShell (source-guard,
+# WIP hote Windows) qui n'existe pas dans le conteneur Linux. On execute ici
+# directement les etapes du build frontend ; le controle de source reste cote
+# hote (npm run prebuild / build:frontend sur Windows).
+RUN npm run clean:web && npx tsc && npx vite build && node scripts/precompress-frontend.mjs
 
 FROM rust:1.88.0-bookworm AS server-build
 WORKDIR /build
@@ -41,13 +45,11 @@ FROM node:22-bookworm-slim AS runtime
 
 ARG TARGETARCH
 ARG RUST_VERSION=1.88.0
-ARG CST_GIT_COMMIT=container
-LABEL org.opencontainers.image.title="Codex Switch Terminal" \
-      org.opencontainers.image.description="Runtime distant de chats Codex Switch Terminal" \
-      org.opencontainers.image.revision="${CST_GIT_COMMIT}"
 
+# DEBIAN_FRONTEND evite les questions interactives d'apt dans les logs de build.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      autossh \
       bash \
       build-essential \
       ca-certificates \
@@ -61,38 +63,64 @@ RUN apt-get update \
       jq \
       libssl-dev \
       openssh-client \
+      openssh-server \
       pkg-config \
       procps \
       python3 \
-      python3-pip \
       ripgrep \
       sudo \
       tar \
       unzip \
       xz-utils \
-    && rm -rf /var/lib/apt/lists/* \
-    && groupadd --gid 10001 cst \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN groupadd --gid 10001 cst \
     && useradd --uid 10001 --gid cst --create-home --home-dir /home/cst --shell /bin/bash cst \
+    # useradd cree un compte au mot de passe verrouille (":!"), et OpenSSH 9
+    # refuse alors TOUTE authentification (clé publique comprise) : « User cst
+    # not allowed because account is locked ». On debloque le compte avec un
+    # hash SHA-512 aleatoire jetable — jamais utilisable (PasswordAuthentication
+    # no), il sert uniquement a satisfaire le controle de statut d'OpenSSH.
+    && usermod -p "$(python3 -c 'import crypt, os; print(crypt.crypt(os.urandom(16).hex(), crypt.mksalt(crypt.METHOD_SHA512)))')" cst \
     && install -d -o cst -g cst /srv/cst /srv/cst/workspaces /opt/codex-switch-terminal/dist
 
 USER cst
 ENV HOME=/home/cst \
     PATH=/home/cst/.local/bin:/home/cst/.cargo/bin:/usr/local/bin:/usr/bin:/bin
-RUN curl --proto '=https' --tlsv1.2 -fsS https://sh.rustup.rs -o /tmp/rustup-init.sh \
-    && sh /tmp/rustup-init.sh -y --profile minimal --default-toolchain "${RUST_VERSION}" \
-    && rm -f /tmp/rustup-init.sh
+# Toolchain Rust du runtime : uniquement pour les agents qui compilent du Rust
+# dans le conteneur (~550 Mo et plusieurs minutes de build). CST_RUNTIME_RUST=0
+# la saute pour un rebuild rapide quand on n'en a pas besoin ; defaut = 1,
+# comportement historique inchange.
+ARG CST_RUNTIME_RUST=1
+RUN if [ "$CST_RUNTIME_RUST" = "1" ]; then \
+      curl --proto '=https' --tlsv1.2 -fsS https://sh.rustup.rs -o /tmp/rustup-init.sh \
+      && sh /tmp/rustup-init.sh -y --profile minimal --default-toolchain "${RUST_VERSION}" \
+      && rm -f /tmp/rustup-init.sh; \
+    fi
 # OpenCode porte tous les fournisseurs API annexes (Z.ai, MiniMax, DeepSeek,
 # OpenRouter). Sans lui, `opencode auth login --provider <id>` echouait en
 # « command not found » et le terminal de connexion restait ouvert sans fin.
 RUN --mount=type=cache,id=cst-runtime-npm-${TARGETARCH},target=/home/cst/.npm,uid=10001,gid=10001,sharing=locked \
-    npm install --global --prefix /home/cst/.local @openai/codex @anthropic-ai/claude-code opencode-ai freebuff \
+    # @anthropic-ai/claude-code est EPINGLE a 2.1.207 : la derniere version
+    # publiee sur npm (août 2026) ne fournit plus son binaire natif dans
+    # node:22-bookworm-slim (« Error: claude native binary not installed »
+    # au premier claude --version). 2.1.207 est la version installee et
+    # verifiee sur les postes de dev ; reepuiser la version apres audit.
+    # tokscale est installe dans la meme couche : une seule resolution npm, une
+    # seule couche image (usage + leaderboard tokscale.ai ;
+    # scripts/tokscale-all.sh utilise le binaire local plutot que `npx`, faible
+    # RAM). Le token/credentials vivent dans TOKSCALE_CONFIG_DIR=/srv/cst/.tokscale
+    # (voir deploy/cst-container.env).
+    npm install --global --prefix /home/cst/.local @openai/codex @anthropic-ai/claude-code@2.1.207 opencode-ai freebuff tokscale \
     && command -v codex >/dev/null \
     && codex --version \
     && command -v claude >/dev/null \
     && claude --version \
     && command -v opencode >/dev/null \
     && opencode --version \
-    && command -v freebuff >/dev/null
+    && command -v freebuff >/dev/null \
+    && command -v tokscale >/dev/null \
+    && tokscale --version
 
 # `opencode auth login` bootstrape son environnement AVANT d'afficher son invite :
 # telechargement du catalogue models.dev (3,2 Mo) puis installation de
@@ -141,10 +169,25 @@ RUN set -eu; \
     test -s /home/cst/.config/manicode/freebuff
 
 USER root
+# Le label d'image porte le commit git (build arg). Declare APRES les couches
+# lourdes (apt, rustup, npm, pre-chauffages) : un nouveau CST_GIT_COMMIT (CI,
+# deploiement) ne rejoue alors que les COPY/chmod finaux, au lieu d'invalider
+# tout le stage runtime.
+ARG CST_GIT_COMMIT=container
+LABEL org.opencontainers.image.title="Codex Switch Terminal" \
+      org.opencontainers.image.description="Runtime distant de chats Codex Switch Terminal" \
+      org.opencontainers.image.revision="${CST_GIT_COMMIT}"
+
 COPY --from=server-build /tmp/cst-server /usr/local/bin/cst-server
 COPY --from=frontend-build /build/dist /opt/codex-switch-terminal/dist
 COPY deploy/docker-entrypoint.sh /usr/local/bin/cst-container-entrypoint
-RUN chmod 0755 /usr/local/bin/cst-container-entrypoint /usr/local/bin/cst-server \
+COPY deploy/cst-memory-watchdog.sh /usr/local/bin/cst-memory-watchdog
+COPY deploy/codex-rollout-guard.sh /usr/local/bin/codex-rollout-guard
+COPY deploy/codex-rollout-ordinal-repair.py /usr/local/bin/codex-rollout-ordinal-repair
+RUN mv /home/cst/.local/bin/codex /home/cst/.local/bin/codex-real \
+    && ln -s /usr/local/bin/codex-rollout-guard /home/cst/.local/bin/codex \
+    && chmod 0755 /usr/local/bin/codex-rollout-guard /usr/local/bin/codex-rollout-ordinal-repair \
+      /usr/local/bin/cst-container-entrypoint /usr/local/bin/cst-memory-watchdog /usr/local/bin/cst-server \
     && chown -R cst:cst /opt/codex-switch-terminal
 
 ENV CST_BIND=0.0.0.0:8080 \

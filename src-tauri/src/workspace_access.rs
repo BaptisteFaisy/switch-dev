@@ -362,6 +362,31 @@ impl WorkspaceAccessManager {
         Ok(resolved)
     }
 
+    /// Retourne la racine ACL canonique qui autorise le chemin demande. Un
+    /// moteur (Git, recherche de fichiers, etc.) doit utiliser cette valeur
+    /// comme limite stricte lorsqu'il remonte les parents.
+    pub(crate) fn authorized_environment_root(
+        &self,
+        identity: &AuthIdentity,
+        requested: &str,
+    ) -> Result<PathBuf, WorkspaceAccessError> {
+        let resolved = canonical_existing_dir(Path::new(requested.trim()))?;
+        let store = self.lock_store()?;
+        store
+            .environments
+            .iter()
+            .filter(|environment| user_can_access(environment, &identity.id))
+            .filter_map(|environment| {
+                canonical_existing_dir(Path::new(&environment.path))
+                    .ok()
+                    .filter(|root| resolved.starts_with(root))
+                    .map(|root| (root.components().count(), root))
+            })
+            .max_by_key(|(depth, _)| *depth)
+            .map(|(_, root)| root)
+            .ok_or_else(WorkspaceAccessError::not_found)
+    }
+
     pub(crate) fn list_for(
         &self,
         identity: &AuthIdentity,
@@ -988,6 +1013,46 @@ mod tests {
             .authorize_browse_path(&guest, Some(&created.path))
             .is_err());
         assert!(manager.list_for(&guest).unwrap().is_empty());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn authorized_environment_root_returns_the_acl_boundary_for_nested_paths() {
+        let root = std::env::temp_dir().join(format!("cst-workspace-boundary-{}", Uuid::new_v4()));
+        let manager = WorkspaceAccessManager::load(root.clone()).unwrap();
+        let owner = identity("owner-1", "alice");
+        let member = identity("member-1", "bob");
+        let outsider = identity("outsider-1", "mallory");
+        let environment = manager.personal_root(&owner).unwrap().join("shared");
+        let nested = environment.join("nested").join("project");
+        fs::create_dir_all(&nested).unwrap();
+        manager
+            .claim_or_authorize_environment(&owner, &display_path(&environment), Some("Shared"))
+            .unwrap();
+        let view = manager.list_for(&owner).unwrap().remove(0);
+        manager
+            .request_access(&member, view.share_code.as_deref().unwrap())
+            .unwrap();
+        manager
+            .accept_request(&owner, &view.id, &member.id)
+            .unwrap();
+
+        let expected = fs::canonicalize(&environment).unwrap();
+        assert_eq!(
+            manager
+                .authorized_environment_root(&owner, &display_path(&nested))
+                .unwrap(),
+            expected
+        );
+        assert_eq!(
+            manager
+                .authorized_environment_root(&member, &display_path(&nested))
+                .unwrap(),
+            expected
+        );
+        assert!(manager
+            .authorized_environment_root(&outsider, &display_path(&nested))
+            .is_err());
         let _ = fs::remove_dir_all(root);
     }
 

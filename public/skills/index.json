@@ -1,6 +1,21 @@
 {
   "skills": [
     {
+      "id": "switch-tiktok-assisted-navigation",
+      "file": "switch-tiktok-assisted-navigation/SKILL.md",
+      "name": "Navigation assistée TikTok",
+      "buttonLabel": "Utilisation humaine",
+      "icon": "hand",
+      "description": "Contrôle manuel de TikTok sur un Android connecté à Switch, une action explicite à la fois, sans automatisation d’engagement ni imitation anti-détection.",
+      "tags": [
+        "android",
+        "tiktok",
+        "usb",
+        "navigation-assistee",
+        "controle-manuel"
+      ]
+    },
+    {
       "id": "thermo-nuclear-code-quality-review",
       "file": "thermo-nuclear-code-quality-review.md",
       "name": "thermo-nuclear-code-quality-review",

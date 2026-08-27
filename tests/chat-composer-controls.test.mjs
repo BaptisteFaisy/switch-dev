@@ -109,7 +109,7 @@ test("les messages en attente sont visibles, annulables et envoyes dans l'ordre"
   assert.match(main, /pane\.queuedSubmissions\.push\(submission\)/);
   assert.match(main, /const submission = chatQueuedSubmissions\.shift\(\)/);
   assert.match(main, /const submission = pane\.queuedSubmissions\.shift\(\)/);
-  assert.match(main, /if \(!queuedSubmission\) chatDraft = ""/);
+  assert.match(main, /if \(!queuedSubmission\) \{\s*chatDraft = ""/);
   assert.match(main, /if \(!queuedSubmission\) pane\.draft = ""/);
   assert.match(
     main,

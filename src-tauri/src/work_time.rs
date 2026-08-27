@@ -112,7 +112,7 @@ fn build_dashboard(settings: &settings::AppSettings) -> WorkTimeDashboard {
             // restent tout de meme comptees par les metriques de lancement.
             settings::Provider::OpenCode => {}
             // freebuff tient son propre historique, non expose par Switch.
-            settings::Provider::Freebuff => {}
+            settings::Provider::Freebuff | settings::Provider::Aihubmix => {}
         }
     }
 

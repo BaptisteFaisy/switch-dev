@@ -250,11 +250,13 @@ test("un chemin choisi est conserve directement comme environnement", () => {
 test("les chats ouverts sans discussion listee restent des brouillons visibles", () => {
   const panes = [
     { key: "pane-neuf", discussion: null }, // nouveau chat, pas encore de rollout
-    { key: "pane-liste", discussion: { sessionId: "s-liste" } }, // deja dans la liste
-    { key: "pane-orphelin", discussion: { sessionId: "s-orphelin" } }, // dossier non resolu
+    { key: "pane-liste", discussion: { accountId: "compte-a", sessionId: "s-liste" } }, // deja dans la liste
+    { key: "pane-orphelin", discussion: { accountId: "compte-a", sessionId: "s-orphelin" } }, // dossier non resolu
   ];
 
-  const drafts = draftEnvironmentChatPanes(panes, ["s-liste"]);
+  const drafts = draftEnvironmentChatPanes(panes, [
+    { accountId: "compte-a", sessionId: "s-liste" },
+  ]);
   assert.deepEqual(
     drafts.map((pane) => pane.key),
     ["pane-neuf", "pane-orphelin"],
@@ -262,6 +264,31 @@ test("les chats ouverts sans discussion listee restent des brouillons visibles",
 });
 
 test("un chat deja liste n'est jamais duplique en brouillon", () => {
-  const panes = [{ key: "pane-liste", discussion: { sessionId: "s-liste" } }];
-  assert.deepEqual(draftEnvironmentChatPanes(panes, ["s-liste"]), []);
+  const panes = [{
+    key: "pane-liste",
+    discussion: { accountId: "compte-a", sessionId: "s-liste" },
+  }];
+  assert.deepEqual(draftEnvironmentChatPanes(panes, [
+    { accountId: "compte-a", sessionId: "s-liste" },
+  ]), []);
+});
+
+test("deux comptes gardent leurs panneaux distincts avec le meme identifiant natif", () => {
+  const panes = [
+    {
+      key: "pane-a",
+      discussion: { accountId: "freebuff-a", sessionId: "native-id" },
+    },
+    {
+      key: "pane-b",
+      discussion: { accountId: "freebuff-b", sessionId: "native-id" },
+    },
+  ];
+
+  assert.deepEqual(
+    draftEnvironmentChatPanes(panes, [
+      { accountId: "freebuff-a", sessionId: "native-id" },
+    ]).map((pane) => pane.key),
+    ["pane-b"],
+  );
 });

@@ -210,7 +210,11 @@ test("les tokens par compte sont relus pendant le poll temps reel", () => {
   const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
   assert.match(
     main,
-    /runWhenPageVisible\(\(\) => \{\s*void refreshUsageDashboard\(\);\s*void refreshAccountUsage\(\);/,
+    /runWhenPageVisible\(\(\) => \{\s*void refreshUsageDashboard\(\);\s*void refreshWorkTimeDashboard\(\);/,
+  );
+  assert.match(
+    main,
+    /accountUsageLastRefreshAt >= ACCOUNT_USAGE_REFRESH_INTERVAL_MS[\s\S]*?void refreshAccountUsage\(\);/,
   );
   assert.match(main, /accountUsageChanged =\s*!accountUsageLoaded \|\| nextSignature !== accountUsageSignature/);
 });

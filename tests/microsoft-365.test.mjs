@@ -551,7 +551,7 @@ test("un brouillon prepare sans compte lie garde son contenu et bloque l'envoi",
 });
 
 test("la demande de liaison a une route dediee et n'echappe pas au garde CSRF", () => {
-  assert.match(backend, /\.route\("\/link-request", axum::routing::delete\(api_dismiss_link_request\)\)/);
+  assert.match(backend, /\.route\(\s*"\/link-request",\s*axum::routing::delete\(api_dismiss_link_request\)\s*,?\s*\)/);
   const handler = between(backend, "async fn api_dismiss_link_request", "\n}\n");
   assert.match(handler, /require_same_site\(&headers\)\?/);
   assert.match(handler, /manager\.identity\(&headers\)\?/);
@@ -585,7 +585,7 @@ test("plusieurs boites peuvent etre liees a un meme utilisateur", () => {
 
   // Routes de gestion par boite et de choix d'expediteur sur une action.
   const router = between(backend, "fn router(manager: MicrosoftManager)", ".with_state(manager)");
-  assert.match(router, /\.route\("\/connection\/:oid", axum::routing::delete\(api_disconnect_account\)\)/);
+  assert.match(router, /\.route\(\s*"\/connection\/:oid",\s*axum::routing::delete\(api_disconnect_account\)\s*,?\s*\)/);
   assert.match(router, /\.route\("\/connection\/:oid\/default", post\(api_set_default\)\)/);
   assert.match(router, /\.route\("\/pending-actions\/:id\/account", post\(api_set_action_account\)\)/);
 
@@ -639,7 +639,7 @@ test("une boite revoquee parmi des saines ne casse ni la lecture ni l'envoi", ()
 test("la configuration Entra est saisissable dans l'application", () => {
   // Routes de configuration a chaud, protegees par le meme garde CSRF.
   const router = between(backend, "fn router(manager: MicrosoftManager)", ".with_state(manager)");
-  assert.match(router, /\.route\("\/provider", put\(api_set_provider\)\.delete\(api_clear_provider\)\)/);
+  assert.match(router, /\.route\(\s*"\/provider",\s*put\(api_set_provider\)\.delete\(api_clear_provider\)\s*,?\s*\)/);
   for (const handler of ["api_set_provider", "api_clear_provider"]) {
     const body = fnBody(backend, handler);
     assert.match(body, /require_same_site\(&headers\)\?/, handler);

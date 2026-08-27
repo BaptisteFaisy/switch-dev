@@ -273,11 +273,9 @@ impl MicrosoftDraft {
 
     fn summary(&self) -> String {
         match self {
-            Self::SendEmail(draft) => format!(
-                "E-mail « {} » a {}",
-                draft.subject,
-                draft.to.join(", ")
-            ),
+            Self::SendEmail(draft) => {
+                format!("E-mail « {} » a {}", draft.subject, draft.to.join(", "))
+            }
             Self::CreateEvent(draft) => {
                 format!("Nouvel evenement « {} » le {}", draft.subject, draft.start)
             }
@@ -556,8 +554,8 @@ impl MicrosoftManager {
         let secure_cookie = public_base_url.trim().starts_with("https://");
         let authority_base = env_trimmed("CST_MICROSOFT_AUTHORITY_BASE_URL")
             .unwrap_or_else(|| DEFAULT_AUTHORITY.to_string());
-        let graph_base =
-            env_trimmed("CST_MICROSOFT_GRAPH_BASE_URL").unwrap_or_else(|| DEFAULT_GRAPH.to_string());
+        let graph_base = env_trimmed("CST_MICROSOFT_GRAPH_BASE_URL")
+            .unwrap_or_else(|| DEFAULT_GRAPH.to_string());
 
         Ok(Self {
             inner: Arc::new(Mutex::new(MicrosoftState {
@@ -645,14 +643,8 @@ impl MicrosoftManager {
 
     /// Configure Entra depuis l'application : valide les entrees, construit la
     /// config, la met en service a chaud et la persiste (0600).
-    fn set_provider(
-        &self,
-        input: ProviderInput,
-    ) -> Result<(), MicrosoftError> {
-        let client_id = input
-            .client_id
-            .trim()
-            .to_string();
+    fn set_provider(&self, input: ProviderInput) -> Result<(), MicrosoftError> {
+        let client_id = input.client_id.trim().to_string();
         if client_id.is_empty() || client_id.chars().count() > MAX_CLIENT_ID_CHARS {
             return Err(MicrosoftError::bad_request(
                 "L'identifiant d'application (client ID) est requis",
@@ -671,7 +663,9 @@ impl MicrosoftManager {
                 .ok_or_else(|| MicrosoftError::bad_request("Le secret client est requis"))?
         } else {
             if secret_input.chars().count() > MAX_CLIENT_SECRET_CHARS {
-                return Err(MicrosoftError::bad_request("Le secret client est trop long"));
+                return Err(MicrosoftError::bad_request(
+                    "Le secret client est trop long",
+                ));
             }
             secret_input.to_string()
         };
@@ -809,7 +803,9 @@ impl MicrosoftManager {
             needs_relink,
             email: default.map(|account| account.email.clone()),
             display_name: default.and_then(|account| account.display_name.clone()),
-            scopes: default.map(|account| account.scopes.clone()).unwrap_or_default(),
+            scopes: default
+                .map(|account| account.scopes.clone())
+                .unwrap_or_default(),
             linked_at: default.map(|account| account.linked_at),
             accounts,
             tenant: provider.map(|provider| provider.tenant.clone()),
@@ -1158,13 +1154,10 @@ impl MicrosoftManager {
             "{}/{}/oauth2/v2.0/token",
             self.config.authority_base, provider.tenant
         );
-        let response = self
-            .http
-            .post(&url)
-            .form(form)
-            .send()
-            .await
-            .map_err(|_| MicrosoftError::new(StatusCode::BAD_GATEWAY, "Microsoft ne repond pas"))?;
+        let response =
+            self.http.post(&url).form(form).send().await.map_err(|_| {
+                MicrosoftError::new(StatusCode::BAD_GATEWAY, "Microsoft ne repond pas")
+            })?;
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
         if !status.is_success() {
@@ -1323,7 +1316,10 @@ impl MicrosoftManager {
             return Ok(None);
         };
         let configured = state.provider.is_some();
-        let login_url = state.provider.as_ref().map(|provider| provider.login_url.clone());
+        let login_url = state
+            .provider
+            .as_ref()
+            .map(|provider| provider.login_url.clone());
         let owner_links = state
             .store
             .links
@@ -1549,7 +1545,10 @@ impl MicrosoftManager {
             .http
             .get(url)
             .bearer_auth(&account.token)
-            .header("Prefer", "outlook.timezone=\"UTC\", outlook.body-content-type=\"text\"")
+            .header(
+                "Prefer",
+                "outlook.timezone=\"UTC\", outlook.body-content-type=\"text\"",
+            )
             .send()
             .await
             .map_err(|_| {
@@ -1607,7 +1606,9 @@ impl MicrosoftManager {
             }
         }
 
-        let (payload, mailbox) = self.graph_get(owner_id, args.account.as_deref(), url).await?;
+        let (payload, mailbox) = self
+            .graph_get(owner_id, args.account.as_deref(), url)
+            .await?;
         let messages = payload
             .get("value")
             .and_then(Value::as_array)
@@ -1664,7 +1665,9 @@ impl MicrosoftManager {
                 "id,subject,start,end,location,organizer,attendees,isAllDay,isCancelled,onlineMeetingUrl",
             );
 
-        let (payload, mailbox) = self.graph_get(owner_id, args.account.as_deref(), url).await?;
+        let (payload, mailbox) = self
+            .graph_get(owner_id, args.account.as_deref(), url)
+            .await?;
         let events = payload
             .get("value")
             .and_then(Value::as_array)
@@ -1830,7 +1833,10 @@ impl MicrosoftManager {
 
     /// Actions du proprietaire uniquement, et sans consommation : une carte de
     /// confirmation doit survivre a un rechargement de page.
-    fn pending_actions(&self, owner_id: &str) -> Result<Vec<PendingMicrosoftAction>, MicrosoftError> {
+    fn pending_actions(
+        &self,
+        owner_id: &str,
+    ) -> Result<Vec<PendingMicrosoftAction>, MicrosoftError> {
         let now = metrics::now_ts();
         let mut state = self.lock()?;
         state.actions.retain(|entry| entry.expires_at > now);
@@ -1977,8 +1983,12 @@ impl MicrosoftManager {
                 if let Some(body) = &draft.body {
                     payload["body"] = json!({ "contentType": "Text", "content": body });
                 }
-                self.graph_post(&token, &format!("{}/me/events", self.config.graph_base), payload)
-                    .await?;
+                self.graph_post(
+                    &token,
+                    &format!("{}/me/events", self.config.graph_base),
+                    payload,
+                )
+                .await?;
                 Ok(format!(
                     "Evenement « {} » cree du {} au {} (UTC).",
                     draft.subject, draft.start, draft.end
@@ -2079,7 +2089,11 @@ impl ListMessagesArguments {
     }
 
     fn normalized_query(&self) -> Result<Option<String>, MicrosoftError> {
-        let Some(query) = self.query.as_deref().map(str::trim).filter(|value| !value.is_empty())
+        let Some(query) = self
+            .query
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
         else {
             return Ok(None);
         };
@@ -2138,7 +2152,12 @@ impl ListEventsArguments {
 
     fn normalized_window(&self) -> Result<(String, String), MicrosoftError> {
         let now = chrono::Utc::now();
-        let start = match self.start.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+        let start = match self
+            .start
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        {
             Some(value) => parse_instant(value, "start")?,
             None => graph_instant(now),
         };
@@ -2265,7 +2284,12 @@ impl UpdateEventArguments {
             return Err("L'identifiant de l'evenement est invalide".to_string());
         }
         let subject = optional_text(self.subject.as_deref(), MAX_SUBJECT_CHARS, "Le titre")?;
-        let start = match self.start.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+        let start = match self
+            .start
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        {
             Some(value) => Some(parse_instant(value, "start").map_err(|error| error.message)?),
             None => None,
         };
@@ -2289,9 +2313,7 @@ impl UpdateEventArguments {
         // Un seul cote de la plage deplacerait l'evenement sans que l'humain
         // voie la duree resultante : on exige les deux bornes ensemble.
         if start.is_some() != end.is_some() {
-            return Err(
-                "Un deplacement d'horaire exige start et end ensemble".to_string(),
-            );
+            return Err("Un deplacement d'horaire exige start et end ensemble".to_string());
         }
         Ok((
             MicrosoftDraft::UpdateEvent(EventUpdateDraft {
@@ -2316,9 +2338,15 @@ pub(crate) fn router(manager: MicrosoftManager) -> Router {
     Router::new()
         .route("/connection", get(api_connection).delete(api_disconnect))
         // Configuration Entra saisie dans l'application (client id/secret/tenant).
-        .route("/provider", put(api_set_provider).delete(api_clear_provider))
+        .route(
+            "/provider",
+            put(api_set_provider).delete(api_clear_provider),
+        )
         // Une boite precise : la retirer, ou en faire la boite par defaut.
-        .route("/connection/:oid", axum::routing::delete(api_disconnect_account))
+        .route(
+            "/connection/:oid",
+            axum::routing::delete(api_disconnect_account),
+        )
         .route("/connection/:oid/default", post(api_set_default))
         .route("/start", get(api_start))
         .route("/callback", get(api_callback))
@@ -2326,7 +2354,10 @@ pub(crate) fn router(manager: MicrosoftManager) -> Router {
         .route("/pending-actions/:id/confirm", post(api_confirm))
         .route("/pending-actions/:id/cancel", post(api_cancel))
         .route("/pending-actions/:id/account", post(api_set_action_account))
-        .route("/link-request", axum::routing::delete(api_dismiss_link_request))
+        .route(
+            "/link-request",
+            axum::routing::delete(api_dismiss_link_request),
+        )
         .with_state(manager)
 }
 
@@ -2476,7 +2507,9 @@ async fn api_callback(
         // Le message brut d'Entra citerait le tenant et l'identifiant client
         // dans l'URL, donc dans l'historique du navigateur et les journaux de
         // proxy : on ne renvoie qu'un code stable interprete par l'interface.
-        Err(error) if error.status == StatusCode::CONFLICT => link_redirect(&manager, Err("conflict")),
+        Err(error) if error.status == StatusCode::CONFLICT => {
+            link_redirect(&manager, Err("conflict"))
+        }
         Err(error) if error.status == StatusCode::UNAUTHORIZED => {
             link_redirect(&manager, Err("session"))
         }
@@ -2575,9 +2608,7 @@ fn require_same_site(headers: &HeaderMap) -> Result<(), MicrosoftError> {
     if confirmed {
         Ok(())
     } else {
-        Err(MicrosoftError::forbidden(
-            "En-tete de confirmation absent",
-        ))
+        Err(MicrosoftError::forbidden("En-tete de confirmation absent"))
     }
 }
 
@@ -2640,12 +2671,10 @@ fn build_provider_config(public_base_url: &str) -> Result<Option<ProviderConfig>
     let (client_id, client_secret) = match (client_id, client_secret) {
         (Some(client_id), Some(client_secret)) => (client_id, client_secret),
         (None, None) => return Ok(None),
-        _ => {
-            return Err(
-                "CST_MICROSOFT_CLIENT_ID et CST_MICROSOFT_CLIENT_SECRET doivent etre definis ensemble"
-                    .to_string(),
-            )
-        }
+        _ => return Err(
+            "CST_MICROSOFT_CLIENT_ID et CST_MICROSOFT_CLIENT_SECRET doivent etre definis ensemble"
+                .to_string(),
+        ),
     };
     let tenant = env_trimmed("CST_MICROSOFT_TENANT_ID").unwrap_or_else(|| "common".to_string());
     if !tenant
@@ -2667,8 +2696,7 @@ fn build_provider_config(public_base_url: &str) -> Result<Option<ProviderConfig>
         tenant,
         redirect_uri,
         login_url,
-        scopes: env_trimmed("CST_MICROSOFT_SCOPES")
-            .unwrap_or_else(|| DEFAULT_SCOPES.to_string()),
+        scopes: env_trimmed("CST_MICROSOFT_SCOPES").unwrap_or_else(|| DEFAULT_SCOPES.to_string()),
         source: "env".to_string(),
     }))
 }

@@ -36,5 +36,32 @@ server.local.env.ps1
 **/server.local.env.ps1
 deploy/cst-server.env
 deploy/cst-container.env
+/social-analytics/social.env
+/social-analytics/social-store.json
+/social-gateway/gateway.env
+/.env
+
+deploy/duello/google-trial.env
 
 .mcp.json
+
+# Local scratch / debugging / preview (non partage)
+/tmp/
+/work/
+/preview-phone/
+/preview-qa/
+preview-duello.html
+index.tmp.js
+.freebuff/
+
+# Sauvegardes et artefacts ponctuels
+*.bak-*
+*.pre-merge-*
+*.pre-remote-updater-fix-*
+*.pre-scrcpy-*
+Dockerfile.cleanup
+Dockerfile.nosyntax
+
+# Documents personnels (administratifs, hors projet)
+/declaration-sur-lhonneur-pas-de-carte-ambulant.txt
+/lettre-type-cci-cma-pas-de-carte-ambulant.txt

@@ -69,16 +69,50 @@ export const shouldAdoptActiveChatTurn = (
   return candidate.startedAt === current.startedAt && candidate.id > current.id;
 };
 
+export type ActiveChatTurnPaneIdentity = {
+  key: string;
+  accountId: string | null | undefined;
+  turnId?: number | null;
+  sessionIds?: readonly (string | null | undefined)[];
+};
+
+export type ActiveChatTurnIdentity = {
+  id: number;
+  accountId: string;
+  sessionId?: string | null;
+  sourceChatKey?: string | null;
+};
+
+/**
+ * Reconnait le panneau qui possede un tour, meme si le panneau vient d'un
+ * autre appareil et n'a pas encore pu charger son resume de discussion.
+ */
+export const activeChatTurnBelongsToPane = (
+  turn: ActiveChatTurnIdentity,
+  pane: ActiveChatTurnPaneIdentity,
+): boolean => {
+  const accountId = pane.accountId?.trim();
+  if (!accountId || turn.accountId !== accountId) return false;
+  if (pane.turnId === turn.id) return true;
+
+  const sourceChatKey = turn.sourceChatKey?.trim();
+  if (sourceChatKey && sourceChatKey === pane.key.trim()) return true;
+
+  const sessionId = turn.sessionId?.trim();
+  if (!sessionId) return false;
+  return (pane.sessionIds ?? []).some((candidate) => candidate?.trim() === sessionId);
+};
+
 /**
  * Transforme l'objectif saisi via le bouton Goal en demande utilisateur
- * explicite. Codex n'active un goal que lorsque l'utilisateur le demande : le
- * bouton doit donc conserver cette intention dans le transcript, quel que soit
- * le transport utilise (Tauri local ou API web).
+ * explicite. Un provider n'active un goal que lorsque l'utilisateur le demande :
+ * le bouton doit donc conserver cette intention dans le transcript, quel que
+ * soit le transport utilise (Tauri local ou API web).
  */
 export const createGoalPrompt = (objective: string): string => {
   const normalized = objective.trim();
   if (!normalized) return "";
-  return `Crée un goal avec l'outil create_goal pour l'objectif suivant, puis commence à le poursuivre :\n\n${normalized}`;
+  return `Crée un goal avec l'outil create_goal pour l'objectif suivant, puis commence à le poursuivre. Si le fournisseur préfixe les outils MCP, utilise son nom exposé correspondant (par exemple cst_chat_create_goal avec OpenCode) :\n\n${normalized}`;
 };
 
 const isToolPart = (part: RuntimeChatPart): boolean => part.kind === "tool";

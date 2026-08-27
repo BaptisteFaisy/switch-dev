@@ -42,6 +42,24 @@ test("les mutations de tours et d'agents publient seulement un sujet leger", () 
   assert.doesNotMatch(server, /"type": "change"[\s\S]{0,180}(snapshot|agents|turns)/i);
 });
 
+test("les ouvertures et fermetures de terminaux publient leur catalogue", () => {
+  assert.match(runtimeSync, /ActiveTerminals/);
+  assert.match(server, /notify\(RuntimeSyncTopic::ActiveTerminals\)/);
+  assert.match(platform, /\| "activeTerminals"/);
+  assert.match(main, /queueRuntimeSyncUpdate\("activeTerminals"\)/);
+  assert.match(main, /message\.topic === "activeTerminals"/);
+});
+
+test("la fin quotidienne d'un compte est synchronisee entre web, desktop et mobile", () => {
+  assert.match(runtimeSync, /AccountCompletions/);
+  assert.match(server, /notify\(RuntimeSyncTopic::AccountCompletions\)/);
+  assert.match(platform, /\| "accountCompletions"/);
+  assert.match(main, /const refreshAccountCompletions = async \(\): Promise<boolean>/);
+  assert.match(main, /freshSettings\.accounts\.map\(\(account\) => \[account\.id, account\.completedOn \?\? null\]\)/);
+  assert.match(main, /message\.topic === "accountCompletions"/);
+  assert.match(main, /queueRuntimeSyncUpdate\("accountCompletions"\)/);
+});
+
 test("le client se reconnecte et ne poll plus tant que tous les sockets sont actifs", () => {
   assert.match(platform, /subscribeRuntimeUpdates\(/);
   assert.match(platform, /new WebSocket\(`\$\{wsBase\}\/ws\/runtime\?\$\{query\.toString\(\)\}`\)/);
@@ -59,11 +77,11 @@ test("le client se reconnecte et ne poll plus tant que tous les sockets sont act
 
 test("un echec REST live est retente sans boucle rapide ni sujet arbitraire", () => {
   assert.match(main, /const runtimeSyncRetryTimers = new Map<RuntimeSyncTopic, number>\(\)/);
-  assert.match(main, /topic === "activeChatTurns"[\s\S]*?return 1_000[\s\S]*?topic === "autonomousAgents"[\s\S]*?return 2_000[\s\S]*?return 8_000/);
+  assert.match(main, /topic === "activeChatTurns"[\s\S]*?return 1_000[\s\S]*?topic === "autonomousAgents"[\s\S]*?return 2_000[\s\S]*?topic === "accountCompletions"[\s\S]*?return 3_000[\s\S]*?return 8_000/);
   assert.match(main, /if \(success\) clearRuntimeSyncRetry\(topic\);\s*else scheduleRuntimeSyncRetry\(topic\);/);
   assert.match(
     main,
-    /message\.topic === "activeChatTurns"[\s\S]*?message\.topic === "autonomousAgents"[\s\S]*?message\.topic === "privateMessages"/,
+    /message\.topic === "activeChatTurns"[\s\S]*?message\.topic === "autonomousAgents"[\s\S]*?message\.topic === "accountCompletions"[\s\S]*?message\.topic === "privateMessages"/,
   );
   assert.doesNotMatch(main, /setTimeout\(flushRuntimeSyncUpdates, 100\)/);
 });

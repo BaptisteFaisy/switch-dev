@@ -4,7 +4,12 @@ import test from "node:test";
 
 import {
   AUTOMATIC_ORCHESTRATION_MARKER,
+  MAX_ORCHESTRATION_WORKER_COUNT,
+  automaticOrchestrationEnabledByDefault,
   automaticOrchestrationNotice,
+  normalizeOrchestrationWorkerCount,
+  orchestrationMinimumTaskCount,
+  orchestrationRequestedProjectDir,
   orchestrationIsRunning,
   orchestrationOrchestratorAccountId,
   orchestrationPhaseLabel,
@@ -12,6 +17,7 @@ import {
   orchestrationStatusLabel,
   orchestrationTaskStatusLabel,
   orchestrationWorkerAccountId,
+  orchestrationWorkerCountFromEnv,
   parseAutomaticOrchestrationDecision,
 } from "../src/chat/orchestration.ts";
 
@@ -19,6 +25,7 @@ const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
 const chatView = readFileSync(new URL("../src/chat/view.ts", import.meta.url), "utf8");
 const platform = readFileSync(new URL("../src/platform.ts", import.meta.url), "utf8");
 const backend = readFileSync(new URL("../src-tauri/src/orchestration.rs", import.meta.url), "utf8");
+const chat = readFileSync(new URL("../src-tauri/src/chat.rs", import.meta.url), "utf8");
 const server = readFileSync(new URL("../src-tauri/src/server.rs", import.meta.url), "utf8");
 const lib = readFileSync(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8");
 const style = readFileSync(new URL("../src/style.css", import.meta.url), "utf8");
@@ -55,18 +62,80 @@ test("la décision d'orchestration automatique exige un marqueur structuré vali
     "Orchestration automatique retenue · 3 workers · trois lots indépendants",
   );
   assert.equal(parseAutomaticOrchestrationDecision("Réponse normale"), null);
-  assert.equal(
+  assert.deepEqual(
     parseAutomaticOrchestrationDecision(
       `${AUTOMATIC_ORCHESTRATION_MARKER} {"decision":"orchestrate","workerCount":13}`,
     ),
-    null,
+    { workerCount: 20, reason: "" },
   );
+  assert.deepEqual(parseAutomaticOrchestrationDecision(
+    `${AUTOMATIC_ORCHESTRATION_MARKER} {"decision":"orchestrate","workerCount":101}`,
+  ), { workerCount: 200, reason: "" });
+  assert.equal(parseAutomaticOrchestrationDecision(
+    `${AUTOMATIC_ORCHESTRATION_MARKER} {"decision":"orchestrate","workerCount":201}`,
+  ), null);
   assert.equal(
     parseAutomaticOrchestrationDecision(
       `Le protocole cite ${AUTOMATIC_ORCHESTRATION_MARKER} mais sans ligne de décision.`,
     ),
     null,
   );
+});
+
+test("le nombre de workers UI valide la variable Vite et retombe sur trois", () => {
+  assert.equal(orchestrationWorkerCountFromEnv("8"), 20);
+  assert.equal(orchestrationWorkerCountFromEnv(" 12 "), 20);
+  assert.equal(orchestrationWorkerCountFromEnv("21"), 100);
+  assert.equal(orchestrationWorkerCountFromEnv("101"), 200);
+  assert.equal(orchestrationWorkerCountFromEnv("200"), 200);
+  for (const invalid of [undefined, null, "", "0", "201", "2.5", "workers", 8]) {
+    assert.equal(orchestrationWorkerCountFromEnv(invalid), 3);
+  }
+  assert.deepEqual(
+    [1, 2, 3, 4, 5, 20, 21, 100, 101, 200].map(normalizeOrchestrationWorkerCount),
+    [1, 2, 3, 4, 20, 20, 100, 100, 200, 200],
+  );
+  assert.equal(MAX_ORCHESTRATION_WORKER_COUNT, 200);
+  assert.match(main, /VITE_CST_ORCHESTRATION_WORKERS/);
+  assert.match(main, /autonomousLaunchWorkerCount = defaultOrchestrationWorkerCount/);
+  assert.match(main, /orchestrationWorkerCount = defaultOrchestrationWorkerCount/);
+  assert.match(main, /MAX_ORCHESTRATION_WORKER_COUNT/);
+});
+
+test("le snapshot expose la source demandee et le plancher persistant", () => {
+  assert.equal(orchestrationRequestedProjectDir({
+    projectDir: "C:/private/sandbox",
+    requestedProjectDir: "C:/workspace/project",
+  }), "C:/workspace/project");
+  assert.equal(orchestrationMinimumTaskCount({ workerCount: 3, minimumTaskCount: 20 }), 20);
+  assert.match(backend, /pub source_kind: OrchestrationSourceKind/);
+  assert.match(backend, /pub requested_project_dir: Option<String>/);
+  assert.match(backend, /pub access_project_dir: Option<String>/);
+  assert.match(backend, /pub minimum_task_count: u32/);
+});
+
+test("l'orchestration par défaut reste réservée aux points d'entrée racine", () => {
+  assert.equal(automaticOrchestrationEnabledByDefault({ surface: "classic-chat" }), true);
+  assert.equal(automaticOrchestrationEnabledByDefault({
+    surface: "classic-chat",
+    persistedEnabled: false,
+  }), true, "l'ancienne préférence est migrée vers le nouveau défaut");
+  assert.equal(automaticOrchestrationEnabledByDefault({
+    surface: "classic-chat",
+    orchestrationRole: "orchestrator",
+  }), false);
+  assert.equal(automaticOrchestrationEnabledByDefault({
+    surface: "classic-chat",
+    orchestrationRole: "worker",
+  }), false);
+  assert.equal(automaticOrchestrationEnabledByDefault({
+    surface: "classic-chat",
+    autonomousAgentId: "agent-1",
+  }), false);
+  assert.equal(automaticOrchestrationEnabledByDefault({
+    surface: "freebuff-terminal",
+    persistedEnabled: false,
+  }), true);
 });
 
 test("chaque rôle résout son propre compte avec migration des anciens snapshots", () => {
@@ -101,12 +170,15 @@ test("la vue dédiée crée et expose chaque chat de l'équipe", () => {
   assert.match(main, /class="orchestration-run-details"/);
   assert.doesNotMatch(main, /class="orchestration-overview"/);
   assert.doesNotMatch(main, /class="orchestration-run-rail"/);
-  assert.match(main, /id="orchestrationWorkerCount"[^>]*min="1"[^>]*max="12"/);
-  assert.match(main, /id="orchestrationConvertWorkerCount"[^>]*min="1"[^>]*max="12"/);
+  assert.match(main, /id="orchestrationWorkerCount"[^>]*min="1"[^>]*max="\$\{MAX_ORCHESTRATION_WORKER_COUNT\}"/);
+  assert.match(main, /id="orchestrationConvertWorkerCount"[^>]*min="1"[^>]*max="\$\{MAX_ORCHESTRATION_WORKER_COUNT\}"/);
   assert.match(main, /orchestratorSessionId: sessionId,[\s\S]*?workerCount|workerCount,[\s\S]*?orchestratorSessionId: sessionId/);
-  // Le bouton « Orchestration auto » a ete retire : un reglage persiste ne doit
-  // plus reactiver silencieusement le routage automatique.
-  assert.match(main, /automaticOrchestrationEnabled: false,/);
+  // Le bouton « Orchestration auto » a été retiré : le défaut est désormais
+  // calculé au même endroit que les exclusions anti-récursion testées ci-dessus.
+  assert.match(
+    main,
+    /automaticOrchestrationEnabled:\s*automaticOrchestrationEnabledByDefault\(/,
+  );
   assert.match(main, /testCommand: orchestrationTestCommandDraft\.trim\(\) \|\| "git diff --check"/);
   assert.match(main, /discussionForSession\(allDiscussions\(\), accountId, sessionId\)/);
   assert.match(main, /workerCount,/);
@@ -149,7 +221,7 @@ test("un chat normal route automatiquement ses demandes sans ancien bouton dans 
   assert.match(main, /launchAutomaticOrchestration/);
   const routingDecision = main.indexOf("const shouldLaunchAutomaticOrchestration");
   const launchReservation = main.indexOf("pane.automaticOrchestrationLaunching = true", routingDecision);
-  const sessionAttachment = main.indexOf("await attachCreatedExpertChat", routingDecision);
+  const sessionAttachment = main.indexOf("attached = await attachment", routingDecision);
   assert.ok(routingDecision >= 0 && launchReservation > routingDecision && sessionAttachment > launchReservation);
   assert.match(main, /text: automaticOrchestrationNotice\(automaticDecision\)/);
   assert.match(main, /else if \(automaticOrchestrationPending\) \{[\s\S]*?else if \(!chatTurnIsBusy\(snapshot\.status\)\)/);
@@ -185,13 +257,29 @@ test("desktop et serveur partagent le contrat API orchestré", () => {
   assert.match(server, /check_admin_header\(&state, &headers\)/);
 });
 
+test("le pilotage est asynchrone et concurrent pour les grandes équipes", () => {
+  assert.match(backend, /DRIVER_COUNT_ENV: &str = "CST_ORCHESTRATION_DRIVERS"/);
+  assert.match(backend, /DEFAULT_DRIVER_COUNT: usize = 4/);
+  assert.match(backend, /fn spawn_drivers/);
+  assert.match(backend, /fn driver_loop/);
+  assert.match(backend, /run_locks: Mutex<HashMap<String, Arc<Mutex<\(\)>>>>/);
+  assert.match(backend, /lock\.try_lock\(\)/);
+  assert.match(backend, /cst-orchestrated-chats-/);
+  assert.match(backend, /const MAX_WORKER_COUNT: u32 = 200/);
+  assert.match(backend, /MAX_MAX_CONCURRENCY: u32 = 200/);
+  assert.match(backend, /MAX_TASK_COUNT: u32 = 200/);
+});
+
 test("le moteur impose isolation, preuve, revue, test réel et publication prudente", () => {
   assert.match(backend, /worktree", "add", "--detach"/);
   assert.match(backend, /ORCHESTRATION_PLAN:/);
   assert.match(backend, /pub worker_count: u32/);
   assert.match(backend, /validate_worker_count/);
-  assert.match(backend, /exactement \{\} taches d'implementation/);
-  assert.match(backend, /validate_plan\(plan, run\.worker_count\)/);
+  assert.match(backend, /exactement cette cardinalite de taches/);
+  assert.match(backend, /validate_plan\(plan, run\)/);
+  assert.match(backend, /\[1, 2, 3, 4, 20, 100, 200\]/);
+  assert.match(backend, /clone", "--no-local", "--no-checkout", "--no-tags"/);
+  assert.match(chat, /ChatFilesystemScope::OrchestrationWorkspace/);
   assert.match(backend, /copy_discussion_between/);
   assert.match(backend, /export_transcript_for_account/);
   assert.match(backend, /handoff_pending/);

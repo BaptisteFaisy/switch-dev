@@ -14,6 +14,15 @@ export class TerminalInputBuffer {
     return chunks?.join("") ?? "";
   }
 
+  has(id: number) {
+    return (this.pending.get(id)?.length ?? 0) > 0;
+  }
+
+  /** Nombre total de caracteres en attente pour ce terminal (badge d'etat). */
+  size(id: number) {
+    return (this.pending.get(id) ?? []).reduce((total, chunk) => total + chunk.length, 0);
+  }
+
   move(from: number, to: number) {
     if (from === to) return;
     const source = this.pending.get(from);
@@ -27,6 +36,42 @@ export class TerminalInputBuffer {
     this.pending.delete(id);
   }
 }
+
+export type TerminalInputDelivery = "socket" | "buffer" | "post";
+
+export type TerminalReconnectPlan = {
+  attempt: number;
+  delayMs: number;
+};
+
+/**
+ * Les coupures du WebSocket ne prouvent pas que le PTY serveur est termine.
+ * La reconnexion reste donc permanente, avec un compteur et un delai plafonnes.
+ */
+export const terminalReconnectPlan = (previousAttempt: number): TerminalReconnectPlan => {
+  const safePrevious = Number.isFinite(previousAttempt)
+    ? Math.max(0, Math.trunc(previousAttempt))
+    : 0;
+  const attempt = Math.min(safePrevious + 1, 32);
+  return {
+    attempt,
+    delayMs: Math.min(10_000, 250 * 2 ** Math.min(attempt - 1, 6)),
+  };
+};
+
+export const terminalInputDelivery = (
+  socketState: "open" | "connecting" | "closed",
+  terminalStarting: boolean,
+  pendingInput: boolean,
+): TerminalInputDelivery => {
+  if (socketState === "open") return "socket";
+  // Avant que le serveur ait attribue l'identifiant definitif, le POST ne peut
+  // pas cibler le bon PTY. Une saisie deja tamponnee garde egalement son ordre.
+  if (terminalStarting || pendingInput) return "buffer";
+  // Pendant une simple reconnexion, REST reste disponible et evite de rendre
+  // le terminal muet jusqu'a l'ouverture du nouveau WebSocket.
+  return "post";
+};
 
 export const terminalTransportErrorMessage = (baseUrl: string, error: unknown) => {
   const raw = String(error);

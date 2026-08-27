@@ -1,0 +1,152 @@
+.tracking-dashboard {
+  display: grid;
+  grid-auto-rows: max-content;
+  align-content: start;
+  gap: 16px;
+  min-width: 0;
+  padding: clamp(16px, 2.4vw, 30px);
+  background: transparent;
+  font-family: var(--font-body);
+}
+
+.tracking-dashboard button,
+.tracking-dashboard input {
+  font-family: inherit;
+}
+
+.tracking-dashboard .tool-button {
+  border-radius: 999px;
+  font-family: var(--font-head);
+}
+
+.tracking-hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 24px;
+  align-items: end;
+  padding: 2px 2px 20px;
+  border-bottom: 1px solid var(--line);
+}
+
+.tracking-eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: #9b9b9b;
+  font: 650 10px var(--font-head);
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+}
+
+.tracking-eyebrow svg { width: 13px; height: 13px; color: #fff; }
+.tracking-hero h1 { margin: 9px 0 6px; color: #fff; font: 650 clamp(27px, 3vw, 38px)/1.05 var(--font-head); letter-spacing: -0.025em; }
+.tracking-hero p { max-width: 720px; margin: 0; color: var(--muted-2); font-size: 12px; line-height: 1.55; }
+.tracking-hero-actions { display: grid; gap: 10px; justify-items: end; }
+.tracking-hero-actions > span { display: none; }
+.tracking-hero-actions > span svg { width: 12px; height: 12px; }
+.tracking-hero-actions .tool-button { min-width: 138px; justify-content: center; }
+
+.tracking-error { display: flex; align-items: center; gap: 9px; padding: 11px 13px; border: 1px solid #383838; border-radius: 10px; color: #d6d6d6; background: #0b0b0b; font-size: 11px; }
+.tracking-error svg { width: 15px; height: 15px; }
+.tracking-error button { margin-left: auto; color: #fff; background: transparent; cursor: pointer; font: 650 10px var(--font-head); text-transform: uppercase; }
+
+.tracking-metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.tracking-metrics article { position: relative; display: grid; grid-template-columns: 34px minmax(0, 1fr); gap: 12px; min-height: 112px; padding: 17px; overflow: hidden; border: 1px solid var(--line); border-radius: 12px; background: #0b0b0b; }
+.tracking-metrics article::after { display: none; }
+.tracking-metrics article.is-accent { color: inherit; border-color: var(--line); background: #0b0b0b; box-shadow: none; }
+.tracking-metrics article > span { display: grid; width: 32px; height: 32px; place-items: center; border: 1px solid rgba(255, 255, 255, 0.13); border-radius: 50%; color: #ddd; background: rgba(255, 255, 255, 0.035); }
+.tracking-metrics article.is-accent > span { color: #ddd; border-color: rgba(255, 255, 255, 0.13); background: rgba(255, 255, 255, 0.035); }
+.tracking-metrics article > span svg { width: 14px; height: 14px; }
+.tracking-metrics article > div { display: grid; align-content: start; gap: 4px; min-width: 0; }
+.tracking-metrics small { color: #818181; font: 600 10px var(--font-head); letter-spacing: 0.08em; text-transform: uppercase; }
+.tracking-metrics .is-accent small { color: #818181; }
+.tracking-metrics strong { color: #fff; font: 660 clamp(25px, 2.5vw, 33px)/1.05 var(--font-head); font-variant-numeric: tabular-nums; }
+.tracking-metrics .is-accent strong { color: #fff; }
+.tracking-metrics em { color: #666; font: 10px var(--font-body); }
+.tracking-metrics .is-accent em { color: #666; }
+
+.tracking-content-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(250px, 290px); gap: 10px; min-width: 0; }
+.tracking-table-card, .tracking-rule-card { overflow: hidden; border: 1px solid var(--line); border-radius: 12px; background: #0b0b0b; box-shadow: none; }
+.tracking-table-card > header { display: flex; min-height: 62px; align-items: center; justify-content: space-between; gap: 12px; padding: 0 17px; border-bottom: 1px solid var(--line); }
+.tracking-table-card > header > div { display: grid; gap: 3px; }
+.tracking-table-card > header span { color: #6f6f6f; font: 650 9px var(--font-head); letter-spacing: 0.12em; text-transform: uppercase; }
+.tracking-table-card > header strong { color: #fff; font: 650 14px var(--font-head); }
+.tracking-table-card > header button, .tracking-row-actions button, .tracking-row-actions a { display: grid; width: 31px; height: 31px; place-items: center; border: 1px solid var(--line); border-radius: 9px; color: #999; background: #0b0b0b; cursor: pointer; }
+.tracking-table-card > header button:hover, .tracking-row-actions button:hover, .tracking-row-actions a:hover { color: #000; border-color: #fff; background: #fff; }
+.tracking-table-card > header svg, .tracking-row-actions svg { width: 13px; height: 13px; }
+.tracking-table-wrap { overflow-x: auto; }
+.tracking-table-card table { width: 100%; border-collapse: collapse; white-space: nowrap; }
+.tracking-table-card th { padding: 11px 12px; border-bottom: 1px solid var(--line); color: #6f6f6f; font: 650 8px var(--font-head); letter-spacing: 0.1em; text-align: left; text-transform: uppercase; }
+.tracking-table-card td { padding: 12px; border-bottom: 1px solid var(--line-soft); color: #d6d6d6; font-size: 10px; }
+.tracking-table-card tbody tr:last-child td { border-bottom: 0; }
+.tracking-table-card tbody tr:hover { background: rgba(255, 255, 255, 0.025); }
+.tracking-table-card td > strong { color: #fff; font: 650 11px var(--font-head); }
+.tracking-table-card td > small { margin-left: 7px; color: #686868; font: 9px var(--font-mono); }
+.tracking-table-card code { color: #bdbdbd; font: 9px var(--font-mono); }
+.tracking-user { display: flex; align-items: center; gap: 9px; }
+.tracking-user > span:last-child { display: grid; gap: 3px; }
+.tracking-user strong { color: #fff; font: 650 10px var(--font-head); }
+.tracking-user small { color: #707070; font-size: 8px; }
+.tracking-avatar { display: grid; width: 34px; height: 34px; flex: 0 0 auto; place-items: center; border: 1px solid #303030; border-radius: 50%; color: #fff; background: #111; font: 700 9px var(--font-head); }
+.tracking-day-pill { display: inline-flex; padding: 5px 9px; border: 1px solid #343434; border-radius: 999px; color: #fff; background: #121212; font: 650 9px var(--font-head); }
+.tracking-row-actions { display: flex; justify-content: flex-end; gap: 5px; }
+.tracking-row-actions button, .tracking-row-actions a { width: 28px; height: 28px; }
+.tracking-empty { display: grid; min-height: 215px; place-items: center; align-content: center; gap: 7px; color: #777; text-align: center; }
+.tracking-empty > span { display: grid; width: 42px; height: 42px; margin-bottom: 3px; place-items: center; border: 1px solid #333; border-radius: 50%; color: #fff; background: #101010; }
+.tracking-empty > span svg { width: 17px; height: 17px; }
+.tracking-empty strong { color: #fff; font: 650 12px var(--font-head); text-transform: uppercase; }
+.tracking-empty small { font-size: 10px; }
+.tracking-empty .tool-button { margin-top: 7px; }
+
+.tracking-rule-card { position: relative; min-height: 270px; padding: 22px; }
+.tracking-rule-card::after { display: none; }
+.tracking-rule-card > * { position: relative; z-index: 1; }
+.tracking-rule-number { display: none; }
+.tracking-rule-card h2 { margin: 14px 0 0; color: #fff; font: 650 21px/1.12 var(--font-head); text-transform: none; }
+.tracking-rule-card > p { max-width: 220px; margin: 14px 0 30px; color: #858585; font-size: 10px; line-height: 1.55; }
+.tracking-progress-head { display: flex; justify-content: space-between; gap: 9px; color: #777; font-size: 8px; }
+.tracking-progress-head strong { color: #fff; font: 9px var(--font-mono); }
+.tracking-progress { height: 4px; margin-top: 8px; overflow: hidden; border-radius: 999px; background: #282828; }
+.tracking-progress span { display: block; height: 100%; border-radius: inherit; background: #fff; box-shadow: none; transition: width 180ms ease; }
+.tracking-rule-card > button { display: flex; width: 100%; min-height: 40px; align-items: center; justify-content: center; gap: 8px; margin-top: 22px; padding: 0 14px; border: 1px solid #303030; border-radius: 999px; color: #d0d0d0; background: #111; cursor: pointer; font: 650 10px var(--font-head); letter-spacing: 0; text-transform: none; }
+.tracking-rule-card > button:hover { color: #000; border-color: #fff; background: #fff; }
+.tracking-rule-card > button svg { width: 13px; height: 13px; }
+
+.tracking-modal-backdrop { position: fixed; z-index: 90; inset: 0; display: grid; padding: 20px; place-items: center; background: rgba(0, 0, 0, 0.78); backdrop-filter: blur(8px); }
+.tracking-modal { position: relative; width: min(100%, 455px); padding: 28px; border: 1px solid #313131; border-radius: 16px; background: #0b0b0b; box-shadow: 0 24px 80px rgba(0, 0, 0, 0.58); }
+.tracking-modal h2 { margin: 12px 0 0; color: #fff; font: 660 22px/1 var(--font-head); text-transform: uppercase; }
+.tracking-modal > p { margin: 10px 0 22px; color: #858585; font-size: 10px; line-height: 1.55; }
+.tracking-modal-close { position: absolute; right: 15px; top: 14px; display: grid; width: 30px; height: 30px; place-items: center; border: 1px solid #303030; border-radius: 50%; color: #aaa; background: #0d0d0d; cursor: pointer; }
+.tracking-modal-close:hover { color: #000; background: #fff; }
+.tracking-modal-close svg { width: 14px; height: 14px; }
+.tracking-modal form { display: grid; gap: 14px; }
+.tracking-modal label { display: grid; gap: 7px; color: #aaa; font: 650 8px var(--font-head); letter-spacing: 0.09em; text-transform: uppercase; }
+.tracking-modal input { width: 100%; height: 42px; min-width: 0; padding: 0 12px; border: 1px solid #282828; border-radius: 10px; outline: none; color: #fff; background: #050505; font: 11px var(--font-body); text-transform: none; }
+.tracking-modal input:focus { border-color: #777; box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.06); }
+.tracking-modal form > .tool-button { min-height: 43px; justify-content: space-between; margin-top: 3px; }
+.tracking-form-error { padding: 9px 11px; border: 1px solid #3c3c3c; border-radius: 10px; color: #d0d0d0; background: #111; font-size: 9px; }
+.tracking-toast { position: fixed; z-index: 100; right: 24px; bottom: 24px; display: flex; align-items: center; gap: 8px; padding: 12px 16px; border: 1px solid #fff; border-radius: 999px; color: #000; background: #fff; box-shadow: none; font: 650 9px var(--font-head); letter-spacing: 0.02em; text-transform: none; }
+.tracking-toast svg { width: 13px; height: 13px; }
+.tracking-loading { min-height: 420px; place-items: center; align-content: center; color: #777; text-align: center; }
+.tracking-loading > span { display: grid; width: 48px; height: 48px; margin-bottom: 5px; place-items: center; border: 1px solid #303030; border-radius: 50%; color: #fff; }
+.tracking-loading > span svg { width: 19px; height: 19px; animation: tracking-spin 1s linear infinite; }
+.tracking-loading strong { color: #fff; font: 650 15px var(--font-head); }
+.tracking-loading small { font-size: 10px; }
+@keyframes tracking-spin { to { transform: rotate(360deg); } }
+
+@media (max-width: 900px) {
+  .tracking-content-grid { grid-template-columns: 1fr; }
+  .tracking-rule-card { min-height: 285px; }
+}
+
+@media (max-width: 720px) {
+  .tracking-dashboard { padding: 14px 10px 82px; }
+  .tracking-hero { grid-template-columns: 1fr; align-items: start; gap: 16px; }
+  .tracking-hero-actions { justify-items: stretch; }
+  .tracking-hero-actions > span { display: none; }
+  .tracking-metrics { grid-template-columns: 1fr; }
+  .tracking-metrics article { min-height: 104px; }
+  .tracking-table-card > header { padding-inline: 12px; }
+  .tracking-modal { padding: 26px 19px 21px; }
+  .tracking-toast { right: 14px; bottom: 76px; left: 14px; justify-content: center; }
+}

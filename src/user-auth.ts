@@ -47,6 +47,8 @@ let authGateError: string | null = null;
 let profileOpen = false;
 let profileError: string | null = null;
 let profileSuccess: string | null = null;
+let accountDeletionError: string | null = null;
+let accountDeletionBusy = false;
 
 const isRepairableConnectionError = (error: string | null) =>
   Boolean(error && /failed to fetch|networkerror|network request failed|fetch failed|load failed/i.test(error));
@@ -380,6 +382,12 @@ export const renderUserProfileModal = () => {
           <button type="button" class="tool-button" data-user-profile-close>Annuler</button>
           <button type="submit" class="tool-button primary"><i data-lucide="save"></i><span>Enregistrer</span></button>
         </div>
+        <section class="account-deletion-panel" aria-labelledby="accountDeletionTitle">
+          <h3 id="accountDeletionTitle">Supprimer mon compte</h3>
+          <p>Cette action supprime définitivement votre compte Duello, votre progression, vos copies, vos résultats, votre profil public et vos appareils associés. Les obligations légales éventuellement nécessaires sont conservées uniquement lorsque la loi l’impose.</p>
+          ${accountDeletionError ? `<div class="account-auth-message error" role="alert">${escapeHtml(accountDeletionError)}</div>` : ""}
+          <button type="button" id="deleteUserAccount" class="tool-button danger" ${accountDeletionBusy ? "disabled" : ""}><i data-lucide="trash-2"></i><span>${accountDeletionBusy ? "Suppression en cours…" : "Supprimer définitivement mon compte"}</span></button>
+        </section>
       </form>
       <div class="user-profile-services">
         ${renderMicrosoftConnectionSettings()}
@@ -401,6 +409,7 @@ export const closeUserProfileModal = () => {
   profileOpen = false;
   profileError = null;
   profileSuccess = null;
+  accountDeletionError = null;
 };
 
 export const bindUserAccountUi = (rerender: () => void) => {
@@ -428,6 +437,24 @@ export const bindUserAccountUi = (rerender: () => void) => {
       closeUserProfileModal();
       rerender();
     });
+  });
+
+  document.querySelector<HTMLButtonElement>("#deleteUserAccount")?.addEventListener("click", async () => {
+    if (!currentUser || accountDeletionBusy) return;
+    const confirmation = window.prompt('Pour confirmer, écrivez SUPPRIMER');
+    if (confirmation !== "SUPPRIMER") return;
+    accountDeletionBusy = true;
+    accountDeletionError = null;
+    rerender();
+    try {
+      await authApi<void>("/account", { method: "DELETE" });
+      currentUser = null;
+      window.location.reload();
+    } catch (error) {
+      accountDeletionError = error instanceof Error ? error.message : String(error);
+      accountDeletionBusy = false;
+      rerender();
+    }
   });
 
   document.querySelector<HTMLButtonElement>("#userLogout")?.addEventListener("click", async () => {

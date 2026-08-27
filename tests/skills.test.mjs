@@ -199,3 +199,56 @@ test("la vue Skills expose création, import, édition et suppression", () => {
   assert.match(viewStyle, /\.skill-editor-dialog::backdrop/);
   assert.match(viewStyle, /@media \(max-width: 700px\)[\s\S]*?\.skill-editor-grid/);
 });
+
+test("le skill TikTok suit les contrats Freebuff et MCP réellement exposés", () => {
+  const manifest = JSON.parse(readFileSync(
+    new URL("../public/skills/index.json", import.meta.url),
+    "utf8",
+  ));
+  const entry = manifest.skills.find(({ id }) => id === "switch-tiktok-assisted-navigation");
+  assert.ok(entry, "le skill doit être déclaré sous son identifiant stable");
+  assert.equal(entry.buttonLabel, "Utilisation humaine");
+  const assistedNavigationSource = readFileSync(
+    new URL("../src/tiktok-assisted-navigation.ts", import.meta.url),
+    "utf8",
+  );
+  assert.match(assistedNavigationSource, />Utilisation humaine<\/strong>/);
+  const content = readFileSync(
+    new URL(`../public/skills/${entry.file}`, import.meta.url),
+    "utf8",
+  );
+
+  assert.match(content, /^---\s*\nname: switch-tiktok-assisted-navigation\s*$/m);
+  assert.match(content, /CST_DEVICE_API_URL/);
+  assert.match(content, /CST_DEVICE_TOKEN/);
+  assert.match(content, /CST_DEVICE_HELPER=cst-device/);
+  assert.match(content, /CST_SERVER_BIN/);
+  assert.match(content, /exact path `\/api\/device-fleet`/);
+  assert.match(content, /no username, password, query, or fragment/);
+  assert.match(content, /cst-device list/);
+  assert.match(content, /cst-device action DEVICE_ID ACTION \[ARGS_JSON\] \[--confirm\]/);
+  assert.match(content, /cst-device status ACTION_ID/);
+  assert.match(content, /list_control_devices/);
+  assert.match(content, /control_device/);
+  assert.match(content, /get_control_device_action/);
+  for (const action of [
+    "info",
+    "screenshot",
+    "open_screen",
+    "tap",
+    "swipe",
+    "type_text",
+    "key_event",
+    "open_app",
+    "shell",
+  ]) {
+    assert.match(content, new RegExp(`\\b${action}\\b`));
+  }
+  assert.match(content, /this TikTok skill must never invoke it/);
+  assert.match(content, /Never choose content to like[\s\S]*autonomously/);
+  assert.match(content, /minimal in-memory action journal/);
+  assert.match(content, /opaque random alias/);
+  assert.doesNotMatch(content, /CST_USB_/);
+  assert.doesNotMatch(content, /\b(?:input-text|launch-app|open-screen|stop-app)\b/);
+  assert.doesNotMatch(content, /node\s+["']?\$env?:?CST_/i);
+});

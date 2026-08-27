@@ -37,8 +37,8 @@ test("iOS targets the VPS and migrates the former PC route once", async () => {
     read("ios/CodexTerminal/Info.plist"),
   ]);
 
-  assert.match(info, /https:\/\/cst-google-trial\.tail3a8bdf\.ts\.net/);
-  assert.match(controller, /fallbackBaseURL = "https:\/\/cst-google-trial\.tail3a8bdf\.ts\.net"/);
+  assert.match(info, /https:\/\/azure-duello\.tail3a8bdf\.ts\.net/);
+  assert.match(controller, /fallbackBaseURL = "https:\/\/azure-duello\.tail3a8bdf\.ts\.net"/);
   assert.match(controller, /legacyPCBaseURL = "https:\/\/pc-fixe-cst\.tail3a8bdf\.ts\.net"/);
   assert.match(controller, /vpsRouteMigrationKey/);
 });

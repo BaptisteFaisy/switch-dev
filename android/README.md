@@ -5,14 +5,46 @@ Terminal** servie par `cst-server` (via Tailscale, en HTTPS tailnet). Toute la
 logique metier reste dans le web (xterm.js + le SPA), tandis que la coque gere
 les integrations et la recuperation propres a Android.
 
+## Environnements Switch
+
+La copie sur le **SSD Samsung T7** et l'instance locale **pc-fixe** sont la
+version de **développement**. La version **stable / production** est celle
+hébergée sur le **VPS Microsoft Azure**. Les mots « stable », « production »
+et « prod » ne désignent jamais la copie SSD/locale.
+
+## Regle d'acces (securite)
+
+L'URL `https://pc-fixe-cst.tail3a8bdf.ts.net/` est reservee au **VPS Azure** :
+c'est le seul tiers autorise a s'y connecter. Aucun acces public ne doit etre
+ouvert sur cette instance (pas de Tailscale Funnel, pas de port publie sur
+Internet) ; un acces externe passe par le tailnet prive avec le VPS Azure comme
+seul tiers autorise.
+
 ## Ce que fait l'app
 
-- Charge par défaut le serveur du PC fixe à l'URL exacte
-  `https://pc-fixe-cst.tail3a8bdf.ts.net/?cst-chunk-build=ms65eccm-mcl3yt41`
+- Charge par défaut le serveur stable du VPS Microsoft Azure à l'URL
+  `https://azure-duello.tail3a8bdf.ts.net/?cst-chunk-build=azure-20260826`
   (`res/values/strings.xml` → `server_url` et `server_start_url`).
+- Lors de la première ouverture de cette version, une installation qui utilisait
+  encore l'ancienne cible par défaut `pc-fixe-cst…` est migrée vers Azure. Une
+  URL réellement personnalisée n'est pas remplacée.
 - Active JavaScript + DOM storage, cookies first-party et WebSocket `wss://`.
 - Clavier virtuel : `adjustResize` + `interactive-widget` → le terminal reste
   visible pendant la frappe.
+- **Coder dans les terminaux sur mobile** : un script injecté par la coque
+  (`assets/cst-mobile-terminal-helper.js`) ajoute une barre compacte sur une
+  seule ligne au-dessus du clavier virtuel dès qu'un terminal est affiché —
+  Échap, Tab, Ctrl/Alt one-shot (prochaine touche, désarmement automatique),
+  les quatre flèches, Ctrl+V (collage natif) et Ctrl+C. Un
+  toucher sur le terminal focalise le champ xterm et ouvre le clavier ; chaque
+  touche est envoyée directement au xterm ciblé via son événement `input`, sans
+  traverser les raccourcis globaux de l’interface ; un `KeyboardEvent`
+  synthétique sert seulement de repli avec un ancien WebView. La barre absorbe
+  aussi les gestes tactiles afin qu’un appui
+  ne puisse pas atteindre l’onglet Chats placé dessous. La barre se cache
+  automatiquement quand aucun terminal n'est visible ou qu'une modale est
+  ouverte, et le pont natif `showKeyboard` / `hideKeyboard` pilote le clavier
+  virtuel (chemin `WindowInsetsController` sur API 30+).
 - Android 16/API 36, zones systeme/encoches, tablettes, rotation et retour
   predictif pris en charge.
 - Bouton **Retour** = revenir dans l'historique de la WebView, puis quitter.

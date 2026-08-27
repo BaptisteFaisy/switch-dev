@@ -1,4 +1,5 @@
 export type OrchestrationStatus = "active" | "paused" | "completed" | "needs_attention";
+export type OrchestrationSourceKind = "git_clean" | "git_dirty" | "ephemeral";
 
 export type OrchestrationPhase =
   | "planning"
@@ -76,12 +77,20 @@ export type OrchestrationSnapshot = {
   objective: string;
   /** Nombre de travailleurs choisis, sans compter l'orchestrateur. */
   workerCount: number;
+  adaptiveFanout?: boolean;
+  maxTaskCount?: number;
+  minimumTaskCount?: number;
+  maxConcurrency?: number;
   /** `accountId` reste le repli des snapshots crees avant les affectations par role. */
   accountId: string;
   orchestratorAccountId?: string;
   workerAccountIds?: string[];
   orchestratorHandoffPending?: boolean;
   orchestratorHandoffCount?: number;
+  ownerId?: string | null;
+  sourceKind?: OrchestrationSourceKind;
+  requestedProjectDir?: string | null;
+  accessProjectDir?: string | null;
   projectDir: string;
   model: string | null;
   reasoningEffort: string | null;
@@ -119,10 +128,55 @@ export type OrchestrationAccountRole = "orchestrator" | "worker";
 
 export const AUTOMATIC_ORCHESTRATION_MARKER = "CST_AUTO_ORCHESTRATION:";
 
+export const DEFAULT_ORCHESTRATION_WORKER_COUNT = 3;
+
+/** Budget maximal d'agents autorisé à coder sur un même travail. */
+export const MAX_ORCHESTRATION_WORKER_COUNT = 200;
+
+export const normalizeOrchestrationWorkerCount = (value: number): number | null => {
+  if (!Number.isInteger(value) || value < 1 || value > MAX_ORCHESTRATION_WORKER_COUNT) return null;
+  if (value <= 4) return value;
+  if (value <= 20) return 20;
+  if (value <= 100) return 100;
+  return 200;
+};
+
+export const orchestrationWorkerCountFromEnv = (value: unknown): number => {
+  if (typeof value !== "string") return DEFAULT_ORCHESTRATION_WORKER_COUNT;
+  const normalized = value.trim();
+  if (!/^\d+$/.test(normalized)) return DEFAULT_ORCHESTRATION_WORKER_COUNT;
+  return normalizeOrchestrationWorkerCount(Number(normalized))
+    ?? DEFAULT_ORCHESTRATION_WORKER_COUNT;
+};
+
 export type AutomaticOrchestrationDecision = {
   workerCount: number;
   reason: string;
 };
+
+export type DefaultOrchestrationSurface = "classic-chat" | "freebuff-terminal";
+
+export type DefaultOrchestrationContext = {
+  surface: DefaultOrchestrationSurface;
+  orchestrationRole?: "orchestrator" | "worker" | null;
+  autonomousAgentId?: string | null;
+  /** Ancienne preference conservee uniquement pour tester/migrer les sessions. */
+  persistedEnabled?: boolean;
+};
+
+/**
+ * Tous les points d'entree utilisateur sont orchestrateurs par defaut.
+ *
+ * Un chat deja gere par une orchestration (orchestrateur ou worker) et un
+ * agent autonome restent exclus afin de ne jamais creer une equipe recursive.
+ * Freebuff n'expose qu'un terminal racine : son propre orchestrateur natif est
+ * donc toujours actif, meme si une ancienne preference de chat valait `false`.
+ */
+export const automaticOrchestrationEnabledByDefault = (
+  context: DefaultOrchestrationContext,
+): boolean =>
+  context.surface === "freebuff-terminal"
+  || (!context.orchestrationRole && !context.autonomousAgentId);
 
 /**
  * Lit uniquement la ligne de routage emise par le modele. Une mention du
@@ -146,8 +200,8 @@ export const parseAutomaticOrchestrationDecision = (
       reason?: unknown;
     };
     if (value?.decision !== "orchestrate") return null;
-    const workerCount = Number(value.workerCount);
-    if (!Number.isInteger(workerCount) || workerCount < 1 || workerCount > 12) return null;
+    const workerCount = normalizeOrchestrationWorkerCount(Number(value.workerCount));
+    if (workerCount === null) return null;
     return {
       workerCount,
       reason: typeof value.reason === "string" ? value.reason.trim().slice(0, 500) : "",
@@ -156,6 +210,14 @@ export const parseAutomaticOrchestrationDecision = (
     return null;
   }
 };
+
+export const orchestrationRequestedProjectDir = (
+  run: Pick<OrchestrationSnapshot, "projectDir" | "requestedProjectDir">,
+): string => run.requestedProjectDir?.trim() || run.projectDir;
+
+export const orchestrationMinimumTaskCount = (
+  run: Pick<OrchestrationSnapshot, "workerCount" | "minimumTaskCount">,
+): number => Math.max(1, run.minimumTaskCount ?? run.workerCount);
 
 export const automaticOrchestrationNotice = (
   decision: AutomaticOrchestrationDecision,

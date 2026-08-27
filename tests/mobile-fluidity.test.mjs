@@ -36,6 +36,18 @@ test("le patch de streaming ne remplace que le dernier tour", async () => {
   assert.match(main, /latest\.outerHTML = latestHtml/);
 });
 
+test("le rafraichissement de streaming compare les references avant de serialiser", async () => {
+  const main = await read("src/main.ts");
+  const start = main.indexOf("type ChatFeedSnapshot");
+  const end = main.indexOf("const patchChatFeedContent", start);
+  const implementation = main.slice(start, end);
+
+  assert.ok(start >= 0 && end > start);
+  assert.match(implementation, /const chatLatestContentStable/);
+  assert.match(implementation, /previous\.messages === model\.messages && previous\.latestParts === model\.parts/);
+  assert.doesNotMatch(implementation, /latestSignature: JSON\.stringify/);
+});
+
 test("le build produit des variantes Brotli et Gzip reutilisables", async () => {
   const root = await mkdtemp(join(tmpdir(), "cst-precompress-"));
   try {
@@ -97,4 +109,50 @@ test("le compositeur Android masque les outils et montre l'intensite du modele",
   );
   assert.match(view, /data-chat-control="reasoning-effort"/);
   assert.match(view, /option\.value === model\.selectedReasoningEffort/);
+});
+
+test("la vue terminal mobile reserve presque tout l'ecran au PTY", async () => {
+  const [css, main] = await Promise.all([
+    read("src/style.css"),
+    read("src/main.ts"),
+  ]);
+
+  assert.match(
+    main,
+    /classList\.toggle\(\s*"m-terminal-focus",\s*activeView === "terminal" && !!activeTerminal\(\),\s*\)/,
+  );
+  assert.match(main, /activeView === "terminal" \? "is-terminal" : ""/);
+  assert.match(
+    css,
+    /body\.m-terminal-focus \.m-topbar,[\s\S]*body\.m-terminal-focus \.m-bottomnav,[\s\S]*body\.m-terminal-focus \.autonomous-monitor-host,[\s\S]*\.chat-app-layout\.is-terminal \.folder-terminal-head,[\s\S]*\.chat-app-layout\.is-terminal \.folder-agent-summary[\s\S]*display: none !important;/,
+  );
+  assert.match(
+    css,
+    /\.chat-app-layout\.is-terminal \.expert-terminal-pane \{[\s\S]*grid-template-rows: 30px minmax\(0, 1fr\);/,
+  );
+  assert.match(
+    css,
+    /\.chat-app-layout\.is-terminal \.expert-terminal-pane:not\(\.active\),[\s\S]*\.expert-terminal-pane\.active ~ \.expert-terminal-empty \{\s*display: none;/,
+  );
+  assert.match(
+    css,
+    /\.chat-app-layout\.is-terminal \.expert-pane-identity,[\s\S]*\.chat-app-layout\.is-terminal \.expert-pane-status \{\s*display: none;/,
+  );
+  assert.match(
+    main,
+    /class="expert-pane-mobile-menu" data-toggle-chat-sidebar[^>]*aria-label="Afficher le menu de gauche"[^>]*aria-controls="chatAppSidebar"/,
+  );
+  assert.match(main, /class="expert-pane-mobile-menu-arrow" aria-hidden="true"/);
+  assert.match(
+    css,
+    /\.chat-app-layout\.is-terminal \.expert-pane-mobile-menu \{[\s\S]*display: inline-grid;[\s\S]*grid-column: 1;[\s\S]*background: #f5f5f5;[\s\S]*color: #090909;/,
+  );
+  assert.match(
+    css,
+    /\.chat-app-layout\.is-terminal \.expert-pane-mobile-menu-arrow \{[\s\S]*border-top: 3px solid currentColor;[\s\S]*border-right: 3px solid currentColor;[\s\S]*transform: rotate\(45deg\);/,
+  );
+  assert.match(
+    css,
+    /\.chat-app-layout\.is-terminal \.expert-pane-toggle-chat \{\s*display: none;/,
+  );
 });

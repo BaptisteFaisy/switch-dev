@@ -149,8 +149,20 @@ export const terminalsForFolder = <T extends FolderLinkedTerminal>(
 ): T[] => terminals.filter((terminal) => terminalBelongsToFolder(terminal, folderPath));
 
 export type DraftableChatPane = {
-  discussion?: { sessionId: string } | null;
+  discussion?: { accountId: string; sessionId: string } | null;
 };
+
+export type ListedChatDiscussionIdentity = {
+  accountId: string;
+  sessionId: string;
+};
+
+const listedChatDiscussionKey = (
+  discussion: ListedChatDiscussionIdentity,
+): string => JSON.stringify([
+  discussion.accountId.trim(),
+  discussion.sessionId.trim(),
+]);
 
 /**
  * Selectionne, parmi les chats ouverts d'un environnement, ceux qui ne sont pas
@@ -162,12 +174,12 @@ export type DraftableChatPane = {
  */
 export const draftEnvironmentChatPanes = <T extends DraftableChatPane>(
   environmentPanes: readonly T[],
-  listedSessionIds: Iterable<string>,
+  listedDiscussions: Iterable<ListedChatDiscussionIdentity>,
 ): T[] => {
-  const listed = new Set(listedSessionIds);
+  const listed = new Set(Array.from(listedDiscussions, listedChatDiscussionKey));
   return environmentPanes.filter((pane) => {
-    const sessionId = pane.discussion?.sessionId;
-    return !sessionId || !listed.has(sessionId);
+    const discussion = pane.discussion;
+    return !discussion || !listed.has(listedChatDiscussionKey(discussion));
   });
 };
 

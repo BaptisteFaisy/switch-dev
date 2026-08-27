@@ -42,6 +42,14 @@ test("la capacite est souple mais les noeuds non satures passent d'abord", () =>
   assert.equal(ranked[1].saturated, true);
 });
 
+test("une capacite nulle annonce un noeud sans plafond numerique", () => {
+  const [ranked] = rankRemoteAllocations([
+    { node: node("memoire-seule"), health: health({ capacity: 0, activeChatTurns: 40 }) },
+  ], "chat");
+
+  assert.equal(ranked.saturated, false);
+});
+
 test("le drain, la panne et l'absence explicite du compte excluent un noeud", () => {
   const ranked = rankRemoteAllocations([
     { node: node("drain"), health: health({ draining: true }) },

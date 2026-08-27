@@ -1,0 +1,268 @@
+# Ce workflow de production doit cibler exclusivement le Switch stable sur le
+# VPS Microsoft Azure, jamais la copie de developpement sur SSD/T7 ou pc-fixe.
+# Il est portable : changer de VPS = remplacer les secrets CST_DEPLOY_* (hote,
+# cle SSH, known_hosts, port, env) ; aucun chemin n'est hardcode.
+#
+# Depuis la Phase 2, la CI COMPILE et SIGNE (minisign) le binaire cst-server :
+# le noeud ne compile plus jamais sur l'hote. Un push qui ne touche pas
+# src-tauri/ est detecte comme "frontend seul" : seul dist/ est transfere et
+# bascule, sans compilation ni nouveau binaire.
+name: Deploy web continuously
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Les deploiements ne se chevauchent jamais. Annuler un deploiement au milieu
+# d'un drain pourrait laisser le noeud volontairement indisponible.
+concurrency:
+  group: cst-production-web
+  cancel-in-progress: false
+
+jobs:
+  # Signe-t-on les artefacts ? Si MINISIGN_SECRET_KEY est configure, la cle
+  # publique doit etre COMMITEE dans deploy/minisign.pub (non secrete).
+  # Sans secret : artefacts non signes, le noeud recoit --allow-unsigned
+  # (avertissement explicite) ; l'integrite SSH/SHA-256 reste assuree.
+  config:
+    runs-on: ubuntu-latest
+    outputs:
+      has_minisign: ${{ steps.c.outputs.has_minisign }}
+      allow_unsigned: ${{ steps.c.outputs.allow_unsigned }}
+      pubkey: ${{ steps.c.outputs.pubkey }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: c
+        env:
+          MK: ${{ secrets.MINISIGN_SECRET_KEY }}
+        run: |
+          if [ -n "$MK" ]; then
+            [ -f deploy/minisign.pub ] || {
+              echo "::error::Secret MINISIGN_SECRET_KEY configure mais deploy/minisign.pub (cle publique) manque : commite la cle RW... dans le repo."
+              exit 1
+            }
+            pubkey="$(grep -E '^RW' deploy/minisign.pub | head -1)"
+            [ -n "$pubkey" ] || {
+              echo "::error::deploy/minisign.pub ne contient pas de cle publique RW... valide."
+              exit 1
+            }
+            echo "has_minisign=true" >> "$GITHUB_OUTPUT"
+            echo "allow_unsigned=false" >> "$GITHUB_OUTPUT"
+            echo "pubkey=$pubkey" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::MINISIGN_SECRET_KEY absent : artefacts NON SIGNES, le noeud basculera avec --allow-unsigned."
+            echo "has_minisign=false" >> "$GITHUB_OUTPUT"
+            echo "allow_unsigned=true" >> "$GITHUB_OUTPUT"
+            echo "pubkey=" >> "$GITHUB_OUTPUT"
+          fi
+
+  deploy:
+    needs: config
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      DEPLOY_TARGET: ${{ secrets.CST_DEPLOY_TARGET }}
+      DEPLOY_SSH_KEY: ${{ secrets.CST_DEPLOY_SSH_KEY }}
+      DEPLOY_KNOWN_HOSTS: ${{ secrets.CST_DEPLOY_KNOWN_HOSTS }}
+      DEPLOY_PORT: ${{ vars.CST_DEPLOY_PORT || '22' }}
+      DEPLOY_ENV_FILE: ${{ secrets.CST_DEPLOY_ENV_FILE }}
+      MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+      MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Installer et tester le frontend
+        run: |
+          npm ci
+          npm run test:frontend
+
+      - name: Construire le site
+        env:
+          CST_GIT_COMMIT: ${{ github.sha }}
+        run: npm run build:frontend
+
+      - name: Detecter si le serveur Rust a change
+        id: src
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          if [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          elif git diff --quiet "$BEFORE" "${{ github.sha }}" -- src-tauri/ rust-toolchain.toml; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # cst-server depend de la lib (qui `use` tauri) -> les libs systeme GUI
+      # sont requises pour COMPILER meme le binaire serveur headless sur Linux.
+      - name: Dependances systeme (Linux)
+        if: steps.src.outputs.changed == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential file libssl-dev pkg-config patchelf \
+            libwebkit2gtk-4.1-dev librsvg2-dev libayatana-appindicator3-dev
+
+      # minisign est requis pour SIGNER (et, cote noeud, pour verifier) des que
+      # la signature est configuree, y compris pour un push frontend-only.
+      - name: Installer minisign (signature des artefacts)
+        if: needs.config.outputs.has_minisign == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y minisign
+
+      - name: Rust 1.88.0
+        if: steps.src.outputs.changed == 'true'
+        uses: dtolnay/rust-toolchain@1.88.0
+
+      - uses: Swatinem/rust-cache@v2
+        if: steps.src.outputs.changed == 'true'
+        with:
+          workspaces: src-tauri
+
+      - name: Compiler cst-server en CI (plus jamais sur l'hote)
+        if: steps.src.outputs.changed == 'true'
+        env:
+          CST_GIT_COMMIT: ${{ github.sha }}
+        run: cargo build --manifest-path src-tauri/Cargo.toml --release --bin cst-server
+
+      - name: Empaqueter l'artefact serveur (binaire + dist)
+        if: steps.src.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          stage="$(mktemp -d)"
+          install -m 0755 src-tauri/target/release/cst-server "$stage/cst-server"
+          cp -a dist "$stage/dist"
+          tar -C "$stage" -czf cst-server-linux-x86_64.tar.gz cst-server dist
+          sha256sum cst-server-linux-x86_64.tar.gz > cst-server-linux-x86_64.tar.gz.sha256
+
+      - name: Empaqueter l'artefact frontend (dist seul)
+        if: steps.src.outputs.changed == 'false'
+        run: |
+          set -euo pipefail
+          tar -czf cst-frontend.tar.gz dist
+          sha256sum cst-frontend.tar.gz > cst-frontend.tar.gz.sha256
+
+      - name: Signer les artefacts (minisign)
+        if: needs.config.outputs.has_minisign == 'true'
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$MINISIGN_SECRET_KEY" > minisign.key
+          for f in cst-server-linux-x86_64.tar.gz cst-frontend.tar.gz; do
+            [ -e "$f" ] || continue
+            printf '%s\n' "${MINISIGN_PASSWORD:-}" | \
+              minisign -S -s minisign.key -m "$f" -t "codex-switch-terminal ${{ github.sha }}"
+          done
+          rm -f minisign.key
+
+      - name: Preparer le paquet source (premier deploiement)
+        run: |
+          tar \
+            --exclude='src-tauri/target' \
+            --exclude='src-tauri/target-alt' \
+            -czf /tmp/cst-source.tar.gz \
+            dist src-tauri rust-toolchain.toml
+
+      - name: Configurer la connexion SSH
+        run: |
+          set -euo pipefail
+          [[ "$DEPLOY_TARGET" =~ ^[A-Za-z0-9._-]+@[A-Za-z0-9._:-]+$ ]] || {
+            echo "::error::Secret CST_DEPLOY_TARGET absent ou invalide (format user@host)."
+            exit 1
+          }
+          [[ "$DEPLOY_PORT" =~ ^[0-9]+$ ]] || {
+            echo "::error::Variable CST_DEPLOY_PORT invalide."
+            exit 1
+          }
+          [ -n "$DEPLOY_SSH_KEY" ] || {
+            echo "::error::Secret CST_DEPLOY_SSH_KEY absent."
+            exit 1
+          }
+          [ -n "$DEPLOY_KNOWN_HOSTS" ] || {
+            echo "::error::Secret CST_DEPLOY_KNOWN_HOSTS absent."
+            exit 1
+          }
+          install -d -m 0700 "$HOME/.ssh"
+          printf '%s\n' "$DEPLOY_SSH_KEY" > "$HOME/.ssh/cst_deploy"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 0600 "$HOME/.ssh/cst_deploy" "$HOME/.ssh/known_hosts"
+          if [ -n "$DEPLOY_ENV_FILE" ]; then
+            printf '%s\n' "$DEPLOY_ENV_FILE" > /tmp/codex-switch-terminal.env
+            chmod 0600 /tmp/codex-switch-terminal.env
+          fi
+
+      - name: Transferer et basculer la release
+        env:
+          COMMIT_SHA: ${{ github.sha }}
+          ALLOW_UNSIGNED: ${{ needs.config.outputs.allow_unsigned }}
+          MINISIGN_PUBKEY: ${{ needs.config.outputs.pubkey }}
+        run: |
+          set -euo pipefail
+          ssh_args=(-i "$HOME/.ssh/cst_deploy" -p "$DEPLOY_PORT" -o BatchMode=yes)
+          scp_args=(-i "$HOME/.ssh/cst_deploy" -P "$DEPLOY_PORT" -o BatchMode=yes)
+          files=(
+            /tmp/cst-source.tar.gz
+            deploy/update-node.sh
+            deploy/install-oracle-node.sh
+            deploy/codex-switch-terminal.service
+          )
+          if [ -f cst-server-linux-x86_64.tar.gz ]; then
+            files+=(cst-server-linux-x86_64.tar.gz cst-server-linux-x86_64.tar.gz.sha256)
+            [ -f cst-server-linux-x86_64.tar.gz.minisig ] && \
+              files+=(cst-server-linux-x86_64.tar.gz.minisig)
+          elif [ -f cst-frontend.tar.gz ]; then
+            files+=(cst-frontend.tar.gz cst-frontend.tar.gz.sha256)
+            [ -f cst-frontend.tar.gz.minisig ] && files+=(cst-frontend.tar.gz.minisig)
+          fi
+          if [ -f /tmp/codex-switch-terminal.env ]; then
+            files+=(/tmp/codex-switch-terminal.env)
+          fi
+          scp "${scp_args[@]}" "${files[@]}" "$DEPLOY_TARGET:/tmp/"
+          ssh "${ssh_args[@]}" "$DEPLOY_TARGET" \
+            "COMMIT_SHA='$COMMIT_SHA' ALLOW_UNSIGNED='$ALLOW_UNSIGNED' MINISIGN_PUBKEY='$MINISIGN_PUBKEY' bash -s" <<'REMOTE'
+          set -euo pipefail
+          trap 'rm -f /tmp/codex-switch-terminal.env' EXIT
+          SIGN_ARGS=""
+          if [ "$ALLOW_UNSIGNED" = "true" ]; then
+            SIGN_ARGS="--allow-unsigned"
+          elif [ -n "$MINISIGN_PUBKEY" ]; then
+            SIGN_ARGS="--minisign-pubkey $MINISIGN_PUBKEY"
+          fi
+          if systemctl list-unit-files 2>/dev/null | grep -q '^codex-switch-terminal.service' \
+             && [ -x /opt/codex-switch-terminal/current/cst-server ]; then
+            if [ -f /tmp/cst-server-linux-x86_64.tar.gz ]; then
+              sudo -n bash /tmp/update-node.sh \
+                --prebuilt /tmp/cst-server-linux-x86_64.tar.gz \
+                --commit "$COMMIT_SHA" $SIGN_ARGS
+            else
+              sudo -n bash /tmp/update-node.sh \
+                --frontend /tmp/cst-frontend.tar.gz \
+                --commit "$COMMIT_SHA" $SIGN_ARGS
+            fi
+          elif [ -f /tmp/codex-switch-terminal.env ]; then
+            sudo -n bash /tmp/install-oracle-node.sh \
+              --source /tmp/cst-source.tar.gz \
+              --env /tmp/codex-switch-terminal.env \
+              --service /tmp/codex-switch-terminal.service \
+              --commit "$COMMIT_SHA"
+          else
+            echo "Premier deploiement: configure le secret CST_DEPLOY_ENV_FILE." >&2
+            exit 4
+          fi
+          REMOTE
+
+      - name: Nettoyer les secrets temporaires
+        if: always()
+        run: |
+          rm -f "$HOME/.ssh/cst_deploy" /tmp/codex-switch-terminal.env

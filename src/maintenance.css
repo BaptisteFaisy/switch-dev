@@ -1,0 +1,33 @@
+.maintenance-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.maintenance-clean-button {
+  align-self: flex-start;
+}
+
+.maintenance-state-pending {
+  color: var(--cst-accent, #4da3ff);
+  font-weight: 600;
+  margin: 0;
+}
+
+.maintenance-alert {
+  border: 1px solid rgba(220, 80, 80, 0.45);
+  background: rgba(220, 80, 80, 0.12);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 0.85rem;
+}
+
+.maintenance-last-result {
+  margin: 0;
+  font-size: 0.85rem;
+  opacity: 0.9;
+}
+
+.maintenance-detail {
+  opacity: 0.75;
+}

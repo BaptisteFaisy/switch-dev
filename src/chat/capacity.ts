@@ -4,6 +4,26 @@ const normalizeCapacityError = (value: string): string =>
     .replace(/[\u0300-\u036f]/g, "")
     .toLowerCase();
 
+/** Delai avant de retenter une demande refusee par le garde-fou memoire. */
+export const CHAT_RESOURCE_RETRY_DELAY_MS = 5_000;
+
+/**
+ * Saturation du noeud local (distincte de la saturation d'un modele distant).
+ * Ces rejets ne doivent pas echouer le message : l'UI le conserve dans sa file.
+ */
+export const isNodeCapacityError = (
+  error: string | null | undefined,
+): boolean => {
+  if (!error?.trim()) return false;
+  const value = normalizeCapacityError(error);
+  return (
+    value.includes("capacite chats atteinte") ||
+    value.includes("cst node capacity reached") ||
+    value.includes("aucun noeud de chat disponible") ||
+    value.includes("memoire insuffisante")
+  );
+};
+
 /**
  * Reconnait uniquement une saturation du modele, pas un quota de compte ni la
  * capacite d'un noeud local. Le texte exact est celui actuellement emis par

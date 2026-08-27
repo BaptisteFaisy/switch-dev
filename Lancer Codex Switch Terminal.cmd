@@ -1,6 +1,8 @@
 @echo off
 setlocal EnableExtensions
 
+rem Switch sur SSD/T7 ou pc-fixe = developpement uniquement.
+rem La version stable/production est hebergee sur le VPS Microsoft Azure.
 set "APP_DIR=%~dp0"
 rem Toutes les copies du projet partagent les memes comptes et discussions.
 set "CST_DATA_DIR=%APPDATA%\codex-switch-terminal-server"
@@ -127,7 +129,7 @@ exit /b %ERRORLEVEL%
 
 :run_cloud
 set "CST_CLIENT_REMOTE=1"
-set "CST_CLIENT_BASE_URL=http://127.0.0.1:8080"
+set "CST_CLIENT_BASE_URL=http://127.0.0.1:18080"
 
 if exist "%RELEASE_EXE%" (
   start "Codex Switch Terminal Cloud" /D "%APP_DIR%" "%RELEASE_EXE%"

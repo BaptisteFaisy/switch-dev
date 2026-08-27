@@ -106,6 +106,15 @@ impl TaskTitleBuilder {
             .or(self.assistant_result.as_deref())
             .map(ToString::to_string)
             .or_else(|| self.user_prompt.as_deref().and_then(user_title_candidate))
+            // Les essais tres courts (par exemple "test") n'entrent pas dans
+            // l'analyse semantique, mais restent de vrais messages utilisateur.
+            // Ils doivent produire un titre plutot qu'une entree anonyme.
+            .or_else(|| {
+                self.user_prompt
+                    .as_deref()
+                    .map(finalize_title)
+                    .filter(|title| !title.is_empty())
+            })
     }
 }
 
@@ -118,7 +127,7 @@ struct SummaryCacheKey {
     provider: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct FileFingerprint {
     len: u64,
     modified_nanos: u128,
@@ -136,6 +145,12 @@ struct CachedDashboard {
     dashboard: DiscussionsDashboard,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct CachedDiscussionRevision {
+    checked_at: Instant,
+    revision: u64,
+}
+
 /// Duree pendant laquelle l'index OpenCode d'un compte est reutilise sans
 /// relancer la CLI.
 ///
@@ -149,6 +164,12 @@ struct CachedDashboard {
 /// l'empreinte ; les autres providers lisent des fichiers et ne sont pas
 /// concernes.
 const OPENCODE_SCAN_MIN_INTERVAL: Duration = Duration::from_secs(10);
+// Tous les appareils suivent le meme index. Sans cache partage, chaque
+// WebSocket enumerait tous les rollouts toutes les 750 ms et la charge se
+// multipliait avec le nombre d'onglets. Une revision vieille de moins d'une
+// seconde reste suffisamment fraiche pour l'interface et evite ces scans en
+// doublon.
+const DISCUSSION_REVISION_CACHE_TTL: Duration = Duration::from_millis(900);
 
 #[derive(Debug, Clone)]
 struct CachedOpenCodeScan {
@@ -158,6 +179,8 @@ struct CachedOpenCodeScan {
 
 static SUMMARY_CACHE: OnceLock<Mutex<HashMap<SummaryCacheKey, CachedSummary>>> = OnceLock::new();
 static DASHBOARD_CACHE: OnceLock<Mutex<Option<CachedDashboard>>> = OnceLock::new();
+static DISCUSSION_REVISION_CACHE: OnceLock<Mutex<Option<CachedDiscussionRevision>>> =
+    OnceLock::new();
 static OPENCODE_SCAN_CACHE: OnceLock<Mutex<HashMap<PathBuf, CachedOpenCodeScan>>> = OnceLock::new();
 static CUSTOM_TITLES_WRITE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 static CODEX_TOOL_HISTORY_REPAIR_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -168,6 +191,10 @@ fn summary_cache() -> &'static Mutex<HashMap<SummaryCacheKey, CachedSummary>> {
 
 fn dashboard_cache() -> &'static Mutex<Option<CachedDashboard>> {
     DASHBOARD_CACHE.get_or_init(|| Mutex::new(None))
+}
+
+fn discussion_revision_cache() -> &'static Mutex<Option<CachedDiscussionRevision>> {
+    DISCUSSION_REVISION_CACHE.get_or_init(|| Mutex::new(None))
 }
 
 fn opencode_scan_cache() -> &'static Mutex<HashMap<PathBuf, CachedOpenCodeScan>> {
@@ -198,6 +225,10 @@ pub struct DiscussionAccountGroup {
     pub provider: settings::Provider,
     pub codex_home: String,
     pub has_tokens: bool,
+    /// Freebuff uniquement : un terminal occupe deja le home de ce compte.
+    /// Cette valeur vit dans le dashboard des discussions afin que le selecteur
+    /// de reprise puisse afficher l'etat sans attendre la page des quotas.
+    pub session_busy: bool,
     pub discussion_count: u64,
     pub discussions: Vec<DiscussionSummary>,
     pub error: Option<String>,
@@ -214,6 +245,12 @@ pub struct DiscussionSummary {
     /// `payload.id` (== uuid du nom de fichier). C'est la cible deterministe de
     /// `codex resume <rollout_id>` et de la copie vers un autre compte.
     pub rollout_id: String,
+    /// Identifiant exact attendu par le CLI pour reprendre la conversation
+    /// lorsqu'il differe de l'identite logique exposee par Switch. Freebuff
+    /// attend le nom du dossier `chats/<id>` ; les autres providers utilisent
+    /// directement `rollout_id`/`session_id`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resume_id: Option<String>,
     /// Nombre de fichiers rollout regroupes sous ce `session_id` (1 = jamais
     /// repris ; N = N-1 reprises/forks). Sert d'indicateur dans l'UI.
     pub fork_count: u64,
@@ -303,6 +340,46 @@ pub fn list_discussions_dashboard() -> Result<DiscussionsDashboard, String> {
     Ok(dashboard_for_revision(&settings, revision))
 }
 
+/// Resout uniquement le cwd requis par le controle d'acces HTTP. Freebuff a
+/// une voie directe qui ne parse jamais les transcripts : supprimer un chat ne
+/// doit pas reconstruire tout le tableau de bord avant de pouvoir l'autoriser.
+/// Les autres providers conservent le dashboard partage et son cache existant.
+pub fn discussion_cwd_for_authorization(
+    account_id: &str,
+    session_id: &str,
+) -> Result<Option<String>, String> {
+    let settings = settings::load_settings_for_terminal()?;
+    let account = settings
+        .accounts
+        .iter()
+        .find(|account| account.id == account_id)
+        .cloned()
+        .ok_or_else(|| "Discussion introuvable".to_string())?;
+
+    if account.provider == settings::Provider::Freebuff {
+        if !valid_opencode_session_id(session_id) {
+            return Err("Discussion introuvable".to_string());
+        }
+        let home = expand_home(&account.codex_home)?;
+        let (_, chat) = resolve_freebuff_chat_dir(&home, &account, session_id)
+            .map_err(|_| "Discussion introuvable".to_string())?;
+        return Ok(freebuff_chat_cwd(&chat));
+    }
+
+    let revision = discussions_revision_for_settings(&settings);
+    dashboard_for_revision(&settings, revision)
+        .accounts
+        .iter()
+        .find(|group| group.account_id == account_id)
+        .and_then(|group| {
+            group.discussions.iter().find(|discussion| {
+                discussion.session_id == session_id || discussion.rollout_id == session_id
+            })
+        })
+        .map(|discussion| discussion.cwd.clone())
+        .ok_or_else(|| "Discussion introuvable".to_string())
+}
+
 /// Variante utilisee par le WebSocket, qui vient deja de calculer l'empreinte.
 /// Elle evite une seconde enumeration de tous les fichiers au meme tick.
 pub fn list_discussions_dashboard_at_revision(
@@ -338,8 +415,25 @@ fn dashboard_for_revision(settings: &AppSettings, revision: u64) -> DiscussionsD
 /// session sont haches. Une creation, suppression ou ecriture fait changer
 /// l'empreinte et declenche alors seulement un nouveau scan complet.
 pub fn discussions_revision() -> Result<u64, String> {
+    // Conserver le verrou pendant le scan est intentionnel : les ticks de
+    // plusieurs WebSockets arrivant ensemble partagent ainsi le resultat au
+    // lieu de lancer autant d'enumerations concurrentes.
+    let mut cache = discussion_revision_cache()
+        .lock()
+        .map_err(|_| "cache de revision des discussions indisponible".to_string())?;
+    if let Some(cached) = cache.as_ref() {
+        if cached.checked_at.elapsed() < DISCUSSION_REVISION_CACHE_TTL {
+            return Ok(cached.revision);
+        }
+    }
+
     let settings = settings::load_settings_for_terminal()?;
-    Ok(discussions_revision_for_settings(&settings))
+    let revision = discussions_revision_for_settings(&settings);
+    *cache = Some(CachedDiscussionRevision {
+        checked_at: Instant::now(),
+        revision,
+    });
+    Ok(revision)
 }
 
 fn discussions_revision_for_settings(settings: &AppSettings) -> u64 {
@@ -359,11 +453,21 @@ fn discussions_revision_for_settings(settings: &AppSettings) -> u64 {
                 continue;
             }
         };
+        if account.provider == settings::Provider::Freebuff {
+            crate::provider::freebuff_instance_busy(&home).hash(&mut hasher);
+        }
         let mut files = discussion_files(&home, account.provider);
         files.sort();
         files.len().hash(&mut hasher);
         for file in files {
             hash_file_revision(&file, &mut hasher);
+            if account.provider == settings::Provider::Freebuff {
+                // Le cwd et le titre Freebuff vivent hors du transcript. Leur
+                // petite empreinte doit invalider le dashboard sans forcer la
+                // relecture du gros `chat-messages.json` des autres chats.
+                hash_file_revision(&file.with_file_name("chat-meta.json"), &mut hasher);
+                hash_file_revision(&file.with_file_name("run-state.json"), &mut hasher);
+            }
         }
         hash_file_revision(&home.join(CUSTOM_TITLES_FILE), &mut hasher);
     }
@@ -414,6 +518,7 @@ fn discussion_files(home: &Path, provider: settings::Provider) -> Vec<PathBuf> {
             }
             files
         }
+        settings::Provider::Aihubmix => Vec::new(),
         settings::Provider::OpenCode => {
             let root = home.join("data").join("opencode");
             ["opencode.db", "opencode.db-wal", "opencode.db-shm"]
@@ -471,7 +576,16 @@ fn cached_file_summary(
     account: &AccountProfile,
     parser: fn(&Path, &AccountProfile) -> Option<DiscussionSummary>,
 ) -> Option<DiscussionSummary> {
-    let fingerprint = file_fingerprint(path)?;
+    cached_file_summary_with_fingerprint(path, account, parser, file_fingerprint)
+}
+
+fn cached_file_summary_with_fingerprint(
+    path: &Path,
+    account: &AccountProfile,
+    parser: fn(&Path, &AccountProfile) -> Option<DiscussionSummary>,
+    fingerprint_for: fn(&Path) -> Option<FileFingerprint>,
+) -> Option<DiscussionSummary> {
+    let fingerprint = fingerprint_for(path)?;
     let key = summary_cache_key(path, account);
     if let Ok(cache) = summary_cache().lock() {
         if let Some(cached) = cache
@@ -493,6 +607,36 @@ fn cached_file_summary(
         );
     }
     summary
+}
+
+/// Le resume Freebuff depend de trois fichiers. Inclure les petits fichiers
+/// auxiliaires dans l'empreinte evite de conserver un cwd ou un titre obsolete
+/// tout en permettant de ne plus reparcourir le volumineux transcript JSON a
+/// chaque rafraichissement du mur de chats.
+fn freebuff_summary_fingerprint(path: &Path) -> Option<FileFingerprint> {
+    let primary = file_fingerprint(path)?;
+    let mut hasher = DefaultHasher::new();
+    for candidate in [
+        path.to_path_buf(),
+        path.with_file_name("chat-meta.json"),
+        path.with_file_name("run-state.json"),
+    ] {
+        candidate.file_name().hash(&mut hasher);
+        file_fingerprint(&candidate).hash(&mut hasher);
+    }
+    Some(FileFingerprint {
+        len: primary.len,
+        modified_nanos: u128::from(hasher.finish()),
+    })
+}
+
+fn cached_freebuff_summary(path: &Path, account: &AccountProfile) -> Option<DiscussionSummary> {
+    cached_file_summary_with_fingerprint(
+        path,
+        account,
+        freebuff_discussion_summary,
+        freebuff_summary_fingerprint,
+    )
 }
 
 fn cached_rollout_path_for_id(account: &AccountProfile, id: &str) -> Option<PathBuf> {
@@ -580,6 +724,7 @@ fn scan_account(account: &AccountProfile, provider_command: &str) -> DiscussionA
                 provider: account.provider,
                 codex_home: account.codex_home.clone(),
                 has_tokens,
+                session_busy: false,
                 discussion_count: 0,
                 discussions: Vec::new(),
                 error: Some(error),
@@ -597,7 +742,10 @@ fn scan_account(account: &AccountProfile, provider_command: &str) -> DiscussionA
             }
         }
         settings::Provider::Freebuff => (scan_freebuff_discussions(&home, account), None),
+        settings::Provider::Aihubmix => (Vec::new(), None),
     };
+    let session_busy = account.provider == settings::Provider::Freebuff
+        && crate::provider::freebuff_instance_busy(&home);
     discussions.retain(|discussion| !discussion_summary_is_autonomous(discussion));
     apply_custom_titles(&home, &mut discussions);
 
@@ -615,6 +763,7 @@ fn scan_account(account: &AccountProfile, provider_command: &str) -> DiscussionA
         provider: account.provider,
         codex_home: account.codex_home.clone(),
         has_tokens,
+        session_busy,
         discussion_count,
         discussions,
         error,
@@ -688,7 +837,7 @@ pub fn rename_discussion_for_account(
         .cloned()
         .ok_or_else(|| "Compte introuvable".to_string())?;
     let valid_id = match account.provider {
-        settings::Provider::OpenCode | settings::Provider::Freebuff => {
+        settings::Provider::OpenCode | settings::Provider::Freebuff | settings::Provider::Aihubmix => {
             valid_opencode_session_id(&session_id)
         }
         settings::Provider::Codex | settings::Provider::Claude => is_uuid_shaped(&session_id),
@@ -864,6 +1013,7 @@ fn opencode_summaries_from_value(
             DiscussionSummary {
                 session_id: row.id.clone(),
                 rollout_id: row.id,
+                resume_id: None,
                 fork_count: 1,
                 provider: settings::Provider::OpenCode,
                 account_id: account.id.clone(),
@@ -1082,6 +1232,7 @@ fn scan_claude_session_file(path: &Path, account: &AccountProfile) -> Option<Dis
         // Claude reprend par identifiant de session (pas de fichier HEAD distinct
         // comme Codex) : rollout_id == session_id.
         rollout_id: session_id,
+        resume_id: None,
         fork_count: 1,
         provider: settings::Provider::Claude,
         account_id: account.id.clone(),
@@ -1166,6 +1317,82 @@ fn is_subagent_rollout(meta: &Value) -> bool {
             meta.pointer("/payload/parent_thread_id").and_then(Value::as_str),
             Some(parent) if !parent.is_empty()
         )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CodexRolloutMessageRole {
+    User,
+    Assistant,
+}
+
+struct CodexRolloutMessage {
+    role: CodexRolloutMessageRole,
+    text: String,
+    phase: Option<String>,
+}
+
+/// Extrait un message aussi bien des anciens `event_msg.user_message` /
+/// `agent_message` que du format Codex recent `response_item.message`.
+fn codex_rollout_message(value: &Value) -> Option<CodexRolloutMessage> {
+    let outer_type = value.get("type").and_then(Value::as_str).unwrap_or("");
+    let payload = value.get("payload")?;
+    let event_type = payload
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or(outer_type);
+    let phase = payload
+        .get("phase")
+        .and_then(Value::as_str)
+        .map(ToString::to_string);
+
+    let (role, text) = match event_type {
+        "user_message" => (
+            CodexRolloutMessageRole::User,
+            payload
+                .get("message")
+                .and_then(Value::as_str)?
+                .trim()
+                .to_string(),
+        ),
+        "agent_message" => (
+            CodexRolloutMessageRole::Assistant,
+            payload
+                .get("message")
+                .and_then(Value::as_str)?
+                .trim()
+                .to_string(),
+        ),
+        "message" if outer_type == "response_item" => {
+            let role = match payload.get("role").and_then(Value::as_str) {
+                Some("user") => CodexRolloutMessageRole::User,
+                Some("assistant") => CodexRolloutMessageRole::Assistant,
+                _ => return None,
+            };
+            let text = if role == CodexRolloutMessageRole::User {
+                let content = payload.get("content")?;
+                let fragments = match content {
+                    Value::Array(items) => items
+                        .iter()
+                        .filter_map(|item| transcript_value_text(Some(item)))
+                        .filter(|text| !is_synthetic_prompt(text))
+                        .collect::<Vec<_>>(),
+                    _ => transcript_value_text(Some(content))
+                        .filter(|text| !is_synthetic_prompt(text))
+                        .into_iter()
+                        .collect(),
+                };
+                fragments.join("\n\n")
+            } else {
+                transcript_value_text(payload.get("content"))?
+            };
+            (role, text.trim().to_string())
+        }
+        _ => return None,
+    };
+    if text.is_empty() {
+        return None;
+    }
+    Some(CodexRolloutMessage { role, text, phase })
 }
 
 /// Scan d'un rollout. La ligne 1 (`session_meta`) est volumineuse mais parsee
@@ -1253,36 +1480,6 @@ fn scan_discussion_file(path: &Path, account: &AccountProfile) -> Option<Discuss
             Err(_) => break,
         }
 
-        if line.contains("\"type\":\"user_message\"") {
-            message_count += 1;
-            if let Ok(value) = serde_json::from_str::<Value>(line.trim_end()) {
-                if let Some(message) = value.pointer("/payload/message").and_then(Value::as_str) {
-                    let msg = message.trim();
-                    if is_autonomous_prompt(msg) {
-                        autonomous = true;
-                    }
-                    // Le premier contenu utilisateur synthetique
-                    // (`<environment_context>...`) ne doit pas servir de titre.
-                    if !msg.is_empty() && !is_synthetic_prompt(msg) {
-                        title_builder.observe_user(msg);
-                    }
-                    if preview.is_none() && !msg.is_empty() && !is_synthetic_prompt(msg) {
-                        preview = Some(truncate_chars(msg, PREVIEW_MAX_CHARS));
-                    }
-                }
-            }
-        } else if line.contains("\"type\":\"agent_message\"") {
-            message_count += 1;
-            if let Ok(value) = serde_json::from_str::<Value>(line.trim_end()) {
-                if let Some(message) = value.pointer("/payload/message").and_then(Value::as_str) {
-                    title_builder.observe_assistant(
-                        message,
-                        value.pointer("/payload/phase").and_then(Value::as_str),
-                    );
-                }
-            }
-        }
-
         if line.contains("\"type\":\"token_count\"") {
             if let Ok(value) = serde_json::from_str::<Value>(line.trim_end()) {
                 if let Some(tokens) = value
@@ -1291,6 +1488,40 @@ fn scan_discussion_file(path: &Path, account: &AccountProfile) -> Option<Discuss
                 {
                     total_tokens = Some(tokens);
                 }
+            }
+            continue;
+        }
+        let legacy_message = line.contains("\"type\":\"user_message\"")
+            || line.contains("\"type\":\"agent_message\"");
+        let response_message =
+            line.contains("\"type\":\"response_item\"") && line.contains("\"type\":\"message\"");
+        if !legacy_message && !response_message {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(line.trim_end()) else {
+            continue;
+        };
+        let Some(message) = codex_rollout_message(&value) else {
+            continue;
+        };
+        message_count += 1;
+        match message.role {
+            CodexRolloutMessageRole::User => {
+                let msg = message.text.trim();
+                if is_autonomous_prompt(msg) {
+                    autonomous = true;
+                }
+                // Le premier contenu utilisateur synthetique
+                // (`<environment_context>...`) ne doit pas servir de titre.
+                if !is_synthetic_prompt(msg) {
+                    title_builder.observe_user(msg);
+                }
+                if preview.is_none() && !is_synthetic_prompt(msg) {
+                    preview = Some(truncate_chars(msg, PREVIEW_MAX_CHARS));
+                }
+            }
+            CodexRolloutMessageRole::Assistant => {
+                title_builder.observe_assistant(&message.text, message.phase.as_deref());
             }
         }
     }
@@ -1303,6 +1534,7 @@ fn scan_discussion_file(path: &Path, account: &AccountProfile) -> Option<Discuss
     Some(DiscussionSummary {
         session_id,
         rollout_id,
+        resume_id: None,
         fork_count: 1,
         provider: settings::Provider::Codex,
         account_id: account.id.clone(),
@@ -1519,10 +1751,6 @@ pub fn copy_discussion_between(
     source_account_id: String,
     target_account_id: String,
 ) -> Result<DiscussionSummary, String> {
-    if !is_uuid_shaped(&session_id) {
-        return Err("Identifiant de session invalide".to_string());
-    }
-
     let settings = settings::load_settings_for_terminal()?;
     let source = settings
         .accounts
@@ -1537,19 +1765,111 @@ pub fn copy_discussion_between(
         .cloned()
         .ok_or_else(|| "Compte cible introuvable".to_string())?;
 
-    // `copy_discussion` duplique FIDELEMENT le fichier de rollout Codex (reecrit
-    // l'uuid) : ce chemin n'a de sens que Codex -> Codex. Toute reprise
-    // inter-provider (ou impliquant Claude) passe par l'export de transcript +
-    // amorce (`export_discussion_transcript`), pas par une copie de fichier.
-    if source.provider != settings::Provider::Codex || target.provider != settings::Provider::Codex
-    {
-        return Err(
-            "Copie fidele reservee a Codex -> Codex. Pour continuer entre providers, utilisez la continuation par transcript (export_discussion_transcript)."
+    match (source.provider, target.provider) {
+        (settings::Provider::Codex, settings::Provider::Codex) => {
+            if !is_uuid_shaped(&session_id) {
+                return Err("Identifiant de session invalide".to_string());
+            }
+            copy_discussion(session_id, source, target)
+        }
+        (settings::Provider::Freebuff, settings::Provider::Freebuff) => {
+            copy_freebuff_discussion(&session_id, &source, &target)
+        }
+        _ => Err(
+            "Copie fidele disponible uniquement entre deux comptes du meme provider Codex ou Freebuff. Pour les autres continuations, utilisez l'export de transcript."
                 .to_string(),
-        );
+        ),
+    }
+}
+
+/// Copie un dossier sans suivre de lien symbolique. Une conversation Freebuff
+/// contient plusieurs fichiers coherents (`chat-messages.json`,
+/// `run-state.json`, `chat-meta.json`, et parfois des fichiers additionnels) :
+/// copier uniquement le transcript produirait une reprise partielle.
+fn copy_directory_tree(source: &Path, target: &Path) -> Result<(), String> {
+    fs::create_dir(target).map_err(|error| error.to_string())?;
+    let entries = fs::read_dir(source).map_err(|error| error.to_string())?;
+    for entry in entries {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let file_type = entry.file_type().map_err(|error| error.to_string())?;
+        if file_type.is_symlink() {
+            return Err(format!(
+                "Lien symbolique refuse dans la conversation Freebuff : {}",
+                entry.path().display()
+            ));
+        }
+        let destination = target.join(entry.file_name());
+        if file_type.is_dir() {
+            copy_directory_tree(&entry.path(), &destination)?;
+        } else if file_type.is_file() {
+            fs::copy(entry.path(), destination).map_err(|error| error.to_string())?;
+        } else {
+            return Err(format!(
+                "Fichier special refuse dans la conversation Freebuff : {}",
+                entry.path().display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Duplique une conversation Freebuff vers le home isole d'un autre compte.
+/// Le nom du projet et celui du chat sont conserves : `freebuff --cwd <cwd>
+/// --continue <chat>` retrouve ainsi exactement le dossier copie. L'ecriture
+/// passe par un dossier temporaire puis un renommage afin que l'indexeur ne
+/// voie jamais une conversation a moitie copiee.
+fn copy_freebuff_discussion(
+    session_id: &str,
+    source: &AccountProfile,
+    target: &AccountProfile,
+) -> Result<DiscussionSummary, String> {
+    let source_home = expand_home(&source.codex_home)?;
+    let target_home = expand_home(&target.codex_home)?;
+    let (_canonical_root, canonical_chat) =
+        resolve_freebuff_chat_dir(&source_home, source, session_id)?;
+
+    let chat_name = canonical_chat
+        .file_name()
+        .ok_or_else(|| "Nom de conversation Freebuff invalide".to_string())?;
+    let project_name = canonical_chat
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::file_name)
+        .ok_or_else(|| "Nom de projet Freebuff invalide".to_string())?;
+    let target_chats = target_home
+        .join(FREEBUFF_CHATS_DIR)
+        .join(project_name)
+        .join("chats");
+    fs::create_dir_all(&target_chats).map_err(|error| error.to_string())?;
+    let target_chat = target_chats.join(chat_name);
+    let target_messages = target_chat.join("chat-messages.json");
+
+    // Une seconde demande de copie reprend la copie deja presente. Elle peut
+    // avoir continue a evoluer sur le compte cible et ne doit jamais etre
+    // ecrasee par l'ancien etat de la source.
+    if target_chat.exists() {
+        return freebuff_discussion_summary(&target_messages, target).ok_or_else(|| {
+            "Une conversation Freebuff du meme identifiant existe deja sur le compte cible, mais elle est illisible"
+                .to_string()
+        });
     }
 
-    copy_discussion(session_id, source, target)
+    let temp_chat = target_chats.join(format!(
+        ".cst-copy-{}-{}",
+        chat_name.to_string_lossy(),
+        uuid::Uuid::new_v4()
+    ));
+    if let Err(error) = copy_directory_tree(&canonical_chat, &temp_chat) {
+        let _ = fs::remove_dir_all(&temp_chat);
+        return Err(error);
+    }
+    if let Err(error) = fs::rename(&temp_chat, &target_chat) {
+        let _ = fs::remove_dir_all(&temp_chat);
+        return Err(error.to_string());
+    }
+
+    freebuff_discussion_summary(&target_messages, target)
+        .ok_or_else(|| "La copie Freebuff ne contient aucun message reprenable".to_string())
 }
 
 fn copy_discussion(
@@ -1699,6 +2019,7 @@ fn copy_discussion(
         // `session_id` ET le `payload.id`) : session_id == rollout_id.
         session_id: new_id.clone(),
         rollout_id: new_id,
+        resume_id: None,
         fork_count: 1,
         provider: settings::Provider::Codex,
         account_id: target.id.clone(),
@@ -1779,8 +2100,8 @@ pub fn move_discussion_for_account(
         settings::Provider::OpenCode => {
             Err("Le deplacement des sessions OpenCode n'est pas encore pris en charge".to_string())
         }
-        settings::Provider::Freebuff => {
-            Err("Les sessions freebuff ne sont pas exposees par Switch".to_string())
+        settings::Provider::Freebuff | settings::Provider::Aihubmix => {
+            Err("Les sessions de ce fournisseur ne sont pas exposees par Switch".to_string())
         }
     }
 }
@@ -2015,7 +2336,7 @@ pub fn delete_discussion_for_account(
         .ok_or_else(|| "Compte introuvable".to_string())?;
 
     let valid_id = match account.provider {
-        settings::Provider::OpenCode | settings::Provider::Freebuff => {
+        settings::Provider::OpenCode | settings::Provider::Freebuff | settings::Provider::Aihubmix => {
             valid_opencode_session_id(&session_id)
         }
         settings::Provider::Codex | settings::Provider::Claude => is_uuid_shaped(&session_id),
@@ -2035,9 +2356,65 @@ pub fn delete_discussion_for_account(
             delete_opencode_discussion_impl(&settings, &account, &session_id, archive)
         }
         settings::Provider::Freebuff => {
-            Err("Les sessions freebuff ne sont pas exposees par Switch".to_string())
+            delete_freebuff_discussion_impl(&account, &session_id, archive)
         }
+        settings::Provider::Aihubmix => Err("Les sessions AIHubMix ne sont pas encore exposees par Switch".to_string()),
     }
+}
+
+/// Archive ou supprime une conversation Freebuff complete. Freebuff persiste
+/// une conversation sous forme de dossier (`chat-messages.json`, etat de
+/// reprise, metadonnees et artefacts) : ne retirer que le transcript laisserait
+/// une session partielle qui reapparaitrait au prochain scan.
+fn delete_freebuff_discussion_impl(
+    account: &AccountProfile,
+    session_id: &str,
+    archive: bool,
+) -> Result<DeleteDiscussionResult, String> {
+    let home = expand_home(&account.codex_home)?;
+    let (canonical_root, canonical_chat) = resolve_freebuff_chat_dir(&home, account, session_id)?;
+
+    let final_path = if archive {
+        let relative_chat = canonical_chat
+            .strip_prefix(&canonical_root)
+            .map_err(|error| error.to_string())?;
+        let mut destination = home
+            .join(".config/manicode/projects-archive")
+            .join(relative_chat);
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        }
+        if destination.exists() {
+            let name = destination
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("chat");
+            destination.set_file_name(format!("{name}-{}", uuid::Uuid::new_v4()));
+        }
+
+        if fs::rename(&canonical_chat, &destination).is_err() {
+            if let Err(error) = copy_directory_tree(&canonical_chat, &destination) {
+                let _ = fs::remove_dir_all(&destination);
+                return Err(error);
+            }
+            if let Err(error) = fs::remove_dir_all(&canonical_chat) {
+                return Err(format!(
+                    "Archive Freebuff copiee vers {}, mais la source n'a pas pu etre retiree : {error}",
+                    destination.display()
+                ));
+            }
+        }
+        destination
+    } else {
+        fs::remove_dir_all(&canonical_chat).map_err(|error| error.to_string())?;
+        canonical_chat
+    };
+
+    Ok(DeleteDiscussionResult {
+        archived: archive,
+        count: 1,
+        path: final_path.to_string_lossy().to_string(),
+    })
 }
 
 /// OpenCode sait supprimer une session mais ne fournit pas d'archive native.
@@ -2291,13 +2668,16 @@ fn repair_rollout_custom_tool_calls(path: &Path) -> Result<usize, String> {
         .map_err(|error| format!("Ouverture du rollout Codex impossible : {error}"))?;
     let mut calls = HashMap::<String, InterruptedCustomToolCall>::new();
     let mut outputs = HashSet::<String>::new();
+    let mut rollout_ordinals = Vec::<Option<u64>>::new();
 
     for (line_index, line) in BufReader::new(file).lines().enumerate() {
         let line =
             line.map_err(|error| format!("Lecture du rollout Codex impossible : {error}"))?;
         let Ok(value) = serde_json::from_str::<Value>(&line) else {
+            rollout_ordinals.push(None);
             continue;
         };
+        rollout_ordinals.push(value.get("ordinal").and_then(Value::as_u64));
         if value.get("type").and_then(Value::as_str) != Some("response_item") {
             continue;
         }
@@ -2338,7 +2718,13 @@ fn repair_rollout_custom_tool_calls(path: &Path) -> Result<usize, String> {
         }
     }
     let repaired_count = missing_by_line.values().map(Vec::len).sum::<usize>();
-    if repaired_count == 0 {
+    let paginated = rollout_ordinals.iter().any(Option::is_some);
+    let ordinals_need_repair = paginated
+        && rollout_ordinals
+            .iter()
+            .enumerate()
+            .any(|(line_index, ordinal)| *ordinal != Some(line_index as u64));
+    if repaired_count == 0 && !ordinals_need_repair {
         return Ok(0);
     }
 
@@ -2368,6 +2754,7 @@ fn repair_rollout_custom_tool_calls(path: &Path) -> Result<usize, String> {
         let mut writer = BufWriter::new(target);
         let mut buffer = String::new();
         let mut line_index = 0_usize;
+        let mut output_line_index = 0_usize;
 
         loop {
             buffer.clear();
@@ -2378,17 +2765,35 @@ fn repair_rollout_custom_tool_calls(path: &Path) -> Result<usize, String> {
                 break;
             }
             let had_newline = buffer.ends_with('\n');
-            writer
-                .write_all(buffer.as_bytes())
-                .map_err(|error| format!("Ecriture du rollout Codex impossible : {error}"))?;
+            if paginated {
+                let serialized = buffer.trim_end_matches(&['\r', '\n'][..]);
+                let mut value = serde_json::from_str::<Value>(serialized).map_err(|error| {
+                    format!("Lecture JSON du rollout Codex impossible : {error}")
+                })?;
+                let object = value.as_object_mut().ok_or_else(|| {
+                    "Enregistrement non-objet dans le rollout Codex pagine".to_string()
+                })?;
+                object.insert("ordinal".to_string(), Value::from(output_line_index as u64));
+                serde_json::to_writer(&mut writer, &value).map_err(|error| {
+                    format!("Serialisation du rollout Codex impossible : {error}")
+                })?;
+                writer
+                    .write_all(b"\n")
+                    .map_err(|error| format!("Ecriture du rollout Codex impossible : {error}"))?;
+            } else {
+                writer
+                    .write_all(buffer.as_bytes())
+                    .map_err(|error| format!("Ecriture du rollout Codex impossible : {error}"))?;
+            }
+            output_line_index = output_line_index.saturating_add(1);
             if let Some(calls) = missing_by_line.get(&line_index) {
-                if !had_newline {
+                if !paginated && !had_newline {
                     writer.write_all(b"\n").map_err(|error| {
                         format!("Ecriture du rollout Codex impossible : {error}")
                     })?;
                 }
                 for call in calls {
-                    let output = serde_json::json!({
+                    let mut output = serde_json::json!({
                         "timestamp": call.timestamp,
                         "type": "response_item",
                         "payload": {
@@ -2398,12 +2803,19 @@ fn repair_rollout_custom_tool_calls(path: &Path) -> Result<usize, String> {
                             "internal_chat_message_metadata_passthrough": call.metadata_passthrough,
                         }
                     });
+                    if paginated {
+                        output
+                            .as_object_mut()
+                            .expect("objet JSON synthetique")
+                            .insert("ordinal".to_string(), Value::from(output_line_index as u64));
+                    }
                     serde_json::to_writer(&mut writer, &output).map_err(|error| {
                         format!("Serialisation de la reparation Codex impossible : {error}")
                     })?;
                     writer.write_all(b"\n").map_err(|error| {
                         format!("Ecriture de la reparation Codex impossible : {error}")
                     })?;
+                    output_line_index = output_line_index.saturating_add(1);
                 }
             }
             line_index = line_index.saturating_add(1);
@@ -2532,6 +2944,80 @@ pub async fn export_discussion_transcript(
         .map_err(|error| error.to_string())?
 }
 
+/// Importe un transcript Codex dans un nouveau chat Freebuff natif.
+/// L'historique Codex source n'est jamais modifié.
+#[cfg_attr(feature = "desktop", tauri::command)]
+pub async fn import_codex_transcript_to_freebuff(
+    source_account_id: String,
+    session_id: String,
+    target_account_id: String,
+    folder_path: Option<String>,
+    transcript: String,
+) -> Result<DiscussionSummary, String> {
+    tokio::task::spawn_blocking(move || {
+        import_codex_transcript_between(
+            source_account_id,
+            session_id,
+            target_account_id,
+            folder_path,
+            transcript,
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+pub fn import_codex_transcript_between(
+    source_account_id: String,
+    session_id: String,
+    target_account_id: String,
+    folder_path: Option<String>,
+    transcript: String,
+) -> Result<DiscussionSummary, String> {
+    let settings = settings::load_settings_for_terminal()?;
+    let source = settings.accounts.iter().find(|a| a.id == source_account_id)
+        .ok_or_else(|| "Compte Codex source introuvable".to_string())?;
+    let target = settings.accounts.iter().find(|a| a.id == target_account_id)
+        .ok_or_else(|| "Compte Freebuff cible introuvable".to_string())?;
+    if source.provider != settings::Provider::Codex {
+        return Err("Le compte source n'est pas un compte Codex".to_string());
+    }
+    if target.provider != settings::Provider::Freebuff {
+        return Err("Le compte cible n'est pas un compte Freebuff".to_string());
+    }
+    if transcript.trim().is_empty() {
+        return Err("L'historique Codex est vide".to_string());
+    }
+    let home = settings::expand_home(&target.codex_home)?;
+    let project = folder_path.as_deref().unwrap_or(".");
+    let project_name = std::path::Path::new(project).file_name()
+        .and_then(|v| v.to_str()).filter(|v| !v.is_empty()).unwrap_or("import-codex");
+    let safe_project = project_name.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' }).collect::<String>();
+    let id = format!("codex-import-{}-{}", chrono::Utc::now().format("%Y%m%d-%H%M%S"), uuid::Uuid::new_v4().simple());
+    let dir = home.join(".config/manicode/projects").join(safe_project).join("chats").join(&id);
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let content = format!("[Historique Codex importé — session {}]\n\n{}", session_id, transcript);
+    let messages = serde_json::json!([
+        {"id": format!("divider-{}", id), "variant":"ai", "content":"", "blocks":[{"type":"mode-divider","mode":"LITE"}], "timestamp": chrono::Utc::now().format("%H:%M").to_string()},
+        {"id": format!("user-{}", id), "variant":"user", "content": content, "timestamp": chrono::Utc::now().format("%H:%M").to_string()}
+    ]);
+    let message_path = dir.join("chat-messages.json");
+    let bytes = serde_json::to_vec(&messages).map_err(|e| e.to_string())?;
+    std::fs::write(&message_path, &bytes).map_err(|e| e.to_string())?;
+    let first_prompt = format!("Historique Codex — {}", session_id);
+    let meta = serde_json::json!({"messageCount":2,"firstPrompt":first_prompt,"messagesSize":bytes.len(),"messagesMtimeMs":std::fs::metadata(&message_path).map_err(|e|e.to_string())?.modified().map_err(|e|e.to_string())?.duration_since(std::time::UNIX_EPOCH).map_err(|e|e.to_string())?.as_secs_f64()*1000.0});
+    std::fs::write(dir.join("chat-meta.json"), serde_json::to_vec_pretty(&meta).map_err(|e|e.to_string())?).map_err(|e| e.to_string())?;
+    let file_path = dir.join("chat-messages.json").to_string_lossy().to_string();
+    Ok(DiscussionSummary {
+        session_id: id.clone(), rollout_id: id.clone(), resume_id: Some(id.clone()), fork_count: 1,
+        provider: settings::Provider::Freebuff, account_id: target.id.clone(), account_label: target.label.clone(),
+        codex_home: target.codex_home.clone(), file_path, cwd: folder_path,
+        started_at: metrics::now_ts(), last_activity: metrics::now_ts(),
+        title: Some(first_prompt), preview: Some(content), message_count: 2,
+        total_tokens: None, cli_version: None,
+    })
+}
+
 /// Variante synchrone reutilisable hors du runtime Tauri (serveur SaaS).
 pub fn export_transcript_for_account(
     account_id: String,
@@ -2558,7 +3044,7 @@ fn collect_transcript_turns(
         settings::Provider::OpenCode => {
             extract_opencode_semantic_transcript(&load_opencode_export(account_id, session_id)?)
         }
-        settings::Provider::Freebuff => Vec::new(),
+        settings::Provider::Freebuff | settings::Provider::Aihubmix => Vec::new(),
     })
 }
 
@@ -2579,8 +3065,8 @@ fn discussion_source_for_account(
     let home = expand_home(&account.codex_home)?;
 
     let file = match account.provider {
-        settings::Provider::Freebuff => {
-            return Err("Les sessions freebuff ne sont pas exposees par Switch".to_string())
+        settings::Provider::Freebuff | settings::Provider::Aihubmix => {
+            return Err("Les sessions de ce fournisseur ne sont pas exposees par Switch".to_string())
         }
         settings::Provider::Codex => {
             if !is_uuid_shaped(session_id) {
@@ -2610,8 +3096,8 @@ fn discussion_source_for_account(
     Ok((account.provider, file))
 }
 
-/// Codex : `event_msg.user_message.message` (hors messages synthetiques) et
-/// `event_msg.agent_message.message`, dans l'ordre du fichier.
+/// Codex : messages historiques `event_msg` et messages recents
+/// `response_item.message`, dans l'ordre du fichier.
 fn extract_codex_transcript(path: &Path) -> Vec<TranscriptMessage> {
     let mut turns = Vec::new();
     let Ok(file) = fs::File::open(path) else {
@@ -2619,28 +3105,30 @@ fn extract_codex_transcript(path: &Path) -> Vec<TranscriptMessage> {
     };
     let reader = BufReader::new(file);
     for line in reader.lines().map_while(Result::ok) {
-        let is_user = line.contains("\"type\":\"user_message\"");
-        let is_agent = line.contains("\"type\":\"agent_message\"");
-        if !is_user && !is_agent {
-            continue;
-        }
         let Ok(value) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
-        let Some(message) = value.pointer("/payload/message").and_then(Value::as_str) else {
+        let Some(message) = codex_rollout_message(&value) else {
             continue;
         };
-        let msg = message.trim();
-        if msg.is_empty() {
-            continue;
-        }
-        if is_user {
-            if is_synthetic_prompt(msg) {
-                continue;
+        match message.role {
+            CodexRolloutMessageRole::User => {
+                if is_synthetic_prompt(&message.text) {
+                    continue;
+                }
+                turns.push(transcript_message(
+                    TranscriptRole::User,
+                    &message.text,
+                    &value,
+                ));
             }
-            turns.push(transcript_message(TranscriptRole::User, msg, &value));
-        } else {
-            turns.push(transcript_message(TranscriptRole::Assistant, msg, &value));
+            CodexRolloutMessageRole::Assistant => {
+                turns.push(transcript_message(
+                    TranscriptRole::Assistant,
+                    &message.text,
+                    &value,
+                ));
+            }
         }
     }
     turns
@@ -2837,7 +3325,7 @@ pub fn transcript_for_account(
             extract_opencode_display_transcript(&load_opencode_export(&account_id, &session_id)?),
             None,
         ),
-        settings::Provider::Freebuff => (Vec::new(), None),
+        settings::Provider::Freebuff | settings::Provider::Aihubmix => (Vec::new(), None),
     };
     Ok(DiscussionTranscript {
         session_id,
@@ -3038,6 +3526,28 @@ fn extract_codex_display_transcript_with_context(
                     subtitle: None,
                     detail: None,
                     output: None,
+                });
+            }
+            "message" if payload.get("role").and_then(Value::as_str) == Some("user") => {
+                flush_assistant(
+                    &mut messages,
+                    &mut parts,
+                    &mut fallback_texts,
+                    &mut final_text,
+                    &mut last_timestamp,
+                    &mut part_sequence,
+                );
+                let Some(message) = codex_rollout_message(&value) else {
+                    continue;
+                };
+                if is_synthetic_prompt(&message.text) {
+                    continue;
+                }
+                messages.push(TranscriptMessage {
+                    role: TranscriptRole::User,
+                    text: message.text,
+                    timestamp,
+                    parts: Vec::new(),
                 });
             }
             "message" if payload.get("role").and_then(Value::as_str) == Some("assistant") => {
@@ -3546,10 +4056,17 @@ pub struct PromptHistory {
 
 #[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn list_prompt_history(limit: Option<usize>) -> Result<PromptHistory, String> {
-    let settings = settings::load_settings_for_terminal()?;
-    tokio::task::spawn_blocking(move || build_prompt_history(&settings, limit))
+    tokio::task::spawn_blocking(move || list_prompt_history_dashboard(limit))
         .await
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?
+}
+
+/// Variante synchrone reutilisable par le serveur web. Sans elle, le frontend
+/// distant etait contraint de renvoyer un historique vide alors que le scanner
+/// multi-provider (dont freebuff) existe deja dans ce module.
+pub fn list_prompt_history_dashboard(limit: Option<usize>) -> Result<PromptHistory, String> {
+    let settings = settings::load_settings_for_terminal()?;
+    Ok(build_prompt_history(&settings, limit))
 }
 
 fn build_prompt_history(settings: &AppSettings, limit: Option<usize>) -> PromptHistory {
@@ -3656,6 +4173,75 @@ fn collect_freebuff_chat_files(home: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
+/// Retrouve une conversation sans lire le contenu d'aucun transcript. Le
+/// cache rend le cas normal quasi constant ; l'enumeration des noms de dossiers
+/// ne sert que de repli apres un redemarrage ou pour une requete directe.
+fn find_freebuff_chat_file(
+    home: &Path,
+    account: &AccountProfile,
+    session_id: &str,
+) -> Option<PathBuf> {
+    if let Some(path) = cached_rollout_path_for_id(account, session_id)
+        .filter(|path| freebuff_discussion_session_id(path) == session_id)
+    {
+        return Some(path);
+    }
+
+    let projects = fs::read_dir(home.join(FREEBUFF_CHATS_DIR)).ok()?;
+    for project in projects.flatten() {
+        if !project.path().is_dir() {
+            continue;
+        }
+        let Ok(chats) = fs::read_dir(project.path().join("chats")) else {
+            continue;
+        };
+        for chat in chats.flatten() {
+            let messages = chat.path().join("chat-messages.json");
+            if messages.is_file() && freebuff_discussion_session_id(&messages) == session_id {
+                return Some(messages);
+            }
+        }
+    }
+    None
+}
+
+/// Resout et borne le dossier natif au home du compte avant toute copie ou
+/// suppression. Cette voie ciblee remplace l'ancien scan materialise de tout
+/// l'historique Freebuff.
+fn resolve_freebuff_chat_dir(
+    home: &Path,
+    account: &AccountProfile,
+    session_id: &str,
+) -> Result<(PathBuf, PathBuf), String> {
+    let root = home
+        .join(FREEBUFF_CHATS_DIR)
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    let messages = find_freebuff_chat_file(home, account, session_id)
+        .ok_or_else(|| "Conversation Freebuff introuvable".to_string())?;
+    let chat = messages
+        .parent()
+        .ok_or_else(|| "Dossier de conversation Freebuff invalide".to_string())?
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    if chat == root || !chat.starts_with(&root) {
+        return Err("Conversation Freebuff hors du home du compte".to_string());
+    }
+    Ok((root, chat))
+}
+
+fn freebuff_chat_cwd(chat_dir: &Path) -> Option<String> {
+    fs::read_to_string(chat_dir.join("run-state.json"))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .and_then(|state| {
+            state
+                .pointer("/sessionState/fileContext/projectRoot")
+                .and_then(Value::as_str)
+                .map(ToString::to_string)
+        })
+}
+
 /// Identite stable d'une session freebuff : `<projet>/<horodatage>`, pour
 /// distinguer deux sessions ouvertes a la meme seconde sous deux projets.
 fn freebuff_session_id(path: &Path) -> String {
@@ -3724,15 +4310,7 @@ fn scan_freebuff_chat_file(path: &Path, account: &AccountProfile, out: &mut Vec<
     let started_at = freebuff_session_started_at(chat_dir);
     let file_path = path.to_string_lossy().to_string();
 
-    let cwd = fs::read_to_string(chat_dir.join("run-state.json"))
-        .ok()
-        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
-        .and_then(|state| {
-            state
-                .pointer("/sessionState/fileContext/projectRoot")
-                .and_then(Value::as_str)
-                .map(ToString::to_string)
-        });
+    let cwd = freebuff_chat_cwd(chat_dir);
 
     let session_title = fs::read_to_string(chat_dir.join("chat-meta.json"))
         .ok()
@@ -3779,7 +4357,7 @@ fn scan_freebuff_discussions(home: &Path, account: &AccountProfile) -> Vec<Discu
     collect_freebuff_chat_files(home, &mut files);
     files
         .iter()
-        .filter_map(|file| freebuff_discussion_summary(file, account))
+        .filter_map(|file| cached_freebuff_summary(file, account))
         .collect()
 }
 
@@ -3843,7 +4421,10 @@ fn freebuff_discussion_summary(path: &Path, account: &AccountProfile) -> Option<
         if !is_user {
             continue;
         }
-        let text = message.get("content").and_then(Value::as_str).map(str::trim);
+        let text = message
+            .get("content")
+            .and_then(Value::as_str)
+            .map(str::trim);
         let text = text.filter(|text| !text.is_empty());
         if let Some(text) = text {
             user_count += 1;
@@ -3858,15 +4439,7 @@ fn freebuff_discussion_summary(path: &Path, account: &AccountProfile) -> Option<
         return None;
     }
 
-    let cwd = fs::read_to_string(chat_dir.join("run-state.json"))
-        .ok()
-        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
-        .and_then(|state| {
-            state
-                .pointer("/sessionState/fileContext/projectRoot")
-                .and_then(Value::as_str)
-                .map(ToString::to_string)
-        });
+    let cwd = freebuff_chat_cwd(chat_dir);
 
     let meta = fs::read_to_string(chat_dir.join("chat-meta.json"))
         .ok()
@@ -3902,6 +4475,10 @@ fn freebuff_discussion_summary(path: &Path, account: &AccountProfile) -> Option<
         // Freebuff ne distingue pas de HEAD de rollout (pas de forks Codex) :
         // l'identite de reprise est la session elle-meme.
         rollout_id: session_id,
+        resume_id: chat_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(ToString::to_string),
         fork_count: 1,
         provider: settings::Provider::Freebuff,
         account_id: account.id.clone(),
@@ -3925,7 +4502,9 @@ fn freebuff_discussion_summary(path: &Path, account: &AccountProfile) -> Option<
 /// prefixe '<' car de vraies demandes commencent par '<' (HTML/JSX colle,
 /// generiques TS `<T>`, comparaisons `<= 5`, ...).
 /// Prefixes d'un message de role `user` qui n'est PAS une demande de
-/// l'utilisateur. Codex injecte `<environment_context>` / `<user_instructions>`.
+/// l'utilisateur. Codex injecte `<environment_context>`,
+/// `<user_instructions>` et le contexte de disponibilite des plugins. Il peut
+/// aussi emettre les instructions AGENTS.md dans une enveloppe separee.
 /// Claude Code ecrit en plus, sous ce meme role, le chargement d'une competence
 /// (« Base directory for this skill: » suivi de tout le corps du SKILL.md), ses
 /// rappels systeme, l'expansion d'une commande slash et la sortie des hooks.
@@ -3935,6 +4514,7 @@ fn freebuff_discussion_summary(path: &Path, account: &AccountProfile) -> Option<
 const SYNTHETIC_PROMPT_PREFIXES: &[&str] = &[
     "<environment_context>",
     "<user_instructions>",
+    "<recommended_plugins>",
     "Base directory for this skill:",
     "<system-reminder>",
     "<command-name>",
@@ -3949,9 +4529,18 @@ const SYNTHETIC_PROMPT_PREFIXES: &[&str] = &[
 
 pub(crate) fn is_synthetic_prompt(msg: &str) -> bool {
     let msg = msg.trim_start();
-    SYNTHETIC_PROMPT_PREFIXES
+    if SYNTHETIC_PROMPT_PREFIXES
         .iter()
         .any(|prefix| msg.starts_with(prefix))
+    {
+        return true;
+    }
+
+    let first_line = msg.lines().next().unwrap_or_default().trim();
+    let agents_heading = first_line.strip_prefix("# ").unwrap_or(first_line);
+    (agents_heading == "AGENTS.md instructions"
+        || agents_heading.starts_with("AGENTS.md instructions for "))
+        && msg.lines().any(|line| line.trim() == "<INSTRUCTIONS>")
 }
 
 /// Claude Code marque ses lignes injectees avec `isMeta`. C'est le signal le
@@ -4075,28 +4664,24 @@ fn scan_prompt_file(path: &Path, account: &AccountProfile, out: &mut Vec<PromptE
             Err(_) => break,
         }
 
-        if line.contains("\"type\":\"agent_message\"") {
-            if let Ok(value) = serde_json::from_str::<Value>(line.trim_end()) {
-                if let Some(message) = value.pointer("/payload/message").and_then(Value::as_str) {
-                    title_builder.observe_assistant(
-                        message,
-                        value.pointer("/payload/phase").and_then(Value::as_str),
-                    );
-                }
-            }
+        let legacy_message = line.contains("\"type\":\"user_message\"")
+            || line.contains("\"type\":\"agent_message\"");
+        let response_message =
+            line.contains("\"type\":\"response_item\"") && line.contains("\"type\":\"message\"");
+        if !legacy_message && !response_message {
             continue;
         }
-        if !line.contains("\"type\":\"user_message\"") {
-            continue;
-        }
-
         let Ok(value) = serde_json::from_str::<Value>(line.trim_end()) else {
             continue;
         };
-        let Some(message) = value.pointer("/payload/message").and_then(Value::as_str) else {
+        let Some(message) = codex_rollout_message(&value) else {
             continue;
         };
-        let msg = message.trim();
+        if message.role == CodexRolloutMessageRole::Assistant {
+            title_builder.observe_assistant(&message.text, message.phase.as_deref());
+            continue;
+        }
+        let msg = message.text.trim();
         if is_autonomous_prompt(msg) {
             out.truncate(start_index);
             return;
@@ -4694,6 +5279,155 @@ mod tests {
         let _ = fs::remove_dir_all(home);
     }
 
+    #[test]
+    fn codex_resume_keeps_paginated_rollout_ordinals_contiguous() {
+        let home = fresh_dir();
+        let session_id = "019f5701-fb46-7503-9abb-004a5316894c";
+        let directory = home.join("sessions/2026/08/18");
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join(format!("rollout-2026-08-18T15-18-09-{session_id}.jsonl"));
+        let lines = [
+            serde_json::json!({
+                "timestamp": "2026-08-18T15:18:00Z",
+                "type": "session_meta",
+                "payload": {"session_id": session_id, "id": session_id},
+                "ordinal": 0
+            }),
+            serde_json::json!({
+                "timestamp": "2026-08-18T15:18:09Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call",
+                    "call_id": "missing-call",
+                    "name": "exec",
+                    "status": "completed",
+                    "input": "sleep 30"
+                },
+                "ordinal": 1
+            }),
+            serde_json::json!({
+                "timestamp": "2026-08-18T15:18:10Z",
+                "type": "event_msg",
+                "payload": {"type": "task_complete"},
+                "ordinal": 2
+            }),
+        ];
+        fs::write(
+            &path,
+            lines
+                .iter()
+                .map(Value::to_string)
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            repair_interrupted_codex_tool_calls(&home, session_id).unwrap(),
+            1
+        );
+        let values = fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            values
+                .iter()
+                .filter_map(|value| value.get("ordinal").and_then(Value::as_u64))
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2, 3]
+        );
+        assert_eq!(
+            values[2].pointer("/payload/type").and_then(Value::as_str),
+            Some("custom_tool_call_output")
+        );
+        assert_eq!(
+            values[3].pointer("/payload/type").and_then(Value::as_str),
+            Some("task_complete")
+        );
+        assert_eq!(
+            repair_interrupted_codex_tool_calls(&home, session_id).unwrap(),
+            0
+        );
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn codex_resume_repairs_a_missing_final_ordinal_without_adding_an_output() {
+        let home = fresh_dir();
+        let session_id = "019f5701-fb46-7503-9abb-004a5316894d";
+        let directory = home.join("sessions/2026/08/18");
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join(format!("rollout-2026-08-18T15-18-09-{session_id}.jsonl"));
+        let lines = [
+            serde_json::json!({
+                "timestamp": "2026-08-18T15:18:00Z",
+                "type": "session_meta",
+                "payload": {"session_id": session_id, "id": session_id},
+                "ordinal": 0
+            }),
+            serde_json::json!({
+                "timestamp": "2026-08-18T15:18:09Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call",
+                    "call_id": "complete-call",
+                    "name": "exec",
+                    "status": "completed",
+                    "input": "pwd"
+                },
+                "ordinal": 1
+            }),
+            serde_json::json!({
+                "timestamp": "2026-08-18T15:18:10Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call_output",
+                    "call_id": "complete-call",
+                    "output": "ok"
+                }
+            }),
+        ];
+        fs::write(
+            &path,
+            lines
+                .iter()
+                .map(Value::to_string)
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            repair_interrupted_codex_tool_calls(&home, session_id).unwrap(),
+            0
+        );
+        let values = fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            values
+                .iter()
+                .filter_map(|value| value.get("ordinal").and_then(Value::as_u64))
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+        assert_eq!(
+            fs::read_dir(&directory)
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_name().to_string_lossy().ends_with(".bak"))
+                .count(),
+            1
+        );
+        let _ = fs::remove_dir_all(home);
+    }
+
     fn local_secs(ts: &str) -> i64 {
         chrono::NaiveDateTime::parse_from_str(ts, "%Y-%m-%dT%H-%M-%S")
             .unwrap()
@@ -4710,6 +5444,7 @@ mod tests {
             created_at: None,
             provider: settings::Provider::Codex,
             inference_provider: None,
+            api_key: None,
             codex_home: home.to_string_lossy().to_string(),
             project_dir: None,
             proxy_id: None,
@@ -4719,6 +5454,7 @@ mod tests {
             model: None,
             reasoning_effort: None,
             fast_mode: false,
+            completed_on: None,
         }
     }
 
@@ -4834,6 +5570,14 @@ mod tests {
     }
 
     #[test]
+    fn task_title_keeps_a_short_real_user_message() {
+        let mut title = TaskTitleBuilder::default();
+        title.observe_user("test");
+
+        assert_eq!(title.title().as_deref(), Some("Test"));
+    }
+
+    #[test]
     fn task_title_never_cuts_a_regular_word_in_half() {
         let title = truncate_title_words(
             "Ajouter une generation de titres semantiques fiable pour toutes les conversations existantes et futures",
@@ -4867,6 +5611,107 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn current_codex_response_messages_are_indexed_and_rendered() {
+        let dir = fresh_dir();
+        let account = test_account("response-items", &dir);
+        let uuid = "01a0208c-1181-7821-915a-5ec25135779c";
+        let path = dir.join(format!("rollout-2026-08-20T19-00-45-{uuid}.jsonl"));
+        let values = [
+            serde_json::json!({
+                "timestamp": "2026-08-20T19:00:45Z",
+                "type": "session_meta",
+                "payload": {"session_id": uuid, "id": uuid, "cwd": "/projet/mobile"}
+            }),
+            serde_json::json!({
+                "timestamp": "2026-08-20T19:00:46Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "developer",
+                    "content": [{"type": "input_text", "text": "instruction interne"}]
+                }
+            }),
+            serde_json::json!({
+                "timestamp": "2026-08-20T19:00:47Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "Synchronise ce chat mobile sur le PC"},
+                        {"type": "input_text", "text": "<environment_context>ignore</environment_context>"},
+                        {"type": "input_text", "text": "<recommended_plugins>\nplugin interne\n</recommended_plugins>"},
+                        {"type": "input_text", "text": "# AGENTS.md instructions\n\n<INSTRUCTIONS>\ncontexte interne\n</INSTRUCTIONS>"}
+                    ]
+                }
+            }),
+            serde_json::json!({
+                "timestamp": "2026-08-20T19:00:48Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "phase": "final_answer",
+                    "content": [{"type": "output_text", "text": "Le chat est synchronise."}]
+                }
+            }),
+        ];
+        fs::write(
+            &path,
+            values
+                .into_iter()
+                .map(|value| value.to_string())
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+        .unwrap();
+
+        let summary = scan_discussion_file(&path, &account).expect("discussion visible");
+        assert_eq!(
+            summary.message_count, 2,
+            "le role developer reste invisible"
+        );
+        assert_eq!(
+            summary.preview.as_deref(),
+            Some("Synchronise ce chat mobile sur le PC")
+        );
+
+        let transcript = extract_codex_transcript(&path);
+        assert_eq!(transcript.len(), 2);
+        assert_eq!(transcript[0].role, TranscriptRole::User);
+        assert_eq!(transcript[0].text, "Synchronise ce chat mobile sur le PC");
+        assert_eq!(transcript[1].role, TranscriptRole::Assistant);
+
+        let display = extract_codex_display_transcript(&path);
+        assert_eq!(display.len(), 2);
+        assert_eq!(display[0].role, TranscriptRole::User);
+        assert_eq!(display[0].text, "Synchronise ce chat mobile sur le PC");
+
+        let mut prompts = Vec::new();
+        scan_prompt_file(&path, &account, &mut prompts);
+        assert_eq!(prompts.len(), 1);
+        assert_eq!(prompts[0].text, "Synchronise ce chat mobile sur le PC");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn codex_internal_context_wrappers_are_never_user_prompts() {
+        let plugin_context = "  <recommended_plugins>\nplugin interne\n</recommended_plugins>\n\nAGENTS.md instructions for /srv/cst/user-spaces/test\n\n<INSTRUCTIONS>\ncontexte interne\n</INSTRUCTIONS>";
+        let agents_context = "AGENTS.md instructions for /srv/cst/user-spaces/test\n\n<INSTRUCTIONS>\ncontexte interne\n</INSTRUCTIONS>";
+        let agents_heading_context =
+            "# AGENTS.md instructions\n\n<INSTRUCTIONS>\ncontexte interne\n</INSTRUCTIONS>";
+
+        assert!(is_synthetic_prompt(plugin_context));
+        assert!(is_synthetic_prompt(agents_context));
+        assert!(is_synthetic_prompt(agents_heading_context));
+        assert!(!is_synthetic_prompt(
+            "AGENTS.md instructions for mon projet : comment les rediger ?"
+        ));
+        assert!(!is_synthetic_prompt("<div>vraie demande HTML</div>"));
     }
 
     #[test]
@@ -5422,6 +6267,9 @@ mod tests {
             // Enveloppes synthetiques Codex : ignorees.
             "{\"timestamp\":\"2026-07-07T16:11:29.000Z\",\"type\":\"user_message\",\"payload\":{\"message\":\"<environment_context>ctx</environment_context>\"}}".to_string(),
             "{\"timestamp\":\"2026-07-07T16:11:29.500Z\",\"type\":\"user_message\",\"payload\":{\"message\":\"<user_instructions>do x</user_instructions>\"}}".to_string(),
+            "{\"timestamp\":\"2026-07-07T16:11:29.600Z\",\"type\":\"user_message\",\"payload\":{\"message\":\"<recommended_plugins>plugins internes</recommended_plugins>\\n\\nAGENTS.md instructions for /srv/cst/user-spaces/test\\n\\n<INSTRUCTIONS>regles internes</INSTRUCTIONS>\"}}".to_string(),
+            "{\"timestamp\":\"2026-07-07T16:11:29.700Z\",\"type\":\"user_message\",\"payload\":{\"message\":\"AGENTS.md instructions for /srv/cst/user-spaces/test\\n\\n<INSTRUCTIONS>regles internes</INSTRUCTIONS>\"}}".to_string(),
+            "{\"timestamp\":\"2026-07-07T16:11:29.800Z\",\"type\":\"user_message\",\"payload\":{\"message\":\"# AGENTS.md instructions\\n\\n<INSTRUCTIONS>regles internes</INSTRUCTIONS>\"}}".to_string(),
             // Vraie demande commencant par '<' : conservee.
             "{\"timestamp\":\"2026-07-07T16:11:30.000Z\",\"type\":\"user_message\",\"payload\":{\"message\":\"<div className=x> what renders?\"}}".to_string(),
         ]
@@ -5480,7 +6328,10 @@ mod tests {
         assert_eq!(entries.len(), 2, "seuls les messages user sont indexes");
         assert_eq!(entries[0].text, "premiere demande");
         assert_eq!(entries[1].text, "seconde demande");
-        assert_eq!(entries[0].session_title.as_deref(), Some("premiere demande"));
+        assert_eq!(
+            entries[0].session_title.as_deref(),
+            Some("premiere demande")
+        );
         assert_eq!(entries[0].session_id, "proj/2026-08-19T17-50-50.946Z");
         assert_eq!(entries[0].account_id, "freebuff");
         assert_eq!(entries[0].cwd.as_deref(), Some("/srv/proj"));
@@ -5532,6 +6383,10 @@ mod tests {
         assert_eq!(summary.provider, settings::Provider::Freebuff);
         assert_eq!(summary.session_id, "proj-2026-08-19T17-50-50-946Z");
         assert_eq!(summary.rollout_id, summary.session_id);
+        assert_eq!(
+            summary.resume_id.as_deref(),
+            Some("2026-08-19T17-50-50.946Z")
+        );
         assert_eq!(summary.account_id, "freebuff");
         assert_eq!(summary.cwd.as_deref(), Some("/srv/proj"));
         assert_eq!(summary.title.as_deref(), Some("premiere demande"));
@@ -5540,6 +6395,224 @@ mod tests {
         assert!(summary.started_at > 0);
         assert!(summary.last_activity >= summary.started_at);
         assert_eq!(summary.total_tokens, None);
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn freebuff_discussion_copy_keeps_complete_chat_and_original() {
+        let base = fresh_dir();
+        let source_home = base.join("source-home");
+        let target_home = base.join("target-home");
+        let chat_name = "2026-08-19T17-50-50.946Z";
+        let source_chat = source_home
+            .join(FREEBUFF_CHATS_DIR)
+            .join("proj")
+            .join("chats")
+            .join(chat_name);
+        fs::create_dir_all(source_chat.join("artifacts")).unwrap();
+        fs::write(
+            source_chat.join("chat-messages.json"),
+            r#"[{"id":"user-1787161914227","variant":"user","content":"reprends-moi"}]"#,
+        )
+        .unwrap();
+        fs::write(
+            source_chat.join("chat-meta.json"),
+            r#"{"firstPrompt":"reprends-moi"}"#,
+        )
+        .unwrap();
+        fs::write(
+            source_chat.join("run-state.json"),
+            r#"{"sessionState":{"fileContext":{"projectRoot":"/srv/proj"}}}"#,
+        )
+        .unwrap();
+        fs::write(
+            source_chat.join("artifacts").join("extra.txt"),
+            "etat complet",
+        )
+        .unwrap();
+
+        let mut source = test_account("freebuff-source", &source_home);
+        source.provider = settings::Provider::Freebuff;
+        let mut target = test_account("freebuff-target", &target_home);
+        target.provider = settings::Provider::Freebuff;
+
+        let copied =
+            copy_freebuff_discussion("proj-2026-08-19T17-50-50-946Z", &source, &target).unwrap();
+        let target_chat = target_home
+            .join(FREEBUFF_CHATS_DIR)
+            .join("proj")
+            .join("chats")
+            .join(chat_name);
+
+        assert!(source_chat.join("chat-messages.json").is_file());
+        assert_eq!(
+            fs::read_to_string(target_chat.join("artifacts").join("extra.txt")).unwrap(),
+            "etat complet"
+        );
+        assert_eq!(copied.account_id, "freebuff-target");
+        assert_eq!(copied.resume_id.as_deref(), Some(chat_name));
+        assert_eq!(copied.cwd.as_deref(), Some("/srv/proj"));
+
+        // Les deux homes restent indexes simultanement. Leur identifiant natif
+        // est volontairement identique ; account_id porte l'isolation que le
+        // frontend doit conserver dans toutes ses cles et actions.
+        let source_rows = scan_freebuff_discussions(&source_home, &source);
+        let target_rows = scan_freebuff_discussions(&target_home, &target);
+        assert_eq!(source_rows.len(), 1);
+        assert_eq!(target_rows.len(), 1);
+        assert_eq!(source_rows[0].session_id, target_rows[0].session_id);
+        assert_eq!(source_rows[0].resume_id, target_rows[0].resume_id);
+        assert_ne!(source_rows[0].account_id, target_rows[0].account_id);
+
+        // Idempotence : une copie deja continuee sur la cible est reprise telle
+        // quelle, jamais remplacee par l'etat plus ancien de la source.
+        fs::write(
+            target_chat.join("artifacts").join("extra.txt"),
+            "etat cible",
+        )
+        .unwrap();
+        copy_freebuff_discussion("proj-2026-08-19T17-50-50-946Z", &source, &target).unwrap();
+        assert_eq!(
+            fs::read_to_string(target_chat.join("artifacts").join("extra.txt")).unwrap(),
+            "etat cible"
+        );
+
+        // L'archivage manuel cible uniquement le home demande : la copie peut
+        // etre retiree sans faire disparaitre l'original du premier compte.
+        let archived = delete_freebuff_discussion_impl(
+            &target,
+            "proj-2026-08-19T17-50-50-946Z",
+            true,
+        )
+        .unwrap();
+        assert!(archived.archived);
+        assert_eq!(scan_freebuff_discussions(&source_home, &source).len(), 1);
+        assert!(scan_freebuff_discussions(&target_home, &target).is_empty());
+        assert!(source_chat.join("chat-messages.json").is_file());
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn freebuff_discussion_archive_moves_the_complete_chat_out_of_history() {
+        let base = fresh_dir();
+        let home = base.join("home");
+        let chat_name = "2026-08-19T17-50-50.946Z";
+        let chat = home
+            .join(FREEBUFF_CHATS_DIR)
+            .join("proj")
+            .join("chats")
+            .join(chat_name);
+        fs::create_dir_all(chat.join("artifacts")).unwrap();
+        fs::write(
+            chat.join("chat-messages.json"),
+            r#"[{"id":"user-1787161914227","variant":"user","content":"a supprimer"}]"#,
+        )
+        .unwrap();
+        fs::write(chat.join("run-state.json"), r#"{"resumable":true}"#).unwrap();
+        fs::write(chat.join("artifacts").join("extra.txt"), "etat complet").unwrap();
+
+        let mut account = test_account("freebuff", &home);
+        account.provider = settings::Provider::Freebuff;
+        let result =
+            delete_freebuff_discussion_impl(&account, "proj-2026-08-19T17-50-50-946Z", true)
+                .unwrap();
+        let archived = PathBuf::from(&result.path);
+
+        assert!(result.archived);
+        assert_eq!(result.count, 1);
+        assert!(
+            !chat.exists(),
+            "le chat ne doit plus alimenter l'historique"
+        );
+        assert_eq!(
+            fs::read_to_string(archived.join("artifacts").join("extra.txt")).unwrap(),
+            "etat complet"
+        );
+        assert!(archived.starts_with(home.join(".config/manicode/projects-archive")));
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn freebuff_discussion_permanent_delete_removes_the_native_folder() {
+        let base = fresh_dir();
+        let home = base.join("home");
+        let chat = home
+            .join(FREEBUFF_CHATS_DIR)
+            .join("proj")
+            .join("chats")
+            .join("2026-08-19T17-50-50.946Z");
+        fs::create_dir_all(chat.join("artifacts")).unwrap();
+        fs::write(
+            chat.join("chat-messages.json"),
+            r#"[{"id":"user-1787161914227","variant":"user","content":"a effacer"}]"#,
+        )
+        .unwrap();
+        fs::write(chat.join("artifacts").join("extra.txt"), "etat complet").unwrap();
+
+        let mut account = test_account("freebuff", &home);
+        account.provider = settings::Provider::Freebuff;
+        let result =
+            delete_freebuff_discussion_impl(&account, "proj-2026-08-19T17-50-50-946Z", false)
+                .unwrap();
+
+        assert!(!result.archived);
+        assert_eq!(result.count, 1);
+        assert!(!chat.exists());
+        assert!(!home.join(".config/manicode/projects-archive").exists());
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn freebuff_discussion_cache_tracks_title_and_cwd_files() {
+        let base = fresh_dir();
+        let home = base.join("home");
+        let chat = home
+            .join(FREEBUFF_CHATS_DIR)
+            .join("proj")
+            .join("chats")
+            .join("2026-08-19T17-50-50.946Z");
+        fs::create_dir_all(&chat).unwrap();
+        let messages = chat.join("chat-messages.json");
+        fs::write(
+            &messages,
+            r#"[{"id":"user-1787161914227","variant":"user","content":"question"}]"#,
+        )
+        .unwrap();
+        fs::write(chat.join("chat-meta.json"), r#"{"firstPrompt":"titre un"}"#).unwrap();
+        fs::write(
+            chat.join("run-state.json"),
+            r#"{"sessionState":{"fileContext":{"projectRoot":"/srv/un"}}}"#,
+        )
+        .unwrap();
+
+        let mut account = test_account("freebuff-cache", &home);
+        account.provider = settings::Provider::Freebuff;
+        let first = cached_freebuff_summary(&messages, &account).unwrap();
+        assert_eq!(first.title.as_deref(), Some("titre un"));
+        assert_eq!(first.cwd.as_deref(), Some("/srv/un"));
+
+        // Les tailles changent volontairement : l'invalidation ne depend pas
+        // de la precision parfois grossiere du mtime du filesystem de test.
+        fs::write(
+            chat.join("chat-meta.json"),
+            r#"{"firstPrompt":"un titre nettement plus long"}"#,
+        )
+        .unwrap();
+        fs::write(
+            chat.join("run-state.json"),
+            r#"{"sessionState":{"fileContext":{"projectRoot":"/srv/deux-plus-long"}}}"#,
+        )
+        .unwrap();
+        let refreshed = cached_freebuff_summary(&messages, &account).unwrap();
+        assert_eq!(
+            refreshed.title.as_deref(),
+            Some("un titre nettement plus long")
+        );
+        assert_eq!(refreshed.cwd.as_deref(), Some("/srv/deux-plus-long"));
 
         let _ = fs::remove_dir_all(&base);
     }
@@ -5555,6 +6628,7 @@ mod tests {
         DiscussionSummary {
             session_id: session_id.to_string(),
             rollout_id: rollout_id.to_string(),
+            resume_id: None,
             fork_count: 1,
             provider: settings::Provider::Codex,
             account_id: "acc".to_string(),
@@ -5693,6 +6767,8 @@ mod tests {
         let lines = [
             format!("{{\"timestamp\":\"2026-07-07T16:11:28.000Z\",\"type\":\"session_meta\",\"payload\":{{\"session_id\":\"{uuid}\",\"id\":\"{uuid}\"}}}}"),
             "{\"timestamp\":\"2026-07-07T16:11:29.000Z\",\"type\":\"user_message\",\"payload\":{\"message\":\"<environment_context>ignore</environment_context>\"}}".to_string(),
+            "{\"timestamp\":\"2026-07-07T16:11:29.400Z\",\"type\":\"user_message\",\"payload\":{\"message\":\"<recommended_plugins>plugins internes</recommended_plugins>\"}}".to_string(),
+            "{\"timestamp\":\"2026-07-07T16:11:29.500Z\",\"type\":\"user_message\",\"payload\":{\"message\":\"# AGENTS.md instructions\\n\\n<INSTRUCTIONS>regles internes</INSTRUCTIONS>\"}}".to_string(),
             "{\"timestamp\":\"2026-07-07T16:11:30.000Z\",\"type\":\"user_message\",\"payload\":{\"message\":\"premiere demande\"}}".to_string(),
             "{\"timestamp\":\"2026-07-07T16:11:31.000Z\",\"type\":\"agent_message\",\"payload\":{\"message\":\"une reponse **markdown**\"}}".to_string(),
             // Ligne sans horodatage : le tour doit sortir avec timestamp 0.

@@ -14,7 +14,10 @@ const documentation = readFileSync(
 test("les terminaux exposent un alias explicite vers le PC fixe", () => {
   assert.match(entrypoint, /Host local pc pc-fixe pc-fixe-tailscale/);
   assert.match(entrypoint, /IdentityFile \$ssh_dir\/id_back/);
-  assert.match(entrypoint, /UserKnownHostsFile \$ssh_dir\/known_hosts/);
+  // Le conteneur provisionne sa propre cle d'hote dans $ssh_dir et accepte la
+  // cle du PC au premier contact (accept-new) : pas de prompt interactif.
+  assert.match(entrypoint, /StrictHostKeyChecking accept-new/);
+  assert.match(entrypoint, /ssh_dir=\/srv\/cst\/ssh/);
 });
 
 test("la cible du pont reste configurable pour la production", () => {

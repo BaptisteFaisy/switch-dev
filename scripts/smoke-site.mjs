@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync } from "node:fs";
 import { chromium } from "playwright-core";
 
-const site = process.env.CST_SMOKE_URL || "http://127.0.0.1:8080";
+const site = process.env.CST_SMOKE_URL || "http://127.0.0.1:18080";
 const trace = (step) => {
   if (process.env.CST_SMOKE_TRACE) process.stderr.write(`[smoke] ${step}\n`);
 };

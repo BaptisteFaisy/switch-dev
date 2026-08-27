@@ -22,10 +22,14 @@ test("la cible Android reste actuelle, installable et adaptable", async () => {
   assert.match(manifest, /android:configChanges="[^"]*orientation[^"]*screenSize/);
   assert.match(html, /interactive-widget=resizes-content/);
   assert.match(html, /viewport-fit=cover/);
-  assert.match(strings, /<string name="server_url">https:\/\/pc-fixe-cst\.tail3a8bdf\.ts\.net<\/string>/);
-  assert.match(strings, /<string name="server_start_url">https:\/\/pc-fixe-cst\.tail3a8bdf\.ts\.net\/\?cst-chunk-build=ms65eccm-mcl3yt41<\/string>/);
-  assert.match(activity, /LEGACY_VPS_BASE_URL = "https:\/\/cst-google-trial\.tail3a8bdf\.ts\.net"/);
+  assert.match(strings, /<string name="server_url">https:\/\/azure-duello\.tail3a8bdf\.ts\.net<\/string>/);
+  assert.match(strings, /<string name="server_start_url">https:\/\/azure-duello\.tail3a8bdf\.ts\.net\/\?cst-chunk-build=azure-20260826<\/string>/);
+  assert.match(activity, /LEGACY_VPS_BASE_URL = "https:\/\/azure-duello\.tail3a8bdf\.ts\.net"/);
+  assert.match(activity, /LEGACY_PC_BASE_URL = "https:\/\/pc-fixe-cst\.tail3a8bdf\.ts\.net"/);
+  assert.match(activity, /KEY_AZURE_ROUTE_MIGRATED = "azureRouteMigrated20260826"/);
   assert.match(activity, /migrateLegacyServerRoute\(\)/);
+  assert.match(activity, /migrateAzureServerRoute\(\)/);
+  assert.match(activity, /LEGACY_PC_BASE_URL\.equals\(saved\)/);
   assert.match(activity, /webView\.loadUrl\(currentStartupUrl\(\)\)/);
   assert.match(activity, /buildUpon\(\)\.clearQuery\(\)\.fragment\(null\)/);
 });
@@ -173,4 +177,67 @@ test("les paiements autonomes produisent un handoff FCM prive et verifie", async
   assert.match(main, /id="settingsMobilePayments"/);
   assert.match(main, /id="settingsMobileGooglePay"/);
   assert.match(gitignore, /android\/app\/google-services\.json/);
+});
+
+test("la coque Android permet de coder dans les terminaux sur mobile", async () => {
+  const [activity, helper] = await Promise.all([
+    read("android/app/src/main/java/com/codexswitch/terminal/MainActivity.java"),
+    read("android/app/src/main/assets/cst-mobile-terminal-helper.js"),
+  ]);
+
+  // Injection du script depuis les assets, une fois par page.
+  assert.match(activity, /MOBILE_TERMINAL_HELPER_ASSET = "cst-mobile-terminal-helper\.js"/);
+  assert.match(activity, /injectMobileTerminalHelper\(\)/);
+  assert.match(activity, /webView\.evaluateJavascript\(mobileTerminalHelperScript, null\)/);
+  assert.match(activity, /onPageFinished/);
+  assert.match(activity, /getAssets\(\)\.open\(name\)/);
+
+  // Ouverture du clavier virtuel depuis la page (pont natif).
+  assert.match(activity, /public void showKeyboard\(\)/);
+  assert.match(activity, /public void hideKeyboard\(\)/);
+  assert.match(activity, /InputMethodManager\.SHOW_IMPLICIT/);
+  assert.match(activity, /Api30Insets\.showIme\(webView\)/);
+  assert.match(activity, /WindowInsets\.Type\.ime\(\)/);
+
+  // La barre de touches existe, est idempotente et ne s'active que sur tactile.
+  assert.match(helper, /__cstMobileTerminalHelper/);
+  assert.match(helper, /cst-term-toolbar/);
+  assert.match(helper, /ontouchstart/);
+  assert.match(helper, /data-terminal-host/);
+  assert.match(helper, /aria-modal="true"/);
+
+  // La barre tient sur une seule ligne. Ctrl+V remplace Entree et passe par
+  // un raccourci Android natif pour produire le vrai evenement paste de xterm.
+  for (const key of ["Escape", "Tab", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"]) {
+    assert.match(helper, new RegExp(key));
+  }
+  assert.match(helper, /makeButton\("Ctrl\+V", "Ctrl\+V — coller"/);
+  assert.match(helper, /nativeBridge\.pasteFromClipboard\(\)/);
+  assert.match(activity, /public void pasteFromClipboard\(\)/);
+  assert.match(activity, /KeyEvent\.KEYCODE_V/);
+  assert.match(activity, /KeyEvent\.META_CTRL_ON/);
+  assert.doesNotMatch(helper, /makeButton\("⏎"|"Entrée"/);
+  assert.match(helper, /makeButton\("Ctrl\+C"/);
+  for (const removed of ["Ctrl+D", "Ctrl+L", "Ctrl+Z", "Ctrl+U", "Ctrl+A", "Ctrl+W"]) {
+    assert.doesNotMatch(helper, new RegExp(removed.replace("+", "\\+")));
+  }
+  assert.doesNotMatch(helper, /makeButton\("⌫"|var row2|keyboardButton|data-cst-chip/);
+  assert.match(helper, /flex-wrap:nowrap/);
+
+  // xterm reçoit les séquences directement via son événement input : les
+  // flèches ne peuvent donc pas déclencher les raccourcis globaux de l'app.
+  assert.match(helper, /xterm-helper-textarea/);
+  assert.match(helper, /new InputEvent\("input"/);
+  assert.match(helper, /inputType: "insertText"/);
+  assert.match(helper, /textarea\.dispatchEvent\(event\);\s*return true;/);
+  assert.match(helper, /event\.stopImmediatePropagation\(\)/);
+
+  // Un ancien WebView reste utilisable grâce au KeyboardEvent de repli.
+  assert.match(helper, /new KeyboardEvent\(["']keydown["']/);
+  assert.match(helper, /dispatchEvent\(new KeyboardEvent/);
+
+  // Les modificateurs one-shot Ctrl/Alt restent visuels et s'auto-desarment.
+  assert.match(helper, /armModifier\(/);
+  assert.match(helper, /disarmModifiers\(\)/);
+  assert.match(helper, /MODIFIER_DISARM_TIMEOUT_MS/);
 });

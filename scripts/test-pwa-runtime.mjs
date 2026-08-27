@@ -6,7 +6,9 @@ import { extname, join, normalize } from "node:path";
 import { chromium } from "playwright-core";
 
 const root = new URL("../", import.meta.url);
-const dist = normalize(join(root.pathname.replace(/^\/(.:)/, "$1"), "dist"));
+const dist = process.env.CST_PWA_DIST
+  ? normalize(process.env.CST_PWA_DIST)
+  : normalize(join(root.pathname.replace(/^\/(.:)/, "$1"), "dist"));
 const privatePaths = ["/api/pwa-private-probe", "/ws/pwa-private-probe", "/mcp"];
 const requestCounts = new Map();
 const contentTypes = new Map([
@@ -73,9 +75,23 @@ const origin = `http://127.0.0.1:${address.port}`;
 const browser = await chromium.launch({ executablePath, headless: true });
 const context = await browser.newContext({ serviceWorkers: "allow" });
 const page = await context.newPage();
+let documentRequests = 0;
+page.on("request", (request) => {
+  if (request.isNavigationRequest() && request.frame() === page.mainFrame()) {
+    documentRequests += 1;
+  }
+});
 
 try {
+  const workerStarted = context.waitForEvent("serviceworker");
   await page.goto(origin, { waitUntil: "domcontentloaded" });
+  await workerStarted;
+  await page.waitForTimeout(1_000);
+  assert.equal(
+    documentRequests,
+    1,
+    "l'activation du service worker ne doit pas relancer la navigation principale",
+  );
   await page.evaluate(async () => {
     await navigator.serviceWorker.ready;
     if (!navigator.serviceWorker.controller) {

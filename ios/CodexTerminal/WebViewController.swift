@@ -8,7 +8,7 @@ final class WebViewController: UIViewController {
         static let bundledBaseURLKey = "CSTServerURL"
         static let vpsRouteMigrationKey = "codex-switch-terminal.vps-route-migrated-20260720"
         static let legacyPCBaseURL = "https://pc-fixe-cst.tail3a8bdf.ts.net"
-        static let fallbackBaseURL = "https://cst-google-trial.tail3a8bdf.ts.net"
+        static let fallbackBaseURL = "https://azure-duello.tail3a8bdf.ts.net"
         static let configMessage = "cstConfig"
         static let settingsMessage = "cstSettings"
     }

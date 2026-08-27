@@ -32,6 +32,10 @@ import {
 import "./messaging.css";
 
 const MESSAGING_POLL_INTERVAL_MS = 8_000;
+// Hors de la vue Messagerie, seul le badge de non-lus est utile : les listes
+// d'utilisateurs, campagnes et conversations n'ont pas besoin d'etre relues
+// aussi souvent.
+const MESSAGING_BACKGROUND_POLL_INTERVAL_MS = 30_000;
 
 export type MessagingUiOptions = {
   rerender: () => void;
@@ -773,10 +777,15 @@ export const messagingUnreadCount = () =>
   privateMessagingUnreadCount(messagingConversations);
 
 export const setMessagingVisible = (visible: boolean) => {
+  const changed = messagingVisible !== visible;
   messagingVisible = visible;
   if (!visible) {
     messagingImageObserver?.disconnect();
     messagingImageObserver = null;
+  }
+  if (changed) {
+    clearMessagingPollTimer();
+    syncMessagingFallbackPolling();
   }
 };
 
@@ -1184,7 +1193,7 @@ const syncMessagingFallbackPolling = () => {
     if (document.visibilityState === "visible" && messagingPollRerender) {
       void refreshMessaging(messagingPollRerender, { silent: true });
     }
-  }, MESSAGING_POLL_INTERVAL_MS);
+  }, messagingVisible ? MESSAGING_POLL_INTERVAL_MS : MESSAGING_BACKGROUND_POLL_INTERVAL_MS);
 };
 
 export const setMessagingRealtimeAvailable = (available: boolean) => {

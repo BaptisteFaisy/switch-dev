@@ -86,18 +86,26 @@ test("les suggestions de modeles Claude proposent les alias CLI et les modeles a
 
 test("le terminal OpenCode reprend le modele du compte", () => {
   assert.match(main, /if \(agentProvider\(agent\) === "opencode"\)/);
-  assert.match(main, /safeCliModel\(accountModel\(account\)\)/);
+  assert.match(main, /const requestedModel = account \? accountModel\(account\) : null;/);
+  assert.match(main, /safeCliModel\(requestedModel\)/);
   assert.match(main, /command \+= ` --model \$\{model\}`/);
   assert.match(main, /command \+= " --auto"/);
 });
 
-test("chaque compte expose seulement connexion et suppression", () => {
+test("chaque compte expose le suivi quotidien, la connexion et la suppression", () => {
+  assert.match(accountsPanel, /data-account-daily-completion=/);
+  assert.match(accountsPanel, /data-lucide="star"/);
+  assert.match(accountsPanel, /aria-pressed="\$\{completedToday\}"/);
   assert.match(accountsPanel, /data-login-account=/);
   assert.match(accountsPanel, /data-delete-account=/);
   assert.match(accountsPanel, />Se connecter<\/span>/);
   assert.match(
     main,
     /querySelectorAll<HTMLElement>\("\[data-login-account\]"\)/,
+  );
+  assert.match(
+    main,
+    /querySelectorAll<HTMLButtonElement>\("\[data-account-daily-completion\]"\)/,
   );
   assert.match(
     main,
@@ -111,7 +119,7 @@ test("creer un compte ouvre une fenetre de connexion (login)", () => {
   assert.match(main, /addAccountAndLogin\(\)/);
   // Le compte est persiste (supprimable) puis un terminal de login est ouvert.
   assert.match(main, /save_settings/);
-  assert.match(main, /await reloginAccount\(account\.id\)/);
+  assert.match(main, /await reloginAccount\(account\.id, deferredMobileLogin\)/);
 });
 
 test("reconnecter Codex supprime l'ancienne session avant le nouveau login", () => {
@@ -152,7 +160,7 @@ test("une reconnexion ne peut ouvrir qu'un terminal temporaire a la fois", () =>
   assert.match(main, /loginOnly,\s*\n\s*folderPath: loginOnly \? null : capturedEnvironment/);
   assert.match(
     main,
-    /\.filter\(\(session\) => session\.status !== "Ferme" && !session\.loginOnly\)/,
+    /\.filter\(\(session\) => session\.status !== "Ferme" && session\.ptyId !== null && !session\.loginOnly\)/,
   );
   assert.match(main, /if \(!terminalRestoreAttempted\) return;/);
 
@@ -202,10 +210,10 @@ test("le login depuis Nouveau terminal persiste aussi dans le home du compte", (
 });
 
 test("une erreur d'auth reste prioritaire sur les limites locales en cache", () => {
-  assert.match(main, /account\.error && AUTH_LIMIT_ERROR\.test\(account\.error\)/);
+  assert.match(main, /isQuotaAuthenticationError\(account\.error\)/);
   assert.match(
     main,
-    /if \(account\.error && AUTH_LIMIT_ERROR\.test\(account\.error\)\) return "error";/,
+    /if \(isQuotaAuthenticationError\(account\.error\)\) return "error";/,
   );
 });
 

@@ -3,11 +3,17 @@ set -euo pipefail
 
 # Mise a jour SURE d'un noeud Linux deja installe.
 #
-# DEUX modes pour peupler releases/<v> :
-#   - build    (defaut) : compile sur l'hote depuis /opt/codex-switch-terminal-src.
-#   - release  (--release <tag>) : TELECHARGE l'artefact signe de la GitHub
+# QUATRE modes pour peupler releases/<v> :
+#   - build     (defaut) : compile sur l'hote depuis /opt/codex-switch-terminal-src.
+#   - release   (--release <tag>) : TELECHARGE l'artefact signe de la GitHub
 #                Release, verifie SHA-256 + signature minisign (fail-closed),
 #                puis l'installe. C'est le mode Phase 2 (artefacts CI signes).
+#   - prebuilt  (--prebuilt <archive>) : artefact CI PRECOMPILE (binaire + dist)
+#                transfere par SSH, verifie SHA-256 + minisign puis installe
+#                sans aucune compilation sur l'hote. Utilise par la chaine
+#                continue (deploy-web.yml) pour les pushes qui touchent le Rust.
+#   - frontend  (--frontend <archive>) : pousse frontend uniquement : le binaire
+#                courant est conserve, seul dist/ est remplace (bascule rapide).
 #
 # Sequence commune ensuite : self-check `--version` -> attente NON BLOQUANTE
 # activeTerminals==0 -> courte lease de drain -> bascule atomique de 'current'
@@ -20,6 +26,12 @@ set -euo pipefail
 #   # download d'une release signee (Phase 2)
 #   sudo bash update-node.sh --release v0.1.0 [--repo owner/repo] \
 #        [--minisign-pubkey 'RW...'] [--asset cst-server-linux-x86_64.tar.gz]
+#   # artefact CI precompile signe, transfere par SSH (Phase 2 continue)
+#   sudo bash update-node.sh --prebuilt /tmp/cst-server-linux-x86_64.tar.gz \
+#        [--commit <sha>] [--minisign-pubkey 'RW...']
+#   # push frontend seul : binaire conserve, dist/ remplace
+#   sudo bash update-node.sh --frontend /tmp/cst-frontend.tar.gz \
+#        [--commit <sha>] [--minisign-pubkey 'RW...']
 #   # options communes : [--drain-timeout <sec>] [--drain-lease <sec>]
 #   #                    [--force] [--allow-unsigned]
 
@@ -43,7 +55,9 @@ RELEASE_DIR=""
 RELEASE_MARKER=""
 
 # --- Mode release (Phase 2) ---
-MODE="build"                                   # build | release
+MODE="build"                                   # build | release | prebuilt | frontend
+PREBUILT_ARCHIVE=""
+FRONTEND_ARCHIVE=""
 RELEASE_TAG=""
 REPO="${CST_REPO:-BaptisteFaisy/Software-multi-account}"
 ASSET="${CST_ASSET:-cst-server-linux-x86_64.tar.gz}"
@@ -60,6 +74,8 @@ while [[ $# -gt 0 ]]; do
     --drain-lease) DRAIN_LEASE="$2"; shift 2 ;;
     --force) FORCE=1; shift ;;
     --release) MODE="release"; RELEASE_TAG="$2"; shift 2 ;;
+    --prebuilt) MODE="prebuilt"; PREBUILT_ARCHIVE="$2"; shift 2 ;;
+    --frontend) MODE="frontend"; FRONTEND_ARCHIVE="$2"; shift 2 ;;
     --repo) REPO="$2"; shift 2 ;;
     --asset) ASSET="$2"; shift 2 ;;
     --minisign-pubkey) MINISIGN_PUBKEY="$2"; shift 2 ;;
@@ -81,7 +97,7 @@ done
 [[ "$(id -u)" -eq 0 ]] || { echo "Lance ce script avec sudo." >&2; exit 1; }
 [[ -f "$ENV_FILE" ]] || { echo "$ENV_FILE introuvable : noeud non installe ?" >&2; exit 1; }
 REQUIRED_TOOLS=(curl jq awk sed tar flock)
-if [[ "$MODE" == "release" ]]; then
+if [[ "$MODE" == "release" || "$MODE" == "prebuilt" || "$MODE" == "frontend" ]]; then
   REQUIRED_TOOLS+=(sha256sum)
   [[ "$ALLOW_UNSIGNED" == "1" ]] || REQUIRED_TOOLS+=(minisign)
 fi
@@ -194,41 +210,77 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# --- Peupler la nouvelle release : mode build OU mode release (download+verif) ---
-if [[ "$MODE" == "release" ]]; then
-  DL="$(mktemp -d)"; STAGE="$(mktemp -d)"
-  base_url="https://github.com/$REPO/releases/download/$RELEASE_TAG"
-  log "Telechargement de $ASSET depuis $REPO@$RELEASE_TAG"
-  for suffix in "" ".sha256" ".minisig"; do
-    curl -fSL --retry 3 --retry-delay 2 --max-time 180 \
-      -o "$DL/$ASSET$suffix" "$base_url/$ASSET$suffix"
-  done
-
-  # 1) Empreinte SHA-256 (fail-closed). Le .sha256 contient le seul basename.
+# Verifie un artefact en echec-ferme : empreinte SHA-256 obligatoire, puis
+# signature minisign (sauf --allow-unsigned explicite). `$1` = chemin de
+# l'archive ; les sidecars `.sha256` / `.minisig` doivent etre a cote (le
+# .sha256 contient le seul basename, comme produit par `sha256sum f > f.sha256`).
+verify_artifact() {
+  local asset="$1"
+  [[ -f "$asset.sha256" ]] || { echo "Empreinte $asset.sha256 absente (fail-closed)." >&2; exit 1; }
   log "Verification SHA-256"
-  ( cd "$DL" && sha256sum -c "$ASSET.sha256" )
-
-  # 2) Signature minisign (fail-closed sauf --allow-unsigned explicite).
+  ( cd "$(dirname "$asset")" && sha256sum -c "$(basename "$asset").sha256" )
   if [[ "$ALLOW_UNSIGNED" == "1" ]]; then
     log "ATTENTION: verification de signature IGNOREE (--allow-unsigned)."
   else
+    [[ -f "$asset.minisig" ]] || { echo "Signature $asset.minisig absente (fail-closed)." >&2; exit 1; }
     if [[ "$MINISIGN_PUBKEY" == RWQPLACEHOLDER* ]]; then
       echo "Cle publique minisign non configuree (voir deploy/PHASE2-UPDATES.md" >&2
       echo "ou passe --minisign-pubkey / CST_MINISIGN_PUBKEY)." >&2
       exit 1
     fi
     log "Verification signature minisign"
-    minisign -Vm "$DL/$ASSET" -x "$DL/$ASSET.minisig" -P "$MINISIGN_PUBKEY"
+    minisign -Vm "$asset" -x "$asset.minisig" -P "$MINISIGN_PUBKEY"
   fi
+}
 
-  # 3) Extraction (l'archive contient cst-server + dist/).
-  tar -xzf "$DL/$ASSET" -C "$STAGE"
-  BUILT_BIN="$STAGE/cst-server"
-  DIST_SRC="$STAGE/dist"
-  [[ -f "$BUILT_BIN" ]] || { echo "Archive invalide: cst-server introuvable." >&2; exit 1; }
-  [[ -d "$DIST_SRC" ]] || { echo "Archive invalide: dist/ introuvable." >&2; exit 1; }
-  chmod 0755 "$BUILT_BIN"
-else
+# --- Peupler la nouvelle release : build hote, artefact precompile signe, ---
+# --- frontend seul OU release signee telechargee (verif SHA-256 + minisign) ---
+case "$MODE" in
+  release)
+    DL="$(mktemp -d)"; STAGE="$(mktemp -d)"
+    base_url="https://github.com/$REPO/releases/download/$RELEASE_TAG"
+    log "Telechargement de $ASSET depuis $REPO@$RELEASE_TAG"
+    for suffix in "" ".sha256" ".minisig"; do
+      curl -fSL --retry 3 --retry-delay 2 --max-time 180 \
+        -o "$DL/$ASSET$suffix" "$base_url/$ASSET$suffix"
+    done
+    verify_artifact "$DL/$ASSET"
+    tar -xzf "$DL/$ASSET" -C "$STAGE"
+    BUILT_BIN="$STAGE/cst-server"
+    DIST_SRC="$STAGE/dist"
+    [[ -f "$BUILT_BIN" ]] || { echo "Archive invalide: cst-server introuvable." >&2; exit 1; }
+    [[ -d "$DIST_SRC" ]] || { echo "Archive invalide: dist/ introuvable." >&2; exit 1; }
+    chmod 0755 "$BUILT_BIN"
+    ;;
+  prebuilt)
+    # Artefact CI PRECOMPILE (binaire + dist) transfere par SSH : aucune
+    # compilation sur l'hote, verification SHA-256 + minisign avant bascule.
+    STAGE="$(mktemp -d)"
+    [[ -f "$PREBUILT_ARCHIVE" ]] || { echo "Artefact precompile introuvable: $PREBUILT_ARCHIVE" >&2; exit 1; }
+    verify_artifact "$PREBUILT_ARCHIVE"
+    tar -xzf "$PREBUILT_ARCHIVE" -C "$STAGE"
+    BUILT_BIN="$STAGE/cst-server"
+    DIST_SRC="$STAGE/dist"
+    [[ -f "$BUILT_BIN" ]] || { echo "Archive invalide: cst-server introuvable." >&2; exit 1; }
+    [[ -d "$DIST_SRC" ]] || { echo "Archive invalide: dist/ introuvable." >&2; exit 1; }
+    chmod 0755 "$BUILT_BIN"
+    log "Artefact precompile verifie : ${BUILT_BIN}"
+    ;;
+  frontend)
+    # Pousse frontend uniquement : le binaire courant est conserve, seul
+    # dist/ est remplace -> bascule quasi instantanee, aucune compilation.
+    STAGE="$(mktemp -d)"
+    [[ -f "$FRONTEND_ARCHIVE" ]] || { echo "Artefact frontend introuvable: $FRONTEND_ARCHIVE" >&2; exit 1; }
+    verify_artifact "$FRONTEND_ARCHIVE"
+    tar -xzf "$FRONTEND_ARCHIVE" -C "$STAGE"
+    DIST_SRC="$STAGE/dist"
+    [[ -d "$DIST_SRC" ]] || { echo "Archive invalide: dist/ introuvable." >&2; exit 1; }
+    CURRENT_REAL="$(readlink -f "$CURRENT_LINK" 2>/dev/null || true)"
+    BUILT_BIN="$CURRENT_REAL/cst-server"
+    [[ -x "$BUILT_BIN" ]] || { echo "Binaire courant introuvable (noeud non installe ?)." >&2; exit 1; }
+    log "Mode frontend : binaire conserve ($BUILT_BIN), seul dist/ est remplace."
+    ;;
+  build)
   # Mode build (Phase 1) : nouvelle source (push deploy) puis compilation hote.
   if [[ -f "$SOURCE_ARCHIVE" ]]; then
     log "Extraction de la nouvelle source dans $SOURCE_DIR"
@@ -247,9 +299,10 @@ else
     CARGO_TARGET_DIR="$BUILD_CACHE" \
     CST_GIT_COMMIT="$CST_GIT_COMMIT" \
     bash -c "cd '$SOURCE_DIR' && cargo +1.88.0 build --manifest-path src-tauri/Cargo.toml --profile server --bin cst-server"
-  BUILT_BIN="$BUILD_CACHE/server/cst-server"
-  DIST_SRC="$SOURCE_DIR/dist"
-fi
+    BUILT_BIN="$BUILD_CACHE/server/cst-server"
+    DIST_SRC="$SOURCE_DIR/dist"
+    ;;
+esac
 
 # --- Self-check : le binaire repond a --version (commun aux deux modes) ---
 VLINE="$("$BUILT_BIN" --version)"
@@ -259,13 +312,18 @@ COMMIT="$(sed -n 's/^cst-server [^ ]* (\(.*\))$/\1/p' <<<"$VLINE")"
   echo "Version/commit illisibles via 'cst-server --version': $VLINE" >&2
   exit 1
 }
-if [[ "$MODE" == "build" && -n "$CST_GIT_COMMIT" && "$COMMIT" != "$CST_GIT_COMMIT" ]]; then
+if [[ "$MODE" == "build" || "$MODE" == "prebuilt" ]] \
+   && [[ -n "$CST_GIT_COMMIT" && "$COMMIT" != "$CST_GIT_COMMIT" ]]; then
   echo "Incoherence: commit demande $CST_GIT_COMMIT mais binaire en $COMMIT." >&2
   exit 1
 fi
 if [[ "$MODE" == "release" && "${RELEASE_TAG#v}" != "$VERSION" ]]; then
   echo "Incoherence: tag $RELEASE_TAG mais binaire en version $VERSION." >&2
   exit 1
+fi
+if [[ "$MODE" == "frontend" && -n "$CST_GIT_COMMIT" ]]; then
+  # Binaire inchange : le commit embarque reste celui d'avant ; seul dist/ avance.
+  log "Frontend uniquement : dist du commit $CST_GIT_COMMIT, binaire en $COMMIT."
 fi
 log "Nouvelle release : $VLINE"
 
@@ -274,6 +332,11 @@ log "Nouvelle release : $VLINE"
 # immutable et evite de reecrire le binaire actuellement execute.
 SAFE_COMMIT="$(sed 's/[^A-Za-z0-9._-]/-/g' <<<"$COMMIT")"
 RELEASE_ID="$VERSION-$SAFE_COMMIT"
+if [[ "$MODE" == "frontend" && -n "$CST_GIT_COMMIT" ]]; then
+  # Deux pousses frontend successives partagent le meme binaire : suffixer par
+  # le nouveau commit distingue les releases et preserve le rollback.
+  RELEASE_ID="$RELEASE_ID-ui-$(sed 's/[^A-Za-z0-9._-]/-/g' <<<"$CST_GIT_COMMIT")"
+fi
 RELEASE_DIR="$RELEASES_DIR/$RELEASE_ID"
 if [[ -e "$RELEASE_DIR" ]]; then
   RELEASE_ID="$RELEASE_ID-$(date +%s)-$$"

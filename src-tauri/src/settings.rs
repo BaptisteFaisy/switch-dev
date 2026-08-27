@@ -1,6 +1,6 @@
 use chrono::{SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use std::{
     collections::HashSet,
     env, fs,
@@ -14,6 +14,7 @@ use std::{
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+use url::Url;
 
 /// Fournisseur CLI gere par un compte / un agent.
 ///
@@ -30,6 +31,8 @@ pub enum Provider {
     Claude,
     OpenCode,
     Freebuff,
+    /// Compte AIHubMix utilisant son endpoint OpenAI-compatible.
+    Aihubmix,
 }
 
 impl Provider {
@@ -40,6 +43,7 @@ impl Provider {
             Provider::Claude => "claude",
             Provider::OpenCode => "opencode",
             Provider::Freebuff => "freebuff",
+            Provider::Aihubmix => "aihubmix",
         }
     }
 }
@@ -63,6 +67,9 @@ pub struct AccountProfile {
     /// les runtimes natifs Codex et Claude Code.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inference_provider: Option<String>,
+    /// Clé AIHubMix stockée côté runtime, jamais exposée au frontend.
+    #[serde(default, skip_serializing)]
+    pub api_key: Option<String>,
     /// Dossier "home" isole du compte. Pour Codex c'est `CODEX_HOME` ; pour
     /// Claude c'est `CLAUDE_CONFIG_DIR` (meme role : sessions + credentials +
     /// config propres au compte). Le nom de champ reste `codexHome` cote JSON
@@ -91,6 +98,10 @@ pub struct AccountProfile {
     /// anciennes configurations => mode normal, sans surconsommation.
     #[serde(default)]
     pub fast_mode: bool,
+    /// Jour civil local (`YYYY-MM-DD`) ou le compte a ete marque termine.
+    /// Le frontend ignore automatiquement une date anterieure au jour courant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_on: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -378,6 +389,13 @@ const RATE_LIMIT_RESET_MATCH_TOLERANCE_SECS: u64 = 60;
 const RATE_LIMIT_READ_TIMEOUT_SECS: u64 = 18;
 const RATE_LIMIT_CACHE_TTL_SECS: u64 = 60;
 const MODEL_CATALOG_TIMEOUT_SECS: u64 = 12;
+const OPENROUTER_MODELS_USER_URL: &str = "https://openrouter.ai/api/v1/models/user";
+const OPENROUTER_MODEL_CATALOG_TIMEOUT_SECS: u64 = 20;
+const OPENROUTER_MODEL_PAGE_LIMIT: usize = 1000;
+const OPENROUTER_MODEL_MAX_PAGES: usize = 100;
+const OPENROUTER_MODEL_ID_MAX_CHARS: usize = 160;
+const OPENROUTER_REASONING_EFFORTS: [&str; 7] =
+    ["max", "xhigh", "high", "medium", "low", "minimal", "none"];
 
 /// Endpoint OAuth interroge par la commande `/usage` de Claude Code : c'est la
 /// seule source des fenetres de consommation d'un abonnement claude.ai.
@@ -459,6 +477,9 @@ pub fn load_settings() -> Result<AppSettings, String> {
     if deduplicate_accounts_by_home(&mut settings) {
         changed = true;
     }
+    if ensure_special_bai_account(&mut settings)? {
+        changed = true;
+    }
     ensure_default_account(&mut settings);
     if ensure_agents(&mut settings) {
         changed = true;
@@ -488,6 +509,7 @@ pub fn save_settings(mut settings: AppSettings) -> Result<AppSettings, String> {
     let now = now_unix();
     merge_persisted_account_lifecycle(&path, &mut settings, now);
     deduplicate_accounts_by_home(&mut settings);
+    ensure_special_bai_account(&mut settings)?;
     ensure_default_account(&mut settings);
     ensure_agents(&mut settings);
     ensure_workspaces(&mut settings);
@@ -623,6 +645,101 @@ pub fn ensure_account_home(
 /// Ajoute un compte au registre partage sans transporter la vue personnelle
 /// des workspaces du navigateur. Sur le serveur SaaS, tous les utilisateurs
 /// authentifies voient le meme pool de comptes et les memes homes de provider.
+// ---------------------------------------------------------------------------
+// Compte special b.ai
+// ---------------------------------------------------------------------------
+
+/// Identifiant du compte special injecte depuis l'environnement. Comme le
+/// compte fal.ai de l'image (`environment-fal`), il n'est jamais cree par
+/// l'interface : sa cle API vient de l'env du noeud (`CST_BAI_API_KEY`) et le
+/// compte apparait automatiquement sur chaque instance (SSD et VPS) qui la
+/// possede. Le fournisseur est OpenCode/DeepSeek (modele DeepSeek V4 Flash,
+/// intensite de raisonnement `max`) : c'est le seul provider chat/agents qui
+/// accepte une cle `sk-` et sait piloter `deepseek/deepseek-v4-flash`.
+pub(crate) const SPECIAL_BAI_ACCOUNT_ID: &str = "bai";
+const BAI_API_KEY_ENV: &str = "CST_BAI_API_KEY";
+const BAI_ACCOUNT_LABEL: &str = "b.ai";
+const BAI_MODEL: &str = "deepseek/deepseek-v4-flash";
+const BAI_REASONING_EFFORT: &str = "max";
+
+pub(crate) fn bai_api_key_from_env() -> Option<String> {
+    env::var(BAI_API_KEY_ENV)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+/// Cree (ou met a jour) le compte special b.ai a partir de `CST_BAI_API_KEY`.
+/// Retourne `true` si `settings.accounts` a change (le compte a ete ajoute),
+/// `false` sinon (cle absente ou compte deja present). Idempotent.
+pub(crate) fn ensure_special_bai_account(settings: &mut AppSettings) -> Result<bool, String> {
+    ensure_special_bai_account_from(settings, bai_api_key_from_env().as_deref())
+}
+
+fn ensure_special_bai_account_from(
+    settings: &mut AppSettings,
+    key: Option<&str>,
+) -> Result<bool, String> {
+    let Some(key) = key.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(false);
+    };
+
+    // Home isole du compte, meme format distant que le frontend
+    // (`%CST_DATA_DIR%\codex-homes/...`), resolu par `expand_home_local`.
+    let codex_home = format!("%CST_DATA_DIR%\\codex-homes/opencode-b-ai");
+
+    if let Some(account) = settings
+        .accounts
+        .iter()
+        .find(|account| account.id == SPECIAL_BAI_ACCOUNT_ID)
+    {
+        seed_bai_account_auth(&account.codex_home, key)?;
+        return Ok(false);
+    }
+
+    let account = AccountProfile {
+        id: SPECIAL_BAI_ACCOUNT_ID.to_string(),
+        label: BAI_ACCOUNT_LABEL.to_string(),
+        created_at: Some(now_unix()),
+        provider: Provider::OpenCode,
+        inference_provider: Some("deepseek".to_string()),
+        codex_home,
+        project_dir: None,
+        proxy_id: None,
+        startup_command: None,
+        limits: AccountLimitTracking::default(),
+        bypass: true,
+        model: Some(BAI_MODEL.to_string()),
+        reasoning_effort: Some(BAI_REASONING_EFFORT.to_string()),
+        fast_mode: false,
+        completed_on: None,
+        api_key: None,
+    };
+    seed_bai_account_auth(&account.codex_home, key)?;
+    settings.accounts.push(account);
+    Ok(true)
+}
+
+/// Ecrit la cle API dans le home isole du compte (auth opencode), sans
+/// ecraser les autres fournisseurs eventuellement presents dans le fichier.
+fn seed_bai_account_auth(codex_home: &str, key: &str) -> Result<(), String> {
+    let home = expand_home_local(codex_home)?;
+    let auth_dir = home.join("data").join("opencode");
+    fs::create_dir_all(&auth_dir).map_err(|error| error.to_string())?;
+
+    let path = auth_dir.join("auth.json");
+    let existing = fs::read_to_string(&path).unwrap_or_default();
+    let mut root: Value = serde_json::from_str(&existing).unwrap_or(Value::Object(Map::new()));
+    if !root.is_object() {
+        root = Value::Object(Map::new());
+    }
+    root.as_object_mut()
+        .expect("racine JSON objet")
+        .insert("deepseek".to_string(), json!({ "type": "api", "key": key }));
+    let content = serde_json::to_string_pretty(&root).map_err(|error| error.to_string())?;
+    crate::fs_util::atomic_write(&path, content).map_err(|error| error.to_string())
+}
+
 pub fn add_shared_account(account: AccountProfile) -> Result<AppSettings, String> {
     if account.id.trim().is_empty() {
         return Err("Identifiant de compte manquant".to_string());
@@ -831,9 +948,7 @@ pub async fn account_limit_status(force: Option<bool>) -> Result<Vec<AccountLimi
 
 #[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn account_model_catalog(account_id: String) -> Result<Vec<AccountModelView>, String> {
-    tokio::task::spawn_blocking(move || load_account_model_catalog(&account_id))
-        .await
-        .map_err(|error| error.to_string())?
+    load_account_model_catalog(&account_id).await
 }
 
 #[cfg_attr(feature = "desktop", tauri::command)]
@@ -960,7 +1075,87 @@ mod tests {
             model: None,
             reasoning_effort: None,
             fast_mode: false,
+            completed_on: None,
+            api_key: None,
         }
+    }
+
+    #[test]
+    fn special_bai_account_is_created_from_env_and_writes_the_deepseek_key() {
+        let data_dir = fresh_account_home("bai-account");
+        env::set_var("CST_DATA_DIR", &data_dir);
+        env::set_var("CST_BAI_API_KEY", "sk-test-bai-key");
+        let result = (|| -> Result<(), String> {
+            let mut settings = empty_settings("codex", Vec::new(), None);
+            let changed = ensure_special_bai_account(&mut settings)?;
+            assert!(changed, "le compte special doit etre ajoute au premier appel");
+
+            let account = settings
+                .accounts
+                .iter()
+                .find(|account| account.id == SPECIAL_BAI_ACCOUNT_ID)
+                .expect("compte special present");
+            assert_eq!(account.label, "b.ai");
+            assert_eq!(account.provider, Provider::OpenCode);
+            assert_eq!(account.inference_provider.as_deref(), Some("deepseek"));
+            assert_eq!(account.model.as_deref(), Some("deepseek/deepseek-v4-flash"));
+            assert_eq!(account.reasoning_effort.as_deref(), Some("max"));
+            assert!(account.codex_home.starts_with("%CST_DATA_DIR%"));
+
+            // La cle est ecrite dans le home isole, format auth opencode.
+            let auth_path =
+                data_dir.join("codex-homes/opencode-b-ai/data/opencode/auth.json");
+            let auth: Value =
+                serde_json::from_str(&fs::read_to_string(&auth_path).unwrap()).unwrap();
+            assert_eq!(auth["deepseek"]["key"], "sk-test-bai-key");
+            assert_eq!(auth["deepseek"]["type"], "api");
+
+            // Idempotent : un second appel ne re-ajoute pas le compte.
+            let second = ensure_special_bai_account(&mut settings)?;
+            assert!(!second, "le compte ne doit pas etre duplique");
+            assert_eq!(
+                settings
+                    .accounts
+                    .iter()
+                    .filter(|account| account.id == SPECIAL_BAI_ACCOUNT_ID)
+                    .count(),
+                1
+            );
+            Ok(())
+        })();
+        env::remove_var("CST_BAI_API_KEY");
+        env::remove_var("CST_DATA_DIR");
+        let _ = fs::remove_dir_all(&data_dir);
+        result.expect("test reussi");
+    }
+
+    #[test]
+    fn special_bai_account_is_absent_without_env_key() {
+        env::remove_var("CST_BAI_API_KEY");
+        let mut settings = empty_settings("codex", Vec::new(), None);
+        let changed = ensure_special_bai_account(&mut settings).unwrap();
+        assert!(!changed);
+        assert!(
+            !settings
+                .accounts
+                .iter()
+                .any(|account| account.id == SPECIAL_BAI_ACCOUNT_ID)
+        );
+    }
+
+    #[test]
+    fn account_daily_completion_is_backward_compatible_and_persists_the_day() {
+        let mut account: AccountProfile = serde_json::from_value(json!({
+            "id": "daily-account",
+            "label": "Compte quotidien",
+            "codexHome": ".codex-daily"
+        }))
+        .unwrap();
+        assert_eq!(account.completed_on, None);
+
+        account.completed_on = Some("2026-08-20".to_string());
+        let value = serde_json::to_value(account).unwrap();
+        assert_eq!(value["completedOn"], "2026-08-20");
     }
 
     #[test]
@@ -1254,6 +1449,7 @@ mod tests {
         assert!(twice.contains("[mcp_servers.example]"));
         assert!(twice.contains("url = \"http://127.0.0.1:8123/mcp\""));
         assert_eq!(twice.matches("service_tier =").count(), 1);
+        assert!(twice.contains("goals = true"));
 
         let _ = fs::remove_dir_all(home);
     }
@@ -2309,6 +2505,134 @@ mod tests {
             vec!["low", "max", "ultra"]
         );
     }
+
+    #[test]
+    fn openrouter_api_key_is_read_only_from_the_account_auth_store() {
+        let home = fresh_account_home("openrouter-auth");
+        let auth_dir = home.join("data").join("opencode");
+        fs::create_dir_all(&auth_dir).unwrap();
+        fs::write(
+            auth_dir.join("auth.json"),
+            r#"{"openrouter":{"type":"api","key":"sk-or-v1-backend-only"}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            read_opencode_provider_api_key(&home, "openrouter").unwrap(),
+            "sk-or-v1-backend-only"
+        );
+        let missing = read_opencode_provider_api_key(&home, "another-provider").unwrap_err();
+        assert!(!missing.contains("sk-or-v1-backend-only"));
+
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn openrouter_catalog_preserves_exact_reasoning_metadata_and_aliases() {
+        let models = parse_openrouter_model_catalog(
+            json!([
+                {
+                    "id": "vendor/optional-reasoning",
+                    "name": "Optional",
+                    "reasoning": {
+                        "supported_efforts": ["high", "low", "none", "invalid"],
+                        "default_effort": "high",
+                        "mandatory": false
+                    }
+                },
+                {
+                    "id": "vendor/mandatory-reasoning",
+                    "reasoning": {
+                        "supported_efforts": ["max", "none"],
+                        "default_effort": "none",
+                        "mandatory": true
+                    }
+                },
+                {
+                    "id": "~z-ai/glm-latest",
+                    "reasoning": {
+                        "supported_efforts": ["medium"],
+                        "default_effort": "medium",
+                        "default_enabled": false
+                    }
+                },
+                { "id": "vendor/model;whoami" }
+            ])
+            .as_array()
+            .unwrap(),
+        );
+
+        assert_eq!(models.len(), 3);
+        assert_eq!(models[0].id, "openrouter/vendor/optional-reasoning");
+        assert_eq!(models[0].default_reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(
+            models[0]
+                .supported_reasoning_efforts
+                .iter()
+                .map(|effort| effort.reasoning_effort.as_str())
+                .collect::<Vec<_>>(),
+            vec!["high", "low", "none"]
+        );
+        assert_eq!(
+            models[1]
+                .supported_reasoning_efforts
+                .iter()
+                .map(|effort| effort.reasoning_effort.as_str())
+                .collect::<Vec<_>>(),
+            vec!["max"]
+        );
+        assert!(models[1].default_reasoning_effort.is_none());
+        assert_eq!(models[2].id, "openrouter/~z-ai/glm-latest");
+        assert!(models[2].default_reasoning_effort.is_none());
+    }
+
+    #[test]
+    fn openrouter_alias_filter_rejects_shell_metacharacters() {
+        assert!(safe_openrouter_model_slug("~z-ai/glm-latest"));
+        assert!(safe_openrouter_model_slug("openai/gpt-5.6:online"));
+        for hostile in [
+            "~~z-ai/glm-latest",
+            "z-ai/~glm-latest",
+            "z-ai/glm$latest",
+            "z-ai/glm`latest`",
+            "z-ai/glm\\latest",
+            "z-ai/glm\"latest",
+            "z-ai/glm'latest",
+            "z-ai/glm;latest",
+            "z-ai/glm|latest",
+            "z-ai/glm&latest",
+            "z-ai/glm latest",
+        ] {
+            assert!(!safe_openrouter_model_slug(hostile), "accepte: {hostile}");
+        }
+    }
+
+    #[test]
+    fn openrouter_pagination_stays_on_the_catalog_endpoint() {
+        let endpoint = Url::parse(OPENROUTER_MODELS_USER_URL).unwrap();
+        let current = openrouter_page_url(&endpoint, 0);
+        let next = openrouter_next_page_url(
+            &endpoint,
+            &current,
+            &json!({ "data": [], "total_count": 2_000 }),
+            None,
+            1_000,
+            1_000,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            next.query_pairs()
+                .find(|(name, _)| name == "offset")
+                .map(|(_, value)| value.into_owned()),
+            Some("1000".to_string())
+        );
+
+        let hostile = json!({ "next": "https://attacker.invalid/api/v1/models/user?page=2" });
+        assert!(
+            openrouter_next_page_url(&endpoint, &current, &hostile, None, 1_000, 1_000,).is_err()
+        );
+    }
 }
 
 pub fn load_settings_for_terminal() -> Result<AppSettings, String> {
@@ -2845,6 +3169,9 @@ fn merge_missing_account_metadata(target: &mut AccountProfile, source: &AccountP
         target.reasoning_effort = source.reasoning_effort.clone();
     }
     target.fast_mode |= source.fast_mode;
+    if target.completed_on.is_none() {
+        target.completed_on = source.completed_on.clone();
+    }
     if target.limits.connected_at.is_none() {
         target.limits.connected_at = source.limits.connected_at;
     }
@@ -2967,6 +3294,8 @@ fn merge_discovered_profiles(settings: &mut AppSettings) -> Result<bool, String>
                 model: None,
                 reasoning_effort: None,
                 fast_mode: false,
+                completed_on: None,
+                api_key: None,
             });
             account_paths.insert(normalized);
             changed = true;
@@ -3049,6 +3378,7 @@ pub fn command_for_provider(settings: &AppSettings, provider: Provider) -> Strin
             Provider::Claude => "claude".to_string(),
             Provider::OpenCode => "opencode".to_string(),
             Provider::Freebuff => "freebuff".to_string(),
+            Provider::Aihubmix => "aihubmix".to_string(),
         })
 }
 
@@ -3272,6 +3602,15 @@ fn prepare_cached_limit_rows(rows: &mut [AccountLimitView], refreshing: bool) {
         row.session_remaining_secs = row.session_reset_at.map(|value| (value - now).max(0));
         row.weekly_remaining_secs = row.weekly_reset_at.map(|value| (value - now).max(0));
         row.refreshing = refreshing && provider_reads_remote_limits(row.provider) && row.has_tokens;
+        // Les quotas distants peuvent rester caches, mais l'occupation Freebuff
+        // est un etat local et instantane. La recalculer a chaque lecture evite
+        // qu'un selecteur affiche « disponible » alors qu'un terminal vient de
+        // prendre le verrou de ce home.
+        if row.provider == Provider::Freebuff {
+            row.session_busy = expand_home(&row.codex_home)
+                .map(|home| crate::provider::freebuff_instance_busy(&home))
+                .unwrap_or(false);
+        }
     }
 }
 
@@ -3365,8 +3704,37 @@ fn account_limit_views_fast(settings: &AppSettings) -> Vec<AccountLimitView> {
     rows
 }
 
+/// Duree pendant laquelle un scan force reutilise le dernier scan complet.
+///
+/// Les declencheurs UI tirent plusieurs scans forces par minute (ouverture de
+/// la modale nouveau chat, retours de connexion, vue Limites) alors qu'un scan
+/// complet demarre un app-server par compte Codex et prend de 6 a 17 secondes
+/// sur le poste local. Les quotas serveur bougent trop lentement pour justifier
+/// ce cout : dans la fenetre TTL on sert le dernier instantane, l'occupation
+/// Freebuff restant recalculee a chaque lecture (etat local instantane, voir
+/// prepare_cached_limit_rows).
+const FORCED_LIMITS_SCAN_TTL_SECS: u64 = 45;
+
+/// Dernier scan complet s'il date de moins de FORCED_LIMITS_SCAN_TTL_SECS.
+fn fresh_forced_limit_rows(signature: &str) -> Option<Vec<AccountLimitView>> {
+    let mut cache = lock_account_limit_cache();
+    let current = cache
+        .as_mut()
+        .filter(|current| current.signature == signature)?;
+    current.completed_at.filter(|completed_at| {
+        completed_at.elapsed() < Duration::from_secs(FORCED_LIMITS_SCAN_TTL_SECS)
+    })?;
+    let mut rows = current.rows.clone();
+    drop(cache);
+    prepare_cached_limit_rows(&mut rows, false);
+    Some(rows)
+}
+
 pub(crate) fn account_limit_views(settings: &AppSettings) -> Vec<AccountLimitView> {
     let signature = account_limit_cache_signature(settings);
+    if let Some(rows) = fresh_forced_limit_rows(&signature) {
+        return rows;
+    }
     let rows = account_limit_views_uncached(settings);
     store_account_limit_cache(signature, rows.clone());
     rows
@@ -3525,11 +3893,10 @@ fn bucket_for_window(
         .min_by_key(|bucket| bucket.resets_at)
 }
 
-/// Catalogue officiel du CLI pour le compte selectionne. `model/list` est la
-/// source de verite : chaque modele fournit sa propre liste d'intensites. Le
-/// cache local reste un fallback pour les anciens CLI ou une machine hors
-/// ligne, avec le meme resultat normalise cote frontend.
-pub fn load_account_model_catalog(account_id: &str) -> Result<Vec<AccountModelView>, String> {
+/// Catalogue officiel pour le compte selectionne. Codex conserve son
+/// `model/list` local ; OpenCode/OpenRouter interroge directement le catalogue
+/// filtre par la cle du compte, sans jamais faire traverser cette cle au client.
+pub async fn load_account_model_catalog(account_id: &str) -> Result<Vec<AccountModelView>, String> {
     let settings = load_settings_for_terminal()?;
     let account = settings
         .accounts
@@ -3537,13 +3904,32 @@ pub fn load_account_model_catalog(account_id: &str) -> Result<Vec<AccountModelVi
         .find(|candidate| candidate.id == account_id)
         .cloned()
         .ok_or_else(|| "Compte introuvable".to_string())?;
-    if account.provider == Provider::Freebuff {
-        return Ok(freebuff_model_catalog());
-    }
-    if account.provider != Provider::Codex {
-        return Ok(Vec::new());
-    }
 
+    match account.provider {
+        Provider::Freebuff => Ok(freebuff_model_catalog()),
+        Provider::OpenCode
+            if account
+                .inference_provider
+                .as_deref()
+                .is_some_and(|provider| provider.eq_ignore_ascii_case("openrouter")) =>
+        {
+            let home = expand_home(&account.codex_home)?;
+            let api_key = read_opencode_provider_api_key(&home, "openrouter")?;
+            let proxy_url = proxy_url_for_account(&account, &settings);
+            load_openrouter_model_catalog(&api_key, proxy_url.as_deref()).await
+        }
+        Provider::Codex => tokio::task::spawn_blocking(move || {
+            load_codex_account_model_catalog(&account, &settings)
+        })
+        .await
+        .map_err(|_| "Lecture du catalogue Codex interrompue".to_string())?,            Provider::OpenCode | Provider::Claude | Provider::Aihubmix => Ok(Vec::new()),
+    }
+}
+
+fn load_codex_account_model_catalog(
+    account: &AccountProfile,
+    settings: &AppSettings,
+) -> Result<Vec<AccountModelView>, String> {
     let app_server_result = read_model_catalog_from_app_server(&account, &settings);
     if let Ok(result) = app_server_result.as_ref() {
         let models = parse_account_model_catalog(result);
@@ -3566,6 +3952,339 @@ pub fn load_account_model_catalog(account_id: &str) -> Result<Vec<AccountModelVi
     Err(app_server_result
         .err()
         .unwrap_or_else(|| "Catalogue de modeles Codex indisponible".to_string()))
+}
+
+fn read_opencode_provider_api_key(home: &Path, provider: &str) -> Result<String, String> {
+    let path = home.join("data").join("opencode").join("auth.json");
+    let content = fs::read_to_string(path)
+        .map_err(|_| "Identifiants OpenRouter introuvables pour ce compte".to_string())?;
+    let root = serde_json::from_str::<Value>(&content)
+        .map_err(|_| "Identifiants OpenRouter illisibles pour ce compte".to_string())?;
+    let entry = root.as_object().and_then(|providers| {
+        providers.get(provider).or_else(|| {
+            providers
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case(provider))
+                .map(|(_, value)| value)
+        })
+    });
+    let api_key = match entry {
+        Some(Value::String(value)) => Some(value.as_str()),
+        Some(Value::Object(fields)) => ["key", "access", "token"].into_iter().find_map(|field| {
+            fields
+                .get(field)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        }),
+        _ => None,
+    }
+    .map(str::trim)
+    .filter(|value| !value.is_empty())
+    .filter(|value| !value.chars().any(char::is_control))
+    .ok_or_else(|| "Cle OpenRouter absente pour ce compte".to_string())?;
+    Ok(api_key.to_string())
+}
+
+fn openrouter_model_client(proxy_url: Option<&str>) -> Result<reqwest::Client, String> {
+    let mut builder = reqwest::Client::builder()
+        .timeout(Duration::from_secs(OPENROUTER_MODEL_CATALOG_TIMEOUT_SECS))
+        // Un redirect ne doit jamais pouvoir transporter le Bearer du compte
+        // vers un autre hote. La pagination est validee separement ci-dessous.
+        .redirect(reqwest::redirect::Policy::none())
+        .user_agent(concat!("codex-switch-terminal/", env!("CARGO_PKG_VERSION")));
+    if let Some(proxy_url) = proxy_url {
+        builder = builder.proxy(
+            reqwest::Proxy::all(proxy_url).map_err(|_| "proxy OpenRouter invalide".to_string())?,
+        );
+    }
+    builder
+        .build()
+        .map_err(|_| "client OpenRouter indisponible".to_string())
+}
+
+async fn load_openrouter_model_catalog(
+    api_key: &str,
+    proxy_url: Option<&str>,
+) -> Result<Vec<AccountModelView>, String> {
+    let endpoint = Url::parse(OPENROUTER_MODELS_USER_URL)
+        .map_err(|_| "Endpoint OpenRouter invalide".to_string())?;
+    let client = openrouter_model_client(proxy_url)?;
+    fetch_openrouter_model_catalog(&client, &endpoint, api_key).await
+}
+
+async fn fetch_openrouter_model_catalog(
+    client: &reqwest::Client,
+    endpoint: &Url,
+    api_key: &str,
+) -> Result<Vec<AccountModelView>, String> {
+    let mut current = openrouter_page_url(endpoint, 0);
+    let mut visited = HashSet::new();
+    let mut entries = Vec::new();
+
+    for _ in 0..OPENROUTER_MODEL_MAX_PAGES {
+        if !visited.insert(current.as_str().to_string()) {
+            return Err("Pagination OpenRouter cyclique".to_string());
+        }
+        let response = client
+            .get(current.clone())
+            .bearer_auth(api_key)
+            .header("Accept", "application/json")
+            .send()
+            .await
+            // Une erreur reqwest peut inclure l'URL du proxy et ses
+            // identifiants. Le message public reste donc volontairement neutre.
+            .map_err(|_| "Lecture du catalogue OpenRouter impossible".to_string())?;
+        let status = response.status();
+        if !status.is_success() {
+            let message = match status.as_u16() {
+                401 | 403 => "Cle OpenRouter refusee pour ce compte".to_string(),
+                429 => "Catalogue OpenRouter temporairement limite".to_string(),
+                code => format!("Catalogue OpenRouter indisponible (HTTP {code})"),
+            };
+            return Err(message);
+        }
+
+        let link_header = response
+            .headers()
+            .get(reqwest::header::LINK)
+            .and_then(|value| value.to_str().ok())
+            .map(ToString::to_string);
+        let payload = response
+            .json::<Value>()
+            .await
+            .map_err(|_| "Reponse du catalogue OpenRouter illisible".to_string())?;
+        let page = payload
+            .get("data")
+            .and_then(Value::as_array)
+            .ok_or_else(|| "Reponse du catalogue OpenRouter invalide".to_string())?;
+        let page_len = page.len();
+        entries.extend(page.iter().cloned());
+
+        let Some(next) = openrouter_next_page_url(
+            endpoint,
+            &current,
+            &payload,
+            link_header.as_deref(),
+            entries.len(),
+            page_len,
+        )?
+        else {
+            return Ok(parse_openrouter_model_catalog(&entries));
+        };
+        current = next;
+    }
+
+    Err("Catalogue OpenRouter trop volumineux".to_string())
+}
+
+fn openrouter_page_url(endpoint: &Url, offset: usize) -> Url {
+    let mut url = endpoint.clone();
+    url.set_query(None);
+    url.query_pairs_mut()
+        .append_pair("limit", &OPENROUTER_MODEL_PAGE_LIMIT.to_string())
+        .append_pair("offset", &offset.to_string());
+    url
+}
+
+fn openrouter_next_page_url(
+    endpoint: &Url,
+    current: &Url,
+    payload: &Value,
+    link_header: Option<&str>,
+    next_offset: usize,
+    page_len: usize,
+) -> Result<Option<Url>, String> {
+    let payload_next = [
+        payload.get("next"),
+        payload.pointer("/meta/next"),
+        payload.pointer("/meta/next_page"),
+        payload.pointer("/pagination/next"),
+        payload.pointer("/links/next"),
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(Value::as_str)
+    .map(str::trim)
+    .filter(|value| !value.is_empty())
+    .map(ToString::to_string);
+    let link_next = link_header
+        .and_then(openrouter_next_link)
+        .map(ToString::to_string);
+
+    if let Some(reference) = payload_next.or(link_next) {
+        let candidate = Url::parse(&reference).or_else(|_| current.join(&reference));
+        let candidate = candidate.map_err(|_| "Pagination OpenRouter invalide".to_string())?;
+        if !same_openrouter_catalog_endpoint(endpoint, &candidate) {
+            return Err("Pagination OpenRouter invalide".to_string());
+        }
+        return Ok(Some(candidate));
+    }
+
+    let has_more = payload
+        .pointer("/meta/has_more")
+        .or_else(|| payload.pointer("/pagination/has_more"))
+        .or_else(|| payload.get("has_more"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let total = payload
+        .pointer("/meta/total_count")
+        .or_else(|| payload.pointer("/meta/total"))
+        .or_else(|| payload.pointer("/pagination/total"))
+        .or_else(|| payload.get("total_count"))
+        .and_then(Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok());
+    let inferred_more =
+        page_len == OPENROUTER_MODEL_PAGE_LIMIT || total.is_some_and(|total| next_offset < total);
+    if page_len > 0 && (has_more || inferred_more) {
+        Ok(Some(openrouter_page_url(endpoint, next_offset)))
+    } else {
+        Ok(None)
+    }
+}
+
+fn openrouter_next_link(header: &str) -> Option<&str> {
+    header.split(',').find_map(|part| {
+        let mut fields = part.split(';');
+        let target = fields.next()?.trim();
+        let is_next = fields.any(|field| {
+            let relation = field.trim();
+            relation.eq_ignore_ascii_case("rel=next")
+                || relation.eq_ignore_ascii_case("rel=\"next\"")
+        });
+        if !is_next {
+            return None;
+        }
+        target.strip_prefix('<')?.strip_suffix('>')
+    })
+}
+
+fn same_openrouter_catalog_endpoint(endpoint: &Url, candidate: &Url) -> bool {
+    candidate.scheme() == endpoint.scheme()
+        && candidate.host_str() == endpoint.host_str()
+        && candidate.port_or_known_default() == endpoint.port_or_known_default()
+        && candidate.path() == endpoint.path()
+        && candidate.username().is_empty()
+        && candidate.password().is_none()
+        && candidate.fragment().is_none()
+}
+
+fn parse_openrouter_model_catalog(entries: &[Value]) -> Vec<AccountModelView> {
+    let mut seen = HashSet::new();
+    entries
+        .iter()
+        .filter_map(|entry| {
+            let slug = entry.get("id").and_then(Value::as_str)?;
+            if !safe_openrouter_model_slug(slug) {
+                return None;
+            }
+            let id = format!("openrouter/{slug}");
+            if !seen.insert(id.clone()) {
+                return None;
+            }
+            let display_name = entry
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or(slug)
+                .to_string();
+            let (default_reasoning_effort, supported_reasoning_efforts) =
+                parse_openrouter_reasoning(entry.get("reasoning"));
+            Some(AccountModelView {
+                id,
+                display_name,
+                default_reasoning_effort,
+                supported_reasoning_efforts,
+                supports_fast_mode: false,
+            })
+        })
+        .collect()
+}
+
+pub(crate) fn safe_openrouter_model_slug(slug: &str) -> bool {
+    const PREFIX_LEN: usize = "openrouter/".len();
+    if slug.is_empty()
+        || slug != slug.trim()
+        || PREFIX_LEN + slug.chars().count() > OPENROUTER_MODEL_ID_MAX_CHARS
+        || !slug
+            .chars()
+            .next()
+            .is_some_and(|character| character.is_ascii_alphanumeric() || character == '~')
+    {
+        return false;
+    }
+    let segments = slug.split('/').collect::<Vec<_>>();
+    segments.len() >= 2
+        && segments.iter().enumerate().all(|(segment_index, segment)| {
+            !segment.is_empty()
+                && *segment != "."
+                && *segment != ".."
+                && segment
+                    .chars()
+                    .enumerate()
+                    .all(|(character_index, character)| {
+                        character.is_ascii_alphanumeric()
+                            || matches!(character, '-' | '_' | '.' | ':')
+                            || (character == '~' && segment_index == 0 && character_index == 0)
+                    })
+        })
+}
+
+fn parse_openrouter_reasoning(
+    reasoning: Option<&Value>,
+) -> (Option<String>, Vec<ModelReasoningEffortView>) {
+    let Some(reasoning) = reasoning.and_then(Value::as_object) else {
+        return (None, Vec::new());
+    };
+    let mandatory = reasoning
+        .get("mandatory")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let mut seen = HashSet::new();
+    let mut supported = match reasoning.get("supported_efforts") {
+        Some(Value::Null) => OPENROUTER_REASONING_EFFORTS
+            .iter()
+            .map(|effort| (*effort).to_string())
+            .collect::<Vec<_>>(),
+        Some(Value::Array(efforts)) => efforts
+            .iter()
+            .filter_map(Value::as_str)
+            .filter(|effort| is_openrouter_reasoning_effort(effort))
+            .filter(|effort| seen.insert((*effort).to_string()))
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
+        _ => Vec::new(),
+    };
+    if mandatory {
+        supported.retain(|effort| effort != "none");
+    }
+    let supported_reasoning_efforts = supported
+        .into_iter()
+        .map(|reasoning_effort| ModelReasoningEffortView {
+            reasoning_effort,
+            description: None,
+        })
+        .collect::<Vec<_>>();
+    let default_enabled = reasoning
+        .get("default_enabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let default_reasoning_effort = default_enabled
+        .then(|| reasoning.get("default_effort").and_then(Value::as_str))
+        .flatten()
+        .filter(|effort| is_openrouter_reasoning_effort(effort))
+        .filter(|effort| {
+            supported_reasoning_efforts
+                .iter()
+                .any(|supported| supported.reasoning_effort.as_str() == *effort)
+        })
+        .map(ToString::to_string);
+    (default_reasoning_effort, supported_reasoning_efforts)
+}
+
+pub(crate) fn is_openrouter_reasoning_effort(effort: &str) -> bool {
+    OPENROUTER_REASONING_EFFORTS.contains(&effort)
 }
 
 /// Catalogue des modeles proposes par freebuff.
@@ -3859,9 +4578,8 @@ fn local_snapshot_matches_current_credentials(
         Provider::Codex => home.join("auth.json"),
         Provider::Claude => home.join(".credentials.json"),
         Provider::OpenCode => home.join("data").join("opencode").join("auth.json"),
-        Provider::Freebuff => {
-            crate::provider::freebuff_config_dir(&home).join("credentials.json")
-        }
+        Provider::Freebuff => crate::provider::freebuff_config_dir(&home).join("credentials.json"),
+        Provider::Aihubmix => home.join(".config").join("aihubmix").join("credentials.json"),
     };
     let Some(modified_at) = fs::metadata(credentials)
         .ok()
@@ -4841,6 +5559,8 @@ fn import_single_account(
                 model: model.clone(),
                 reasoning_effort: reasoning_effort.clone(),
                 fast_mode: false,
+                completed_on: None,
+                api_key: None,
             });
             (bypass_default, model, reasoning_effort, false)
         }
@@ -5258,6 +5978,14 @@ pub fn ensure_codex_account_config(
     } else {
         remove_top_level_key(&updated, "service_tier")
     };
+    // Epingler Goals et les deux generations du moteur multi-agent rend le
+    // comportement identique dans les chats `codex exec` et dans les terminaux
+    // interactifs. `agents.enabled` expose les outils ; v2 persiste les fils de
+    // sous-agents.
+    updated = upsert_table_bool(&updated, "features", "goals", true);
+    updated = upsert_table_bool(&updated, "features", "multi_agent", true);
+    updated = upsert_table_bool(&updated, "features", "multi_agent_v2", true);
+    updated = upsert_table_bool(&updated, "agents", "enabled", true);
     if let Some(windows_sandbox) = codex_windows_sandbox_override()? {
         updated = upsert_table_string(&updated, "windows", "sandbox", &windows_sandbox);
     }
@@ -5415,8 +6143,19 @@ fn remove_top_level_key(content: &str, key: &str) -> String {
 /// Insere ou remplace une chaine dans une table TOML simple sans reserialiser
 /// le document entier (les commentaires et les tables MCP restent intacts).
 fn upsert_table_string(content: &str, table: &str, key: &str, value: &str) -> String {
-    let header = format!("[{table}]");
     let desired = format!("{key} = \"{}\"", escape_toml_basic_string(value));
+    upsert_table_value(content, table, key, &desired)
+}
+
+/// Insere ou remplace un booleen dans une table TOML simple en conservant les
+/// commentaires et les autres sections du fichier.
+fn upsert_table_bool(content: &str, table: &str, key: &str, value: bool) -> String {
+    let desired = format!("{key} = {value}");
+    upsert_table_value(content, table, key, &desired)
+}
+
+fn upsert_table_value(content: &str, table: &str, key: &str, desired: &str) -> String {
+    let header = format!("[{table}]");
     let mut out = String::with_capacity(content.len() + header.len() + desired.len() + 4);
     let mut found_table = false;
     let mut in_target_table = false;
@@ -5430,7 +6169,7 @@ fn upsert_table_string(content: &str, table: &str, key: &str, value: &str) -> St
 
         if at_structural_level && trimmed.starts_with('[') {
             if in_target_table && !replaced {
-                out.push_str(&desired);
+                out.push_str(desired);
                 out.push('\n');
                 replaced = true;
             }
@@ -5448,7 +6187,7 @@ fn upsert_table_string(content: &str, table: &str, key: &str, value: &str) -> St
                 .unwrap_or(false);
 
         if is_target {
-            out.push_str(&desired);
+            out.push_str(desired);
             out.push('\n');
             replaced = true;
         } else {
@@ -5460,7 +6199,7 @@ fn upsert_table_string(content: &str, table: &str, key: &str, value: &str) -> St
     }
 
     if found_table && !replaced {
-        out.push_str(&desired);
+        out.push_str(desired);
         out.push('\n');
     } else if !found_table {
         if !out.is_empty() && !out.ends_with("\n\n") {
@@ -5468,7 +6207,7 @@ fn upsert_table_string(content: &str, table: &str, key: &str, value: &str) -> St
         }
         out.push_str(&header);
         out.push('\n');
-        out.push_str(&desired);
+        out.push_str(desired);
         out.push('\n');
     }
 

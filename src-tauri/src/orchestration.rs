@@ -13,7 +13,8 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
+    ffi::OsStr,
     fs::{self, File},
     io::Read,
     path::{Path, PathBuf},
@@ -29,7 +30,7 @@ use std::{
 use tauri::State;
 use uuid::Uuid;
 
-const STORE_VERSION: u32 = 4;
+const STORE_VERSION: u32 = 8;
 const MAX_OBJECTIVE_BYTES: usize = 64 * 1024;
 const MAX_NAME_CHARS: usize = 120;
 const MAX_TEST_COMMAND_CHARS: usize = 8_000;
@@ -38,8 +39,33 @@ const MIN_TEST_TIMEOUT_SECONDS: u64 = 5;
 const MAX_TEST_TIMEOUT_SECONDS: u64 = 30 * 60;
 const DEFAULT_WORKER_COUNT: u32 = 3;
 const MIN_WORKER_COUNT: u32 = 1;
-const MAX_WORKER_COUNT: u32 = 12;
-const MAX_EVENTS: usize = 100;
+const MAX_WORKER_COUNT: u32 = 200;
+const WORKER_COUNT_ENV: &str = "CST_ORCHESTRATION_WORKERS";
+const DEFAULT_MAX_CONCURRENCY: u32 = 8;
+const MIN_MAX_CONCURRENCY: u32 = 1;
+const MAX_MAX_CONCURRENCY: u32 = 200;
+/// Budget global de tours d'agents en vol a travers toutes les orchestrations.
+/// Chaque tour en vol est un agent qui code vraiment (et consomme de la
+/// memoire) ; les runs au-dela de ce budget attendent leur tour. C'est le
+/// reglage qui pilote la memoire du SSD quand on deploye 200 agents :
+/// `CST_ORCHESTRATION_CONCURRENCY` (defaut 8, borne 1..=200).
+const CONCURRENCY_ENV: &str = "CST_ORCHESTRATION_CONCURRENCY";
+/// Repertoire des sandboxes ephemeres des agents (worktrees Git, clones, patches,
+/// handoffs). Par defaut a cote de l'etat persiste sur le SSD ; peut etre
+/// redirige vers un RAM-disk (tmpfs) pour accelerer les fichiers temporaires
+/// des agents : `CST_ORCHESTRATION_SANDBOX_DIR` (ex. /dev/shm/cst-orchestrated-runs).
+const SANDBOX_DIR_ENV: &str = "CST_ORCHESTRATION_SANDBOX_DIR";
+const DEFAULT_MAX_TASK_COUNT: u32 = 100;
+const MIN_TASK_COUNT: u32 = 1;
+const MAX_TASK_COUNT: u32 = 200;
+/// Nombre de threads de pilotage asynchrones. Chaque driver parcourt les runs
+/// actifs et les fait progresser en parallele : plusieurs agents peuvent ainsi
+/// avancer sur le meme travail sans etre serialises par une boucle unique.
+const DRIVER_COUNT_ENV: &str = "CST_ORCHESTRATION_DRIVERS";
+const DEFAULT_DRIVER_COUNT: usize = 4;
+const MIN_DRIVER_COUNT: usize = 1;
+const MAX_DRIVER_COUNT: usize = 64;
+const MAX_EVENTS: usize = 1_000;
 const MAX_REVIEWS: usize = 20;
 const MAX_PROTOCOL_FAILURES: u32 = 3;
 const MAX_START_FAILURES: u32 = 3;
@@ -54,6 +80,20 @@ pub enum OrchestrationStatus {
     Paused,
     Completed,
     NeedsAttention,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OrchestrationSourceKind {
+    GitClean,
+    GitDirty,
+    Ephemeral,
+}
+
+impl Default for OrchestrationSourceKind {
+    fn default() -> Self {
+        Self::GitClean
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -186,6 +226,16 @@ pub struct OrchestrationSnapshot {
     pub objective: String,
     #[serde(default)]
     pub worker_count: u32,
+    #[serde(default = "default_adaptive_fanout")]
+    pub adaptive_fanout: bool,
+    #[serde(default = "default_max_task_count")]
+    pub max_task_count: u32,
+    /// Plancher immuable choisi a la creation. Un routeur qui demande 20, 100
+    /// ou 200 sous-agents ne peut pas etre silencieusement reduit par le planner.
+    #[serde(default)]
+    pub minimum_task_count: u32,
+    #[serde(default = "default_max_concurrency")]
+    pub max_concurrency: u32,
     pub account_id: String,
     #[serde(default)]
     pub orchestrator_account_id: String,
@@ -195,6 +245,19 @@ pub struct OrchestrationSnapshot {
     pub orchestrator_handoff_pending: bool,
     #[serde(default)]
     pub orchestrator_handoff_count: u32,
+    /// Proprietaire HTTP injecte par le serveur. `None` preserve le mode
+    /// desktop local et la migration des anciens snapshots.
+    #[serde(default)]
+    pub owner_id: Option<String>,
+    #[serde(default)]
+    pub source_kind: OrchestrationSourceKind,
+    /// Chemin demande, conserve pour l'affichage uniquement.
+    #[serde(default)]
+    pub requested_project_dir: Option<String>,
+    /// Frontiere ACL canonique. Elle ne doit jamais etre remplacee par le
+    /// depot Git prive cree dans le sandbox.
+    #[serde(default)]
+    pub access_project_dir: Option<String>,
     pub project_dir: String,
     #[serde(default)]
     pub model: Option<String>,
@@ -252,6 +315,12 @@ pub struct CreateOrchestrationRequest {
     pub objective: String,
     #[serde(default)]
     pub worker_count: Option<u32>,
+    #[serde(default)]
+    pub adaptive_fanout: Option<bool>,
+    #[serde(default)]
+    pub max_task_count: Option<u32>,
+    #[serde(default)]
+    pub max_concurrency: Option<u32>,
     /// Session d'un chat normal a reprendre comme orchestrateur. Absente lors
     /// de la creation depuis la vue dediee.
     #[serde(default)]
@@ -262,6 +331,12 @@ pub struct CreateOrchestrationRequest {
     pub worker_account_ids: Vec<String>,
     #[serde(default)]
     pub account_id: String,
+    #[serde(skip)]
+    pub owner_id: Option<String>,
+    #[serde(skip)]
+    pub context_project_dir: Option<String>,
+    #[serde(skip)]
+    pub access_project_dir: Option<String>,
     pub project_dir: String,
     #[serde(default)]
     pub model: Option<String>,
@@ -281,7 +356,17 @@ pub struct PromoteAutonomousAgentRequest {
     #[serde(default)]
     pub worker_count: Option<u32>,
     #[serde(default)]
+    pub adaptive_fanout: Option<bool>,
+    #[serde(default)]
+    pub max_task_count: Option<u32>,
+    #[serde(default)]
+    pub max_concurrency: Option<u32>,
+    #[serde(default)]
     pub worker_account_ids: Vec<String>,
+    #[serde(skip)]
+    pub owner_id: Option<String>,
+    #[serde(skip)]
+    pub access_project_dir: Option<String>,
     pub project_dir: String,
     pub test_command: String,
     #[serde(default)]
@@ -347,6 +432,10 @@ struct OrchestrationInner {
     store: Mutex<OrchestrationStore>,
     validation_runs: Mutex<HashMap<String, Arc<ValidationRun>>>,
     lifecycle: Mutex<()>,
+    /// Verrou par run pour le pilotage asynchrone : chaque driver traite un run
+    /// sous ce verrou, donc deux threads ne pilotent jamais le meme run en meme
+    /// temps, tandis que des runs differents progressent en parallele.
+    run_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
 }
 
 struct ValidationRun {
@@ -365,6 +454,14 @@ struct PreparedAccountHandoff {
     session_id: Option<String>,
     handoff_pending: bool,
     summary: String,
+}
+
+struct PreparedSourceRepository {
+    repository: PathBuf,
+    base_commit: String,
+    source_kind: OrchestrationSourceKind,
+    requested_project_dir: Option<String>,
+    access_project_dir: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -436,12 +533,17 @@ enum WorkItem {
     },
 }
 
+impl WorkItem {
+    fn run_id(&self) -> &str {
+        match self {
+            WorkItem::Drive { run_id } | WorkItem::Poll { run_id, .. } => run_id,
+        }
+    }
+}
+
 impl OrchestrationManager {
     pub fn new(chat: ChatTurnManager, storage_path: PathBuf) -> Result<Self, String> {
-        let sandboxes_path = storage_path
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .join("orchestrated-runs");
+        let sandboxes_path = configured_sandboxes_path(&storage_path);
         fs::create_dir_all(&sandboxes_path).map_err(|error| error.to_string())?;
         let mut store = load_store(&storage_path)?;
         let recovered = normalize_loaded_store(&mut store, metrics::now_ts());
@@ -455,8 +557,9 @@ impl OrchestrationManager {
             store: Mutex::new(store),
             validation_runs: Mutex::new(HashMap::new()),
             lifecycle: Mutex::new(()),
+            run_locks: Mutex::new(HashMap::new()),
         });
-        spawn_worker(Arc::downgrade(&inner));
+        spawn_drivers(Arc::downgrade(&inner));
         Ok(Self { inner })
     }
 
@@ -490,8 +593,35 @@ impl OrchestrationManager {
             "L'objectif orchestre",
         )?;
         let name = validate_name(request.name.as_deref(), &objective)?;
-        let worker_count =
-            validate_worker_count(request.worker_count.unwrap_or(DEFAULT_WORKER_COUNT))?;
+        let worker_count = validate_worker_count(
+            request
+                .worker_count
+                .unwrap_or_else(configured_default_worker_count),
+        )?;
+        let adaptive_fanout = request.adaptive_fanout.unwrap_or(true);
+        let max_task_count =
+            validate_max_task_count(request.max_task_count.unwrap_or(DEFAULT_MAX_TASK_COUNT))?;
+        let minimum_task_count =
+            requested_minimum_task_count(&objective, worker_count, adaptive_fanout, max_task_count);
+        let max_concurrency = validate_max_concurrency(
+            request
+                .max_concurrency
+                .unwrap_or_else(configured_default_max_concurrency),
+        )?;
+        if worker_count > max_task_count {
+            return Err(format!(
+                "Le plafond de taches ({max_task_count}) doit couvrir les {worker_count} workers demandes"
+            ));
+        }
+        if adaptive_fanout
+            && !adaptive_fanout_cardinalities(max_task_count)
+                .iter()
+                .any(|count| *count >= minimum_task_count)
+        {
+            return Err(format!(
+                "Aucune cardinalite adaptative autorisee ne peut respecter le plancher de {minimum_task_count} avec un plafond de {max_task_count}"
+            ));
+        }
         let orchestrator_session_id = normalize_optional(request.orchestrator_session_id);
         if let Some(session_id) = orchestrator_session_id.as_deref() {
             Uuid::parse_str(session_id)
@@ -513,7 +643,7 @@ impl OrchestrationManager {
         for worker_account_id in &worker_account_ids {
             require_authenticated_account(&app_settings, worker_account_id)?;
         }
-        let test_command = validate_required_text(
+        let requested_test_command = validate_required_text(
             &request.test_command,
             MAX_TEST_COMMAND_CHARS,
             "La commande de validation",
@@ -523,11 +653,34 @@ impl OrchestrationManager {
                 .test_timeout_seconds
                 .unwrap_or(DEFAULT_TEST_TIMEOUT_SECONDS),
         )?;
-        let (project_dir, base_commit) = inspect_source_repository(&request.project_dir)?;
         let id = Uuid::new_v4().to_string();
         let sandbox_root = self.inner.sandboxes_path.join(&id);
         let orchestrator_dir = sandbox_root.join("orchestrator");
         fs::create_dir_all(&sandbox_root).map_err(|error| error.to_string())?;
+        let context_project_dir = normalize_optional(request.context_project_dir)
+            .or_else(|| normalize_optional(Some(request.project_dir.clone())))
+            .map(|value| truncate(&value, MAX_TEXT_CHARS));
+        let authorized_boundary = normalize_optional(request.access_project_dir.clone());
+        let mut prepared_source = match prepare_source_repository(
+            &request.project_dir,
+            &sandbox_root,
+            authorized_boundary.as_deref(),
+        ) {
+            Ok(source) => source,
+            Err(error) => {
+                let _ = fs::remove_dir_all(&sandbox_root);
+                return Err(error);
+            }
+        };
+        prepared_source.requested_project_dir = context_project_dir;
+        let access_project_dir = authorized_boundary.or(prepared_source.access_project_dir);
+        let project_dir = prepared_source.repository;
+        let base_commit = prepared_source.base_commit;
+        let test_command = if prepared_source.source_kind == OrchestrationSourceKind::GitClean {
+            requested_test_command
+        } else {
+            "git diff --check (validation interne confinee)".to_string()
+        };
         if let Err(error) = add_worktree(&project_dir, &orchestrator_dir, &base_commit) {
             let _ = fs::remove_dir_all(&sandbox_root);
             return Err(error);
@@ -539,11 +692,19 @@ impl OrchestrationManager {
             name,
             objective,
             worker_count,
+            adaptive_fanout,
+            max_task_count,
+            minimum_task_count,
+            max_concurrency,
             account_id: orchestrator_account_id.clone(),
             orchestrator_account_id,
             worker_account_ids,
             orchestrator_handoff_pending: false,
             orchestrator_handoff_count: 0,
+            owner_id: normalize_optional(request.owner_id),
+            source_kind: prepared_source.source_kind,
+            requested_project_dir: prepared_source.requested_project_dir,
+            access_project_dir,
             project_dir: project_dir.to_string_lossy().to_string(),
             model: normalize_optional(request.model),
             reasoning_effort: normalize_optional(request.reasoning_effort),
@@ -598,6 +759,21 @@ impl OrchestrationManager {
                 )
             },
         );
+        match run.source_kind {
+            OrchestrationSourceKind::GitClean => {}
+            OrchestrationSourceKind::GitDirty => push_event(
+                &mut run,
+                now,
+                "source_private_clone",
+                "Depot source sale clone sans hardlink dans le sandbox ; aucune publication automatique".to_string(),
+            ),
+            OrchestrationSourceKind::Ephemeral => push_event(
+                &mut run,
+                now,
+                "source_ephemeral",
+                "Aucun depot Git utilisable : depot prive vide, sans copie ni modification du chemin demande".to_string(),
+            ),
+        }
         let created = run.clone();
         if let Err(error) = self.inner.mutate_store(|store| {
             store.runs.push(run);
@@ -625,10 +801,16 @@ impl OrchestrationManager {
             name: request.name,
             objective: request.objective,
             worker_count: request.worker_count,
+            adaptive_fanout: request.adaptive_fanout,
+            max_task_count: request.max_task_count,
+            max_concurrency: request.max_concurrency,
             orchestrator_session_id: agent.session_id.clone(),
             orchestrator_account_id: Some(agent.account_id.clone()),
             worker_account_ids: request.worker_account_ids,
             account_id: agent.account_id.clone(),
+            owner_id: request.owner_id,
+            context_project_dir: None,
+            access_project_dir: request.access_project_dir,
             project_dir: request.project_dir,
             model: agent.model.clone(),
             reasoning_effort: agent.reasoning_effort.clone(),
@@ -1021,11 +1203,23 @@ impl OrchestrationManager {
                 return Err("Orchestration introuvable".to_string());
             }
             Ok(())
-        })
+        })?;
+        if let Ok(mut locks) = self.inner.run_locks.lock() {
+            locks.remove(id);
+        }
+        Ok(())
     }
 }
 
 impl OrchestrationInner {
+    fn run_lock(&self, run_id: &str) -> Arc<Mutex<()>> {
+        let mut locks = self
+            .run_locks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        locks.entry(run_id.to_string()).or_default().clone()
+    }
+
     fn mutate_store<T>(
         &self,
         mutate: impl FnOnce(&mut OrchestrationStore) -> Result<T, String>,
@@ -1056,6 +1250,11 @@ impl OrchestrationInner {
         let Ok(store) = self.store.lock() else {
             return Vec::new();
         };
+        // Le budget global est deja consomme : on ne programme aucun nouveau
+        // demarrage, mais on continue a poller les tours en vol. La vraie
+        // garantie est prise atomiquement dans `start_chat_turn` sous le
+        // verrou du store ; ce raccourci evite seulement des tentatives vaines.
+        let budget_reached = concurrency_budget_reached(&store);
         store
             .runs
             .iter()
@@ -1068,7 +1267,8 @@ impl OrchestrationInner {
                         kind,
                     });
                 }
-                if run.current_start_id.is_none()
+                if !budget_reached
+                    && run.current_start_id.is_none()
                     && run.current_validation_id.is_none()
                     && run.next_action_at.is_some_and(|next| next <= now)
                 {
@@ -1130,26 +1330,72 @@ impl OrchestrationInner {
     }
 }
 
-fn spawn_worker(inner: Weak<OrchestrationInner>) {
-    let _ = thread::Builder::new()
-        .name("cst-orchestrated-chats".to_string())
-        .spawn(move || loop {
-            let Some(inner) = inner.upgrade() else {
-                break;
+/// Programme plusieurs drivers asynchrones : chaque run est pilote sous son
+/// propre verrou, donc les orchestrations et leurs agents progressent en
+/// parallele au lieu d'etre serialises par une boucle unique. Le nombre de
+/// drivers se regle via `CST_ORCHESTRATION_DRIVERS` (defaut 4, borne 1..=64).
+fn spawn_drivers(inner: Weak<OrchestrationInner>) {
+    let driver_count = configured_driver_count();
+    for driver_index in 0..driver_count {
+        let inner = inner.clone();
+        let _ = thread::Builder::new()
+            .name(format!("cst-orchestrated-chats-{driver_index}"))
+            .spawn(move || driver_loop(inner));
+    }
+}
+
+fn driver_loop(inner: Weak<OrchestrationInner>) {
+    loop {
+        let Some(inner) = inner.upgrade() else {
+            break;
+        };
+        for item in inner.work_items(metrics::now_ts()) {
+            let run_id = item.run_id().to_string();
+            let lock = inner.run_lock(&run_id);
+            let Ok(_guard) = lock.try_lock() else {
+                // Un autre driver pilote deja ce run : on passe au suivant.
+                continue;
             };
-            for item in inner.work_items(metrics::now_ts()) {
-                match item {
-                    WorkItem::Drive { run_id } => drive_run(&inner, &run_id),
-                    WorkItem::Poll {
-                        run_id,
-                        turn_id,
-                        kind,
-                    } => poll_turn(&inner, &run_id, turn_id, kind),
-                }
+            match item {
+                WorkItem::Drive { run_id } => drive_run(&inner, &run_id),
+                WorkItem::Poll {
+                    run_id,
+                    turn_id,
+                    kind,
+                } => poll_turn(&inner, &run_id, turn_id, kind),
             }
-            drop(inner);
-            thread::sleep(Duration::from_secs(1));
-        });
+        }
+        drop(inner);
+        thread::sleep(Duration::from_millis(250));
+    }
+}
+
+fn configured_driver_count() -> usize {
+    std::env::var(DRIVER_COUNT_ENV)
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .map(|count| count.clamp(MIN_DRIVER_COUNT, MAX_DRIVER_COUNT))
+        .unwrap_or(DEFAULT_DRIVER_COUNT)
+}
+
+/// Tours d'agents deja en vol (en cours d'execution ou en cours de demarrage)
+/// a travers toutes les orchestrations actives.
+fn in_flight_turns(store: &OrchestrationStore) -> usize {
+    store
+        .runs
+        .iter()
+        .filter(|run| run.status == OrchestrationStatus::Active)
+        .filter(|run| run.current_turn_id.is_some() || run.current_start_id.is_some())
+        .count()
+}
+
+fn concurrency_budget_reached_with(store: &OrchestrationStore, budget: usize) -> bool {
+    in_flight_turns(store) >= budget
+}
+
+/// Budget global de tours d'agents en vol, regle par `CST_ORCHESTRATION_CONCURRENCY`.
+fn concurrency_budget_reached(store: &OrchestrationStore) -> bool {
+    concurrency_budget_reached_with(store, configured_default_max_concurrency() as usize)
 }
 
 fn drive_run(inner: &Arc<OrchestrationInner>, run_id: &str) {
@@ -1547,6 +1793,12 @@ fn start_chat_turn(
     let now = metrics::now_ts();
     let start_id = Uuid::new_v4().to_string();
     let prepared = inner.mutate_store(|store| {
+        // Budget global de tours en vol : la reservation du tour et le comptage
+        // se font sous le meme verrou du store, donc deux drivers ne peuvent
+        // pas depasser `CST_ORCHESTRATION_CONCURRENCY` simultanement.
+        if concurrency_budget_reached(store) {
+            return Ok(false);
+        }
         let current = find_run_mut(store, &run.id)?;
         if current.status != OrchestrationStatus::Active
             || current.current_turn_id.is_some()
@@ -1592,10 +1844,24 @@ fn start_chat_turn(
         agent_skills: Vec::new(),
         question_tool: false,
         proof_tool: kind == OrchestrationTurnKind::Worker,
-        source_chat_key: None,
+        source_chat_key: Some(match task_id.as_deref() {
+            Some(task_id) => format!("orchestration:{}:{task_id}", run.id),
+            None => format!("orchestration:{}:orchestrator", run.id),
+        }),
     };
-    match inner.chat.start(request) {
+    match inner.chat.start_orchestration(request) {
         Ok(snapshot) => {
+            if let Some(owner_id) = run.owner_id.as_deref() {
+                if let Err(error) = inner.chat.assign_owner(snapshot.id, owner_id) {
+                    let _ = inner.chat.stop(snapshot.id);
+                    mark_needs_attention(
+                        inner,
+                        &run.id,
+                        format!("Attribution du proprietaire du sous-chat impossible : {error}"),
+                    );
+                    return;
+                }
+            }
             let mut should_stop = false;
             let mut state_error = None;
             let mut handoff_consumed = false;
@@ -1758,7 +2024,7 @@ fn complete_plan(
 ) {
     let text = snapshot_text(snapshot);
     let plan = match parse_marked_json::<PlanEnvelope>(&text, "ORCHESTRATION_PLAN:")
-        .and_then(|plan| validate_plan(plan, run.worker_count))
+        .and_then(|plan| validate_plan(plan, run))
     {
         Ok(plan) => plan,
         Err(error) => {
@@ -1772,8 +2038,11 @@ fn complete_plan(
         clear_current_turn(current, snapshot);
         current.plan_summary = Some(plan.summary.clone());
         current.protocol_failures = 0;
-        let worker_account_ids = current.worker_account_ids.clone();
+        current.worker_count = plan.tasks.len() as u32;
+        let mut worker_account_ids = current.worker_account_ids.clone();
         let fallback_account_id = current.account_id.clone();
+        worker_account_ids.resize(current.worker_count as usize, fallback_account_id.clone());
+        current.worker_account_ids = worker_account_ids.clone();
         current.tasks = plan
             .tasks
             .into_iter()
@@ -2520,6 +2789,30 @@ fn apply_worker_candidate(
 }
 
 fn publish_run(inner: &Arc<OrchestrationInner>, run: &OrchestrationSnapshot) {
+    if run.source_kind != OrchestrationSourceKind::GitClean {
+        let now = metrics::now_ts();
+        let update = inner.mutate_store(|store| {
+            let current = find_run_mut(store, &run.id)?;
+            current.status = OrchestrationStatus::Completed;
+            current.phase = OrchestrationPhase::Completed;
+            current.publish_applied = false;
+            current.next_action_at = None;
+            current.last_error = None;
+            current.updated_at = now;
+            push_event(
+                current,
+                now,
+                "completed_private",
+                "Rendu valide conserve dans le sandbox prive ; aucune publication automatique sur la source"
+                    .to_string(),
+            );
+            Ok(())
+        });
+        if let Err(error) = update {
+            mark_needs_attention(inner, &run.id, error);
+        }
+        return;
+    }
     match apply_final_patch(run) {
         Ok(()) => {
             let now = metrics::now_ts();
@@ -2548,6 +2841,11 @@ fn publish_run(inner: &Arc<OrchestrationInner>, run: &OrchestrationSnapshot) {
 }
 
 fn apply_final_patch(run: &OrchestrationSnapshot) -> Result<(), String> {
+    if run.source_kind != OrchestrationSourceKind::GitClean {
+        return Err(
+            "Publication interdite pour une source sale, non-Git ou ephemere".to_string(),
+        );
+    }
     let source = Path::new(&run.project_dir);
     let head = git_text(source, ["rev-parse", "HEAD"])?;
     if head.trim() != run.base_commit {
@@ -2584,7 +2882,7 @@ fn worktree_matches_commit(path: &Path, commit: &str, scratch_dir: &Path) -> Res
     let index_path = scratch_dir.join(format!(".publish-verify-{}.index", Uuid::new_v4()));
     let lock_path = index_path.with_extension("index.lock");
     let result = (|| {
-        let read_tree = Command::new("git")
+        let read_tree = git_command()
             .arg("-C")
             .arg(path)
             .env("GIT_INDEX_FILE", &index_path)
@@ -2601,7 +2899,7 @@ fn worktree_matches_commit(path: &Path, commit: &str, scratch_dir: &Path) -> Res
         // `read-tree` connait les blobs attendus mais pas encore les metadonnees
         // du worktree courant. Le rafraichissement evite que Git signale chaque
         // fichier comme modifie uniquement parce que son stat cache est vide.
-        let refresh = Command::new("git")
+        let refresh = git_command()
             .arg("-C")
             .arg(path)
             .env("GIT_INDEX_FILE", &index_path)
@@ -2615,7 +2913,7 @@ fn worktree_matches_commit(path: &Path, commit: &str, scratch_dir: &Path) -> Res
             ));
         }
 
-        let tracked = Command::new("git")
+        let tracked = git_command()
             .arg("-C")
             .arg(path)
             .env("GIT_INDEX_FILE", &index_path)
@@ -2632,7 +2930,7 @@ fn worktree_matches_commit(path: &Path, commit: &str, scratch_dir: &Path) -> Res
             ));
         }
 
-        let untracked = Command::new("git")
+        let untracked = git_command()
             .arg("-C")
             .arg(path)
             .env("GIT_INDEX_FILE", &index_path)
@@ -2659,9 +2957,6 @@ fn commit_owned_worktree(run: &OrchestrationSnapshot, message: &str) -> Result<S
     if status.success() {
         return git_text(dir, ["rev-parse", "HEAD"]);
     }
-    let hooks = Path::new(&run.sandbox_root).join("empty-hooks");
-    fs::create_dir_all(&hooks).map_err(|error| error.to_string())?;
-    let hooks_text = hooks.to_string_lossy().to_string();
     run_git(
         dir,
         [
@@ -2672,7 +2967,7 @@ fn commit_owned_worktree(run: &OrchestrationSnapshot, message: &str) -> Result<S
             "-c",
             "commit.gpgSign=false",
             "-c",
-            &format!("core.hooksPath={hooks_text}"),
+            &format!("core.hooksPath={}", disabled_git_hooks_path()),
             "commit",
             "--no-gpg-sign",
             "-m",
@@ -2685,6 +2980,42 @@ fn commit_owned_worktree(run: &OrchestrationSnapshot, message: &str) -> Result<S
 
 fn run_validation_command(run: &OrchestrationSnapshot, cancelled: &AtomicBool) -> ValidationResult {
     let started = Instant::now();
+    if run.source_kind != OrchestrationSourceKind::GitClean {
+        if cancelled.load(Ordering::SeqCst) {
+            return ValidationResult {
+                passed: false,
+                exit_code: None,
+                duration_ms: 0,
+                output: "Validation annulee".to_string(),
+            };
+        }
+        let output = git_command()
+            .arg("-C")
+            .arg(&run.orchestrator_dir)
+            .args(["diff", "--check", &run.base_commit, "--"])
+            .output();
+        return match output {
+            Ok(output) => ValidationResult {
+                passed: output.status.success(),
+                exit_code: output.status.code(),
+                duration_ms: started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+                output: truncate(
+                    &String::from_utf8_lossy(if output.stdout.is_empty() {
+                        &output.stderr
+                    } else {
+                        &output.stdout
+                    }),
+                    MAX_TEST_OUTPUT_BYTES,
+                ),
+            },
+            Err(error) => ValidationResult {
+                passed: false,
+                exit_code: None,
+                duration_ms: started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+                output: format!("Validation Git interne impossible : {error}"),
+            },
+        };
+    }
     let mut command = shell_command(&run.test_command);
     command
         .current_dir(&run.orchestrator_dir)
@@ -2789,9 +3120,19 @@ fn plan_prompt(run: &OrchestrationSnapshot) -> String {
         .as_deref()
         .map(|error| format!("\nLe format precedent a ete refuse : {error}\n"))
         .unwrap_or_default();
+    let allowed = if run.adaptive_fanout {
+        adaptive_fanout_cardinalities(run.max_task_count)
+            .into_iter()
+            .filter(|count| *count >= run.minimum_task_count)
+            .map(|count| count.to_string())
+            .collect::<Vec<_>>()
+            .join("/")
+    } else {
+        run.worker_count.to_string()
+    };
     format!(
-        "Tu es l'agent orchestrateur du chat orchestre \"{}\". Tu travailles dans un worktree Git prive et tu ne dois rien modifier pendant cette phase de planification.\n\nObjectif utilisateur :\n{}\n\nInspecte le projet et decoupe l'objectif en exactement {} taches d'implementation coherentes, petites et testables : l'utilisateur a choisi {} workers en plus de toi, et chaque tache doit etre confiee a un worker distinct. L'execution sera sequentielle : chaque tache aura son propre chat travailleur et son propre worktree, puis tu reverras son patch dans ton environnement. Evite les taches purement administratives. Chaque critere d'acceptation doit etre observable.{}\nTermine par exactement une ligne, sans bloc Markdown :\nORCHESTRATION_PLAN: {{\"summary\":\"strategie concise\",\"tasks\":[{{\"title\":\"titre\",\"description\":\"travail attendu\",\"acceptanceCriteria\":[\"critere verifiable\"]}}]}}",
-        run.name, run.objective, run.worker_count, run.worker_count, retry
+        "Tu es l'agent orchestrateur du chat orchestre \"{}\". Tu travailles dans un worktree Git prive et tu ne dois rien modifier pendant cette phase de planification.\n\nObjectif utilisateur :\n{}\n\nChoisis une cardinalite autorisee parmi {allowed}, sans jamais descendre sous le plancher {}. Une demande compacte utilise 1 a 4 missions ; une demande complexe proprement parallele utilise exactement 20 ; une campagne massive et reellement independante utilise exactement 100. Decoupe ensuite l'objectif en exactement cette cardinalite de taches coherentes, petites, testables et sans remplissage. Chaque tache ouvre un chat travailleur distinct et chaque critere doit etre observable. Pour une source ephemere, produis des livrables concrets sous reports/task-XX.md et ne pretends jamais modifier le chemin utilisateur.{}\nTermine par exactement une ligne, sans bloc Markdown :\nORCHESTRATION_PLAN: {{\"summary\":\"strategie concise\",\"tasks\":[{{\"title\":\"titre\",\"description\":\"travail attendu\",\"acceptanceCriteria\":[\"critere verifiable\"]}}]}}",
+        run.name, run.objective, run.minimum_task_count, retry
     )
 }
 
@@ -2883,18 +3224,37 @@ fn parse_marked_json<T: for<'de> Deserialize<'de>>(text: &str, marker: &str) -> 
     serde_json::from_str(payload).map_err(|error| format!("JSON invalide : {error}"))
 }
 
-fn validate_plan(mut plan: PlanEnvelope, worker_count: u32) -> Result<PlanEnvelope, String> {
+fn validate_plan(
+    mut plan: PlanEnvelope,
+    run: &OrchestrationSnapshot,
+) -> Result<PlanEnvelope, String> {
     plan.summary = validate_short_text(&plan.summary, "Le resume du plan")?;
     if plan.tasks.is_empty() {
         return Err("le plan ne contient aucune tache".to_string());
     }
-    if plan.tasks.len() != worker_count as usize {
+    let task_count = plan.tasks.len() as u32;
+    if run.adaptive_fanout {
+        if !adaptive_fanout_cardinalities(run.max_task_count).contains(&task_count) {
+            return Err(format!(
+                "le plan adaptatif doit utiliser une cardinalite autorisee 1/2/3/4/20/100, bornee a {}, mais il en contient {task_count}",
+                run.max_task_count
+            ));
+        }
+        if task_count < run.minimum_task_count {
+            return Err(format!(
+                "le plan contient {task_count} taches, sous le plancher persistant de {}",
+                run.minimum_task_count
+            ));
+        }
+    } else if task_count != run.worker_count {
         return Err(format!(
-            "le plan doit contenir exactement {worker_count} tache{} (une par worker), mais il en contient {}",
-            if worker_count > 1 { "s" } else { "" },
+            "le plan doit contenir exactement {} tache{} (une par worker), mais il en contient {}",
+            run.worker_count,
+            if run.worker_count > 1 { "s" } else { "" },
             plan.tasks.len()
         ));
     }
+    let mut signatures = HashSet::new();
     for task in &mut plan.tasks {
         task.title = validate_short_text(&task.title, "Le titre d'une tache")?;
         task.description = validate_short_text(&task.description, "La description d'une tache")?;
@@ -2905,6 +3265,19 @@ fn validate_plan(mut plan: PlanEnvelope, worker_count: u32) -> Result<PlanEnvelo
             .collect::<Result<Vec<_>, _>>()?;
         if task.acceptance_criteria.is_empty() {
             return Err(format!("la tache '{}' n'a aucun critere", task.title));
+        }
+        if task_count >= 20 {
+            let signature = format!(
+                "{}\n{}",
+                task.title.to_lowercase(),
+                task.description.to_lowercase()
+            );
+            if !signatures.insert(signature) {
+                return Err(
+                    "le plan massif contient des taches dupliquees servant de remplissage"
+                        .to_string(),
+                );
+            }
         }
     }
     Ok(plan)
@@ -3057,16 +3430,243 @@ fn recover_phase_for_resume(run: &mut OrchestrationSnapshot, now: i64) {
     run.next_action_at = Some(now);
 }
 
+fn prepare_source_repository(
+    raw: &str,
+    sandbox_root: &Path,
+    authorized_boundary: Option<&str>,
+) -> Result<PreparedSourceRepository, String> {
+    let authorized_boundary = authorized_boundary
+        .map(|raw| {
+            let boundary = fs::canonicalize(raw.trim()).map_err(|_| {
+                "La frontiere autorisee de l'environnement est introuvable".to_string()
+            })?;
+            if !boundary.is_dir() {
+                return Err(
+                    "La frontiere autorisee de l'environnement n'est pas un dossier".to_string(),
+                );
+            }
+            Ok(boundary)
+        })
+        .transpose()?;
+    let requested_project_dir = normalize_optional(Some(truncate(raw.trim(), MAX_TEXT_CHARS)));
+    if let Some(requested) = requested_project_dir.as_deref() {
+        if let Ok((repository, base_commit)) =
+            inspect_source_repository_with_boundary(requested, authorized_boundary.as_deref())
+        {
+            let source_kind = match git_text(
+                &repository,
+                [
+                    "-c",
+                    "core.fsmonitor=false",
+                    "status",
+                    "--porcelain",
+                    "--untracked-files=all",
+                ],
+            ) {
+                Ok(status) if status.trim().is_empty() => OrchestrationSourceKind::GitClean,
+                Ok(_) | Err(_) => OrchestrationSourceKind::GitDirty,
+            };
+            if source_kind == OrchestrationSourceKind::GitDirty {
+                if let Ok(private_repository) =
+                    clone_private_source_repository(&repository, &base_commit, sandbox_root)
+                {
+                    return Ok(PreparedSourceRepository {
+                        repository: private_repository,
+                        base_commit,
+                        source_kind,
+                        requested_project_dir,
+                        access_project_dir: Some(repository.to_string_lossy().to_string()),
+                    });
+                }
+                return create_ephemeral_prepared_source(sandbox_root, requested_project_dir);
+            }
+            return Ok(PreparedSourceRepository {
+                access_project_dir: Some(repository.to_string_lossy().to_string()),
+                repository,
+                base_commit,
+                source_kind,
+                requested_project_dir,
+            });
+        }
+    }
+    create_ephemeral_prepared_source(sandbox_root, requested_project_dir)
+}
+
+fn create_ephemeral_prepared_source(
+    sandbox_root: &Path,
+    requested_project_dir: Option<String>,
+) -> Result<PreparedSourceRepository, String> {
+    let repository = create_ephemeral_source_repository(sandbox_root)?;
+    let base_commit = git_text(&repository, ["rev-parse", "HEAD"])?;
+    Ok(PreparedSourceRepository {
+        repository,
+        base_commit,
+        source_kind: OrchestrationSourceKind::Ephemeral,
+        requested_project_dir,
+        access_project_dir: None,
+    })
+}
+
+fn clone_private_source_repository(
+    source: &Path,
+    base_commit: &str,
+    sandbox_root: &Path,
+) -> Result<PathBuf, String> {
+    let repository = sandbox_root.join("source");
+    let output = git_command()
+        .args(["clone", "--no-local", "--no-checkout", "--no-tags"])
+        .arg(source)
+        .arg(&repository)
+        .output()
+        .map_err(|error| format!("Git est indisponible : {error}"))?;
+    if !output.status.success() {
+        let _ = fs::remove_dir_all(&repository);
+        return Err(command_error(
+            "Clone prive du depot source sale impossible",
+            &output,
+        ));
+    }
+    if git_text(
+        &repository,
+        ["rev-parse", &format!("{base_commit}^{{commit}}")],
+    )
+    .is_err()
+    {
+        let _ = fs::remove_dir_all(&repository);
+        return Err("Commit HEAD absent du clone prive".to_string());
+    }
+    let _ = run_git(&repository, ["remote", "remove", "origin"], None);
+    Ok(repository)
+}
+
+fn create_ephemeral_source_repository(sandbox_root: &Path) -> Result<PathBuf, String> {
+    let repository = sandbox_root.join("source");
+    if repository.exists() {
+        fs::remove_dir_all(&repository)
+            .map_err(|error| format!("Nettoyage du repli prive impossible : {error}"))?;
+    }
+    fs::create_dir_all(&repository).map_err(|error| {
+        format!(
+            "Creation du depot prive de repli impossible ({}): {error}",
+            repository.display()
+        )
+    })?;
+    run_git(&repository, ["init"], None)?;
+    let context = serde_json::json!({
+        "schemaVersion": 1,
+        "workspaceMode": "ephemeral",
+        "sourceCopied": false,
+        "notice": "Depot prive volontairement vide; aucun chemin demande n'a ete copie ni modifie."
+    });
+    fs::write(
+        repository.join(".switch-orchestration-context.json"),
+        serde_json::to_vec_pretty(&context).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| format!("Ecriture du contexte prive impossible : {error}"))?;
+    run_git(&repository, ["add", "-A"], None)?;
+    run_git(
+        &repository,
+        [
+            "-c",
+            "user.name=Codex Switch Orchestrator",
+            "-c",
+            "user.email=orchestrator@codex-switch.local",
+            "-c",
+            "commit.gpgSign=false",
+            "-c",
+            &format!("core.hooksPath={}", disabled_git_hooks_path()),
+            "commit",
+            "--no-gpg-sign",
+            "-m",
+            "Initialize private orchestration workspace",
+        ],
+        None,
+    )?;
+    Ok(repository)
+}
+
 fn inspect_source_repository(raw: &str) -> Result<(PathBuf, String), String> {
+    inspect_source_repository_with_boundary(raw, None)
+}
+
+fn inspect_source_repository_with_boundary(
+    raw: &str,
+    authorized_boundary: Option<&Path>,
+) -> Result<(PathBuf, String), String> {
     let path = Path::new(raw.trim());
     if !path.is_dir() {
         return Err("Le dossier projet n'existe pas".to_string());
     }
-    let root_text = git_text(path, ["rev-parse", "--show-toplevel"])
-        .map_err(|_| "Le chat orchestre exige pour l'instant un depot Git".to_string())?;
-    let root = PathBuf::from(root_text.trim());
-    ensure_clean_repository(&root)?;
-    let base_commit = git_text(&root, ["rev-parse", "HEAD"])?;
+    let path = fs::canonicalize(path)
+        .map_err(|_| "Le dossier projet n'existe pas".to_string())?;
+    if authorized_boundary.is_some_and(|boundary| !path.starts_with(boundary)) {
+        return Err("Le dossier projet depasse la frontiere autorisee".to_string());
+    }
+    let mut candidate = path.clone();
+    let git_candidate = loop {
+        if candidate.join(".git").exists() {
+            break Some(candidate.clone());
+        }
+        if authorized_boundary.is_some_and(|boundary| candidate == boundary) {
+            break None;
+        }
+        let Some(parent) = candidate.parent() else {
+            break None;
+        };
+        if authorized_boundary.is_some_and(|boundary| !parent.starts_with(boundary)) {
+            break None;
+        }
+        candidate = parent.to_path_buf();
+    }
+    .ok_or_else(|| "Le dossier projet n'est pas un depot Git utilisable".to_string())?;
+
+    let root_text = git_text(&git_candidate, ["rev-parse", "--show-toplevel"])
+        .map_err(|_| "Le dossier projet n'est pas un depot Git utilisable".to_string())?;
+    let root = fs::canonicalize(PathBuf::from(root_text.trim()))
+        .map_err(|_| "La racine Git est introuvable".to_string())?;
+    if authorized_boundary.is_some_and(|boundary| !root.starts_with(boundary)) {
+        return Err("La racine Git depasse la frontiere autorisee".to_string());
+    }
+    let git_dir_text = git_text(&root, ["rev-parse", "--absolute-git-dir"])
+        .map_err(|_| "Les metadonnees Git sont introuvables".to_string())?;
+    let git_dir = fs::canonicalize(PathBuf::from(git_dir_text.trim()))
+        .map_err(|_| "Les metadonnees Git sont introuvables".to_string())?;
+    if authorized_boundary.is_some_and(|boundary| !git_dir.starts_with(boundary)) {
+        return Err("Les metadonnees Git depassent la frontiere autorisee".to_string());
+    }
+    let common_dir_text = git_text(
+        &root,
+        ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )
+    .map_err(|_| "Les metadonnees Git communes sont introuvables".to_string())?;
+    let common_dir = fs::canonicalize(PathBuf::from(common_dir_text.trim()))
+        .map_err(|_| "Les metadonnees Git communes sont introuvables".to_string())?;
+    if authorized_boundary.is_some_and(|boundary| !common_dir.starts_with(boundary)) {
+        return Err("Les metadonnees Git communes depassent la frontiere autorisee".to_string());
+    }
+    for objects_dir in [git_dir.join("objects"), common_dir.join("objects")] {
+        let alternates = objects_dir.join("info").join("alternates");
+        let Ok(content) = fs::read_to_string(&alternates) else {
+            continue;
+        };
+        for line in content.lines().map(str::trim).filter(|line| !line.is_empty()) {
+            let candidate = PathBuf::from(line);
+            let candidate = if candidate.is_absolute() {
+                candidate
+            } else {
+                objects_dir.join(candidate)
+            };
+            let resolved = fs::canonicalize(candidate)
+                .map_err(|_| "Un depot d'objets Git alternatif est introuvable".to_string())?;
+            if authorized_boundary.is_some_and(|boundary| !resolved.starts_with(boundary)) {
+                return Err(
+                    "Un depot d'objets Git alternatif depasse la frontiere autorisee".to_string(),
+                );
+            }
+        }
+    }
+    let base_commit = git_text(&root, ["rev-parse", "HEAD"])
+        .map_err(|_| "Le depot Git ne contient aucun commit utilisable".to_string())?;
     Ok((root, base_commit))
 }
 
@@ -3086,7 +3686,8 @@ fn add_worktree(repo: &Path, target: &Path, commit: &str) -> Result<(), String> 
     if target.exists() {
         return Err(format!("Le sandbox existe deja : {}", target.display()));
     }
-    let output = Command::new("git")
+    let output = git_command()
+        .args(["-c", &format!("core.hooksPath={}", disabled_git_hooks_path())])
         .arg("-C")
         .arg(repo)
         .args(["worktree", "add", "--detach"])
@@ -3101,12 +3702,22 @@ fn add_worktree(repo: &Path, target: &Path, commit: &str) -> Result<(), String> 
     }
 }
 
+#[cfg(windows)]
+fn disabled_git_hooks_path() -> &'static str {
+    "NUL"
+}
+
+#[cfg(not(windows))]
+fn disabled_git_hooks_path() -> &'static str {
+    "/dev/null"
+}
+
 fn reset_owned_worktree(path: &Path, commit: &str) -> Result<(), String> {
     if !path.is_dir() {
         return Err(format!("Sandbox introuvable : {}", path.display()));
     }
     run_git(path, ["reset", "--hard", commit], None)?;
-    run_git(path, ["clean", "-fd"], None)
+    run_git(path, ["clean", "-ffdx"], None)
 }
 
 fn stage_and_changed_files(path: &Path, base: &str) -> Result<Vec<String>, String> {
@@ -3158,7 +3769,7 @@ fn remove_owned_worktrees(
             return Err("Refus de supprimer un worktree hors du sandbox".to_string());
         }
         if path.exists() {
-            let output = Command::new("git")
+            let output = git_command()
                 .arg("-C")
                 .arg(repo)
                 .args(["worktree", "remove", "--force"])
@@ -3186,8 +3797,20 @@ fn comparison_path(path: &Path) -> PathBuf {
     })
 }
 
+fn git_command() -> Command {
+    let mut command = Command::new("git");
+    command
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", disabled_git_hooks_path())
+        .env("GIT_LFS_SKIP_SMUDGE", "1")
+        .arg("-c")
+        .arg(format!("core.hooksPath={}", disabled_git_hooks_path()))
+        .args(["-c", "core.fsmonitor=false"]);
+    command
+}
+
 fn git_text<'a>(path: &Path, args: impl IntoIterator<Item = &'a str>) -> Result<String, String> {
-    let output = Command::new("git")
+    let output = git_command()
         .arg("-C")
         .arg(path)
         .args(args)
@@ -3203,7 +3826,7 @@ fn git_status<'a>(
     path: &Path,
     args: impl IntoIterator<Item = &'a str>,
 ) -> Result<ExitStatus, String> {
-    Command::new("git")
+    git_command()
         .arg("-C")
         .arg(path)
         .args(args)
@@ -3217,7 +3840,7 @@ fn git_output_file<'a>(
     output_path: &Path,
 ) -> Result<(), String> {
     let file = File::create(output_path).map_err(|error| error.to_string())?;
-    let output = Command::new("git")
+    let output = git_command()
         .arg("-C")
         .arg(path)
         .args(args)
@@ -3237,7 +3860,7 @@ fn run_git<'a>(
     args: impl IntoIterator<Item = &'a str>,
     stdin_path: Option<&Path>,
 ) -> Result<(), String> {
-    let mut command = Command::new("git");
+    let mut command = git_command();
     command.arg("-C").arg(path).args(args);
     if let Some(stdin_path) = stdin_path {
         command.stdin(Stdio::from(
@@ -3390,12 +4013,154 @@ fn validate_test_timeout(value: u64) -> Result<u64, String> {
 }
 
 fn validate_worker_count(value: u32) -> Result<u32, String> {
-    if !(MIN_WORKER_COUNT..=MAX_WORKER_COUNT).contains(&value) {
+    if ![1, 2, 3, 4, 20, 100, 200].contains(&value) {
         return Err(format!(
-            "Le nombre de workers doit etre compris entre {MIN_WORKER_COUNT} et {MAX_WORKER_COUNT}, sans compter l'orchestrateur"
+            "Le nombre de workers doit etre l'un des paliers 1, 2, 3, 4, 20, 100 ou 200, sans compter l'orchestrateur"
         ));
     }
     Ok(value)
+}
+
+fn default_adaptive_fanout() -> bool {
+    true
+}
+
+fn default_max_task_count() -> u32 {
+    DEFAULT_MAX_TASK_COUNT
+}
+
+fn default_max_concurrency() -> u32 {
+    DEFAULT_MAX_CONCURRENCY
+}
+
+fn validate_max_task_count(value: u32) -> Result<u32, String> {
+    if !(MIN_TASK_COUNT..=MAX_TASK_COUNT).contains(&value) {
+        return Err(format!(
+            "Le plafond de taches doit etre compris entre {MIN_TASK_COUNT} et {MAX_TASK_COUNT}"
+        ));
+    }
+    Ok(value)
+}
+
+fn validate_max_concurrency(value: u32) -> Result<u32, String> {
+    if !(MIN_MAX_CONCURRENCY..=MAX_MAX_CONCURRENCY).contains(&value) {
+        return Err(format!(
+            "La concurrence doit etre comprise entre {MIN_MAX_CONCURRENCY} et {MAX_MAX_CONCURRENCY}"
+        ));
+    }
+    Ok(value)
+}
+
+fn adaptive_fanout_cardinalities(max_task_count: u32) -> Vec<u32> {
+    [1, 2, 3, 4, 20, 100, 200]
+        .into_iter()
+        .filter(|count| *count <= max_task_count)
+        .collect()
+}
+
+fn objective_requests_fanout(objective: &str, requested: u32) -> bool {
+    let normalized = objective
+        .to_lowercase()
+        .chars()
+        .map(|character| {
+            if character.is_alphanumeric() {
+                character
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>();
+    let tokens = normalized.split_whitespace().collect::<Vec<_>>();
+    for (index, token) in tokens.iter().enumerate() {
+        if token.parse::<u32>().ok() != Some(requested) {
+            continue;
+        }
+        let before = &tokens[index.saturating_sub(5)..index];
+        if before.iter().any(|token| {
+            matches!(*token, "pas" | "sans" | "jamais" | "eviter" | "evite" | "interdit")
+        }) {
+            continue;
+        }
+        let after = &tokens[index + 1..(index + 4).min(tokens.len())];
+        if before.iter().any(|token| matches!(*token, "par" | "x" | "exactement"))
+            || after.iter().any(|token| {
+                matches!(
+                    *token,
+                    "agent" | "agents" | "worker" | "workers" | "tache" | "taches"
+                )
+            })
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn objective_fanout_floor(objective: &str, _max_task_count: u32) -> u32 {
+    if objective_requests_fanout(objective, 200) {
+        200
+    } else if objective_requests_fanout(objective, 100) {
+        100
+    } else if objective_requests_fanout(objective, 20) {
+        20
+    } else {
+        1
+    }
+}
+
+fn requested_minimum_task_count(
+    objective: &str,
+    worker_count: u32,
+    adaptive_fanout: bool,
+    max_task_count: u32,
+) -> u32 {
+    if adaptive_fanout {
+        worker_count.max(objective_fanout_floor(objective, max_task_count))
+    } else {
+        worker_count
+    }
+}
+
+fn configured_default_worker_count() -> u32 {
+    let configured = std::env::var(WORKER_COUNT_ENV).ok();
+    configured_default_worker_count_from(configured.as_deref())
+}
+
+fn configured_default_worker_count_from(configured: Option<&str>) -> u32 {
+    configured
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .filter(|value| [1, 2, 3, 4, 20, 100].contains(value))
+        .unwrap_or(DEFAULT_WORKER_COUNT)
+}
+
+fn configured_default_max_concurrency() -> u32 {
+    let configured = std::env::var(CONCURRENCY_ENV).ok();
+    configured_default_max_concurrency_from(configured.as_deref())
+}
+
+fn configured_default_max_concurrency_from(configured: Option<&str>) -> u32 {
+    configured
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .filter(|value| (MIN_MAX_CONCURRENCY..=MAX_MAX_CONCURRENCY).contains(value))
+        .unwrap_or(DEFAULT_MAX_CONCURRENCY)
+}
+
+/// Emplacement des sandboxes ephemeres des agents (RAM-disk via
+/// `CST_ORCHESTRATION_SANDBOX_DIR` si defini, sinon a cote de l'etat persiste).
+fn configured_sandboxes_path(storage_path: &Path) -> PathBuf {
+    sandboxes_path_from_env(storage_path, std::env::var_os(SANDBOX_DIR_ENV).as_deref())
+}
+
+fn sandboxes_path_from_env(storage_path: &Path, configured: Option<&OsStr>) -> PathBuf {
+    configured
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            storage_path
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join("orchestrated-runs")
+        })
 }
 
 fn normalize_optional(value: Option<String>) -> Option<String> {
@@ -3422,6 +4187,41 @@ fn normalize_loaded_store(store: &mut OrchestrationStore, now: i64) -> bool {
             } else {
                 (run.tasks.len() as u32).clamp(MIN_WORKER_COUNT, MAX_WORKER_COUNT)
             };
+            changed = true;
+        }
+        if !(MIN_TASK_COUNT..=MAX_TASK_COUNT).contains(&run.max_task_count) {
+            run.max_task_count = DEFAULT_MAX_TASK_COUNT;
+            changed = true;
+        }
+        if run.tasks.len() <= MAX_TASK_COUNT as usize
+            && run.max_task_count < run.tasks.len() as u32
+        {
+            run.max_task_count = run.tasks.len() as u32;
+            changed = true;
+        }
+        if !(MIN_TASK_COUNT..=run.max_task_count).contains(&run.minimum_task_count) {
+            run.minimum_task_count = if run.tasks.is_empty() {
+                requested_minimum_task_count(
+                    &run.objective,
+                    run.worker_count,
+                    run.adaptive_fanout,
+                    run.max_task_count,
+                )
+            } else {
+                run.tasks.len() as u32
+            }
+            .min(run.max_task_count);
+            changed = true;
+        }
+        if !(MIN_MAX_CONCURRENCY..=MAX_MAX_CONCURRENCY).contains(&run.max_concurrency) {
+            run.max_concurrency = DEFAULT_MAX_CONCURRENCY;
+            changed = true;
+        }
+        if run.source_kind == OrchestrationSourceKind::GitClean
+            && run.access_project_dir.is_none()
+            && !run.project_dir.trim().is_empty()
+        {
+            run.access_project_dir = Some(run.project_dir.clone());
             changed = true;
         }
         if run.orchestrator_account_id.trim().is_empty() {
@@ -3597,11 +4397,13 @@ mod tests {
 
     #[test]
     fn parses_single_line_plan_contract() {
+        let mut run = sample_run();
+        run.adaptive_fanout = false;
         let plan = parse_marked_json::<PlanEnvelope>(
             "analyse\nORCHESTRATION_PLAN: {\"summary\":\"Plan\",\"tasks\":[{\"title\":\"API\",\"description\":\"Ajouter l'API\",\"acceptanceCriteria\":[\"Le test passe\"]}]}",
             "ORCHESTRATION_PLAN:",
         )
-        .and_then(|plan| validate_plan(plan, 1))
+        .and_then(|plan| validate_plan(plan, &run))
         .unwrap();
         assert_eq!(plan.tasks.len(), 1);
         assert_eq!(plan.tasks[0].title, "API");
@@ -3609,6 +4411,9 @@ mod tests {
 
     #[test]
     fn plan_must_match_the_selected_worker_count() {
+        let mut run = sample_run();
+        run.adaptive_fanout = false;
+        run.worker_count = 2;
         let plan = PlanEnvelope {
             summary: "Plan".to_string(),
             tasks: vec![PlanTask {
@@ -3617,10 +4422,81 @@ mod tests {
                 acceptance_criteria: vec!["Le test passe".to_string()],
             }],
         };
-        let error = validate_plan(plan, 2).unwrap_err();
+        let error = validate_plan(plan, &run).unwrap_err();
         assert!(error.contains("exactement 2 taches"));
         assert!(validate_worker_count(0).is_err());
         assert!(validate_worker_count(MAX_WORKER_COUNT + 1).is_err());
+    }
+
+    #[test]
+    fn configured_worker_count_uses_only_valid_environment_fallbacks() {
+        assert_eq!(configured_default_worker_count_from(None), 3);
+        assert_eq!(configured_default_worker_count_from(Some("20")), 20);
+        assert_eq!(configured_default_worker_count_from(Some("0")), 3);
+        assert_eq!(configured_default_worker_count_from(Some("8")), 3);
+        assert_eq!(configured_default_worker_count_from(Some("13")), 3);
+        assert_eq!(configured_default_worker_count_from(Some("abc")), 3);
+    }
+
+    #[test]
+    fn configured_concurrency_uses_only_valid_environment_fallbacks() {
+        assert_eq!(configured_default_max_concurrency_from(None), 8);
+        assert_eq!(configured_default_max_concurrency_from(Some("1")), 1);
+        assert_eq!(configured_default_max_concurrency_from(Some("16")), 16);
+        assert_eq!(configured_default_max_concurrency_from(Some("200")), 200);
+        assert_eq!(configured_default_max_concurrency_from(Some("0")), 8);
+        assert_eq!(configured_default_max_concurrency_from(Some("201")), 8);
+        assert_eq!(configured_default_max_concurrency_from(Some("abc")), 8);
+    }
+
+    #[test]
+    fn sandboxes_default_next_to_state_and_can_move_to_a_ram_disk() {
+        let storage = Path::new("/data/orchestrated-runs.json");
+        assert_eq!(
+            sandboxes_path_from_env(storage, None),
+            Path::new("/data/orchestrated-runs")
+        );
+        assert_eq!(
+            sandboxes_path_from_env(storage, Some(OsStr::new("/dev/shm/cst-agents"))),
+            Path::new("/dev/shm/cst-agents")
+        );
+        // Valeur vide = defaut (le SSD), pas un chemin vide casse.
+        assert_eq!(
+            sandboxes_path_from_env(storage, Some(OsStr::new(""))),
+            Path::new("/data/orchestrated-runs")
+        );
+    }
+
+    #[test]
+    fn global_concurrency_budget_counts_in_flight_turns_across_active_runs() {
+        let mut store = OrchestrationStore::default();
+        let mut in_flight = sample_run();
+        in_flight.status = OrchestrationStatus::Active;
+        in_flight.current_turn_id = Some(42);
+        store.runs.push(in_flight.clone());
+
+        let mut starting = sample_run();
+        starting.id = "run-2".to_string();
+        starting.status = OrchestrationStatus::Active;
+        starting.current_start_id = Some("start".to_string());
+        store.runs.push(starting);
+
+        let mut idle = sample_run();
+        idle.id = "run-3".to_string();
+        idle.status = OrchestrationStatus::Active;
+        store.runs.push(idle);
+
+        let mut paused = sample_run();
+        paused.id = "run-4".to_string();
+        paused.status = OrchestrationStatus::Paused;
+        paused.current_turn_id = Some(7);
+        store.runs.push(paused);
+
+        assert_eq!(in_flight_turns(&store), 2);
+        assert!(concurrency_budget_reached_with(&store, 2));
+        assert!(concurrency_budget_reached_with(&store, 1));
+        assert!(!concurrency_budget_reached_with(&store, 3));
+        assert!(!concurrency_budget_reached_with(&store, 8));
     }
 
     #[test]
@@ -3732,6 +4608,7 @@ mod tests {
             }),
             validation_runs: Mutex::new(HashMap::new()),
             lifecycle: Mutex::new(()),
+            run_locks: Mutex::new(HashMap::new()),
         });
 
         for attempt in 1..=MAX_PROTOCOL_FAILURES {
@@ -3764,6 +4641,7 @@ mod tests {
             }),
             validation_runs: Mutex::new(HashMap::new()),
             lifecycle: Mutex::new(()),
+            run_locks: Mutex::new(HashMap::new()),
         };
 
         let result: Result<(), String> = inner.mutate_store(|store| {
@@ -3898,11 +4776,19 @@ mod tests {
             name: "Feature".to_string(),
             objective: "Construire".to_string(),
             worker_count: 1,
+            adaptive_fanout: true,
+            max_task_count: DEFAULT_MAX_TASK_COUNT,
+            minimum_task_count: 1,
+            max_concurrency: DEFAULT_MAX_CONCURRENCY,
             account_id: "account-1".to_string(),
             orchestrator_account_id: "account-1".to_string(),
             worker_account_ids: vec!["account-1".to_string()],
             orchestrator_handoff_pending: false,
             orchestrator_handoff_count: 0,
+            owner_id: None,
+            source_kind: OrchestrationSourceKind::GitClean,
+            requested_project_dir: Some("/repo".to_string()),
+            access_project_dir: Some("/repo".to_string()),
             project_dir: "/repo".to_string(),
             model: None,
             reasoning_effort: None,

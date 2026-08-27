@@ -1,6 +1,7 @@
 import {
   appWindow,
   hasRemoteAuth,
+  hasMobileExternalHttpsOpener,
   hasMobileGooglePaySettings,
   hasMobileSettings,
   hasMobilePaymentSettings,
@@ -23,6 +24,8 @@ import {
   saveRemoteConfig,
   subscribeDiscussionUpdates,
   subscribeRuntimeUpdates,
+  terminalRemotePendingInputChars,
+  terminalTransportState,
   type DiscussionStreamMessage,
   type MobileAutonomousAgentHandoff,
   type MobilePaymentHandoff,
@@ -33,7 +36,9 @@ import {
 } from "./platform";
 import { initPwaSupport } from "./pwa";
 import { initWebAutoUpdate } from "./web-update";
+import * as maintenance from "./maintenance";
 import {
+  CODEX_DEVICE_VERIFICATION_URL,
   consumeRemoteCodexLoginOutput,
   copyRemoteCodexLoginCode,
   failRemoteCodexLoginWindow,
@@ -80,6 +85,11 @@ import {
   setAccountStorageScope,
 } from "./account-storage";
 import {
+  accountCompletedToday,
+  localCalendarDay,
+  millisecondsUntilNextLocalMidnight,
+} from "./account-daily-completion";
+import {
   chatHoverShortcutAction,
   type ChatHoverShortcutAction,
 } from "./chat/shortcuts";
@@ -92,6 +102,7 @@ import {
   keyboardShortcutDisplayParts,
   keyboardShortcutFromEvent,
   keyboardShortcutMatches,
+  keyboardShortcutTargetIsTerminal,
   loadKeyboardShortcutOverrides,
   persistKeyboardShortcutOverrides,
   resolveKeyboardShortcuts,
@@ -123,6 +134,8 @@ import {
   renderChatFeedInner,
   renderChatHistory,
   renderChatLatestTurn,
+  renderDeferredChatActionGroup,
+  pruneDeferredChatActionGroups,
   renderChatPanel,
   renderChatTokenUsage,
   renderChatRuntimeStatus,
@@ -157,15 +170,18 @@ import {
   bestQuotaAccountForNewChat,
   combinedQuotaUsage,
   deduplicateQuotaAccountsForDisplay,
+  isQuotaAuthenticationError,
   isQuotaExhaustionError,
   quotaAfterOpenChatReservations,
   remainingQuotaPercent,
   shouldRecoverRunningQuotaTurn,
 } from "./chat/quota";
 import {
+  CHAT_RESOURCE_RETRY_DELAY_MS,
   MODEL_CAPACITY_RETRY_LIMIT,
   TRANSIENT_STREAM_RETRY_LIMIT,
   isModelCapacityError,
+  isNodeCapacityError,
   isTransientStreamError,
   modelCapacityRetryDelayMs,
   modelCapacityRetryPrompt,
@@ -174,6 +190,11 @@ import {
   chatBubbleText,
   resumeSeedBubbleText,
 } from "./chat/message-size";
+import {
+  recentSentChatMessages,
+  restoreRecentSentChatMessages,
+  type PersistedSentChatMessage,
+} from "./chat/recent-history";
 import {
   accountCatalogMatchesLimitRows,
   accountLimitRowsForDisplay,
@@ -228,7 +249,9 @@ import {
 } from "./chat/autonomous";
 import {
   AUTOMATIC_ORCHESTRATION_MARKER,
+  MAX_ORCHESTRATION_WORKER_COUNT,
   automaticOrchestrationNotice,
+  automaticOrchestrationEnabledByDefault,
   orchestrationIsRunning,
   orchestrationOrchestratorAccountId,
   orchestrationPhaseLabel,
@@ -236,6 +259,7 @@ import {
   orchestrationStatusLabel,
   orchestrationTaskStatusLabel,
   orchestrationWorkerAccountId,
+  orchestrationWorkerCountFromEnv,
   parseAutomaticOrchestrationDecision,
   type AutomaticOrchestrationDecision,
   type OrchestrationAction,
@@ -244,6 +268,7 @@ import {
   type OrchestrationTask,
 } from "./chat/orchestration";
 import {
+  activeChatTurnBelongsToPane,
   chatMessageHasVisibleContent,
   chatMessagesEqual,
   chatTurnIsBusy,
@@ -279,6 +304,7 @@ import {
   chatSidebarMaxWidth,
   clampChatSidebarWidth,
   defaultChatSidebarWidth,
+  discussionIdentityKey,
   discussionForSession,
   normalizeChatSidebarPriorityMode,
   orderChatSidebarDiscussions,
@@ -311,6 +337,7 @@ import {
   resolveExpertChatPageSize,
   shouldMinimizeActiveBusyExpertChat,
   shouldPinActiveExpertChatDuringTurn,
+  shouldPinRestoredBusyExpertChat,
   type ExpertChatDisplayMode,
   type ExpertChatPageSizeMode,
   type ExpertGridLayout,
@@ -399,6 +426,10 @@ import {
   type ThemeMode,
 } from "./theme";
 import {
+  createTerminalActivityTracker,
+  type TerminalActivityStatus,
+} from "./terminal-activity";
+import {
   BUG_REPORT_SEVERITIES,
   bugReportSeverityLabel,
   bugReportTitleFromAgent,
@@ -455,6 +486,8 @@ import {
   CircleCheck,
   CircleDollarSign,
   CircleX,
+  Archive,
+  Cloud,
   CloudUpload,
   Coins,
   ClipboardCheck,
@@ -480,6 +513,7 @@ import {
   Image as ImageIcon,
   ImageOff,
   Keyboard,
+  Key,
   KeyRound,
   LayoutGrid,
   Lightbulb,
@@ -497,6 +531,7 @@ import {
   Maximize2,
   Minimize2,
   MousePointer2,
+  Network,
   Play,
   PlugZap,
   Plus,
@@ -554,6 +589,7 @@ import {
   Mic,
   Square,
   Reply,
+  Repeat2,
   RotateCcw,
   Wrench,
   Settings,
@@ -576,8 +612,11 @@ import {
   Moon,
   UserCheck,
   UserPlus,
+  UserRound,
   UserX,
   Zap,
+  Gift,
+  Landmark,
   createElement as createLucideElement,
   type IconNode,
 } from "lucide";
@@ -585,21 +624,6 @@ import "./style.css";
 import "./theme.css";
 
 type TutorialModule = typeof import("./tutorial");
-
-const TUTORIAL_PROGRESS_STORAGE_KEY = "codex-switch-terminal.tutorial-progress.v1";
-
-const tutorialHasStarted = (): boolean => {
-  try {
-    const progress = JSON.parse(localStorage.getItem(TUTORIAL_PROGRESS_STORAGE_KEY) ?? "null") as {
-      visited?: unknown;
-      completed?: unknown;
-    } | null;
-    return progress?.completed === true
-      || (Array.isArray(progress?.visited) && progress.visited.length > 0);
-  } catch {
-    return false;
-  }
-};
 
 let tutorialModule: TutorialModule | null = null;
 let tutorialModulePromise: Promise<TutorialModule> | null = null;
@@ -801,6 +825,51 @@ const loadTikTokAccountsModule = (): Promise<TikTokAccountsModule> => {
   return tiktokAccountsModulePromise;
 };
 
+type DeviceFleetModule = typeof import("./device-fleet");
+
+let deviceFleetModule: DeviceFleetModule | null = null;
+let deviceFleetModulePromise: Promise<DeviceFleetModule> | null = null;
+
+const loadDeviceFleetModule = (): Promise<DeviceFleetModule> => {
+  if (deviceFleetModule) return Promise.resolve(deviceFleetModule);
+  if (!deviceFleetModulePromise) {
+    deviceFleetModulePromise = Promise.all([
+      import("./device-fleet"),
+      import("./device-fleet.css"),
+    ]).then(([module]) => {
+      deviceFleetModule = module;
+      return module;
+    }).catch((error) => {
+      deviceFleetModulePromise = null;
+      scheduleStaleChunkRecovery(error);
+      throw error;
+    });
+  }
+  return deviceFleetModulePromise;
+};
+
+type AndroidControlModule = typeof import("./android-control");
+
+let androidControlModule: AndroidControlModule | null = null;
+let androidControlModulePromise: Promise<AndroidControlModule> | null = null;
+
+const loadAndroidControlModule = (): Promise<AndroidControlModule> => {
+  if (androidControlModule) return Promise.resolve(androidControlModule);
+  if (!androidControlModulePromise) {
+    androidControlModulePromise = import("./android-control")
+      .then((module) => {
+        androidControlModule = module;
+        return module;
+      })
+      .catch((error) => {
+        androidControlModulePromise = null;
+        scheduleStaleChunkRecovery(error);
+        throw error;
+      });
+  }
+  return androidControlModulePromise;
+};
+
 type StatsViewModule = typeof import("./stats-view");
 
 let statsViewModule: StatsViewModule | null = null;
@@ -821,6 +890,72 @@ const loadStatsViewModule = (): Promise<StatsViewModule> => {
       });
   }
   return statsViewModulePromise;
+};
+
+type TrackingViewModule = typeof import("./tracking-view");
+
+let trackingViewModule: TrackingViewModule | null = null;
+let trackingViewModulePromise: Promise<TrackingViewModule> | null = null;
+
+const loadTrackingViewModule = (): Promise<TrackingViewModule> => {
+  if (trackingViewModule) return Promise.resolve(trackingViewModule);
+  if (!trackingViewModulePromise) {
+    trackingViewModulePromise = import("./tracking-view")
+      .then((module) => {
+        trackingViewModule = module;
+        return module;
+      })
+      .catch((error) => {
+        trackingViewModulePromise = null;
+        scheduleStaleChunkRecovery(error);
+        throw error;
+      });
+  }
+  return trackingViewModulePromise;
+};
+
+type DuelloBankModule = typeof import("./duello-bank");
+
+let duelloBankModule: DuelloBankModule | null = null;
+let duelloBankModulePromise: Promise<DuelloBankModule> | null = null;
+
+const loadDuelloBankModule = (): Promise<DuelloBankModule> => {
+  if (duelloBankModule) return Promise.resolve(duelloBankModule);
+  if (!duelloBankModulePromise) {
+    duelloBankModulePromise = import("./duello-bank")
+      .then((module) => {
+        duelloBankModule = module;
+        return module;
+      })
+      .catch((error) => {
+        duelloBankModulePromise = null;
+        scheduleStaleChunkRecovery(error);
+        throw error;
+      });
+  }
+  return duelloBankModulePromise;
+};
+
+type FreebuffCloudModule = typeof import("./freebuff-cloud");
+
+let freebuffCloudModule: FreebuffCloudModule | null = null;
+let freebuffCloudModulePromise: Promise<FreebuffCloudModule> | null = null;
+
+const loadFreebuffCloudModule = (): Promise<FreebuffCloudModule> => {
+  if (freebuffCloudModule) return Promise.resolve(freebuffCloudModule);
+  if (!freebuffCloudModulePromise) {
+    freebuffCloudModulePromise = import("./freebuff-cloud")
+      .then((module) => {
+        freebuffCloudModule = module;
+        return module;
+      })
+      .catch((error) => {
+        freebuffCloudModulePromise = null;
+        scheduleStaleChunkRecovery(error);
+        throw error;
+      });
+  }
+  return freebuffCloudModulePromise;
 };
 
 type VpsModule = typeof import("./vps");
@@ -963,7 +1098,7 @@ type CodexReasoningEffort = string;
 // executes par OpenCode ; Codex et Claude Code conservent leur CLI natif.
 // freebuff est un TUI interactif : il ne vit qu'en onglet terminal, jamais
 // dans le flux de chat (le backend refuse explicitement un tour de chat).
-type Provider = "codex" | "claude" | "opencode" | "freebuff";
+type Provider = "codex" | "claude" | "opencode" | "freebuff" | "aihubmix";
 type OpenCodeInferenceProvider =
   | "zai"
   | "zai-coding-plan"
@@ -996,6 +1131,9 @@ type AccountProfile = {
   reasoningEffort?: CodexReasoningEffort | null;
   // Palier rapide par compte. Absent des anciens settings => mode normal.
   fastMode?: boolean;
+  // Jour civil local ou l'utilisateur a marque ce compte comme termine.
+  // Une date anterieure reste compatible mais est affichee comme non terminee.
+  completedOn?: string | null;
 };
 
 const DEFAULT_CODEX_MODEL = "gpt-5.6-sol";
@@ -1411,6 +1549,23 @@ type WorkTimeDashboard = {
   days: WorkTimeDay[];
 };
 
+type ReferralCodeView = {
+  code: string;
+  label: string;
+  createdAt: number;
+  /** Nombre de personnes parrainées renvoyé par l'application Duello (null tant qu'elle ne l'expose pas). */
+  referralCount: number | null;
+  lastSyncAt: number | null;
+};
+
+type ReferralSnapshot = {
+  codes: ReferralCodeView[];
+  appUrl: string;
+  duelloConnected: boolean;
+  lastSyncAt: number | null;
+  error: string | null;
+};
+
 type AccountLimitView = {
   id: string;
   label: string;
@@ -1455,8 +1610,28 @@ type PtyExitEvent = {
 
 type TerminalStartResponse = {
   id: number;
+  /** ID local au noeud distant ; distinct de l'ID virtuel affiche dans l'UI. */
+  remoteId?: number;
+  nodeId?: string | null;
+  nodeLabel?: string | null;
   workspaceId: string;
   workspacePath: string;
+};
+
+type ActiveTerminalSummary = {
+  id: number;
+  accountId: string;
+  accountLabel: string;
+  agentId?: string | null;
+  sourceTerminalKey?: string | null;
+  workspaceId: string;
+  workspacePath: string;
+  startedAt: number;
+  loginOnly?: boolean;
+  external?: boolean;
+  nodeId?: string | null;
+  nodeLabel?: string | null;
+  compatibilityFallback?: boolean;
 };
 
 type TerminalSession = {
@@ -1465,6 +1640,10 @@ type TerminalSession = {
   accountId: string;
   agentId: string;
   title: string;
+  displayTitleOverride?: string | null;
+  // Terminal Freebuff Desktop synchronise : Switch n'a aucun PTY a piloter.
+  // On l'affiche en lecture seule, jamais de socket ni d'ecriture ni de buffer.
+  externalSync?: boolean;
   // Un terminal d'authentification est temporaire : il ne doit jamais etre
   // restaure comme un terminal de travail au prochain login / rechargement.
   loginOnly: boolean;
@@ -1480,6 +1659,8 @@ type TerminalSession = {
   codexSessionId: string | null;
   resumeSessionId: string | null;
   sessionCaptureDone: boolean;
+  nodeId?: string | null;
+  remoteId?: number | null;
   terminal: Terminal;
   fitAddon: FitAddon;
 };
@@ -1488,6 +1669,9 @@ type PersistedTerminalRecord = {
   key: string;
   accountId: string;
   agentId: string;
+  /** Route distante necessaire pour restaurer un PTY apres rechargement. */
+  nodeId?: string | null;
+  remoteId?: number | null;
   // Identifiant du PTY cote noeud. Il survit au rechargement de la page :
   // c'est par lui que l'onglet suivant se rattache au terminal encore vivant
   // au lieu d'en relancer un.
@@ -1507,6 +1691,7 @@ type PersistedTerminalState = {
 
 type AppView =
   | "terminal"
+  | "devices"
   | "tutorial"
   | "tasks"
   | "prompts"
@@ -1514,6 +1699,9 @@ type AppView =
   | "pool"
   | "limits"
   | "dashboard"
+  | "tracking"
+  | "duello-bank"
+  | "freebuff-cloud"
   | "video"
   | "transcription"
   | "vps"
@@ -1525,6 +1713,7 @@ type AppView =
   | "forum"
   | "messaging"
   | "tiktok"
+  | "android"
   | "discussions"
   | "history"
   | "audit"
@@ -1545,6 +1734,7 @@ let chatSideMoreMenuOpen = false;
 
 const lazyModuleViews = new Set<AppView>([
   "tutorial",
+  "devices",
   "tasks",
   "prompts",
   "history",
@@ -1553,7 +1743,11 @@ const lazyModuleViews = new Set<AppView>([
   "forum",
   "messaging",
   "tiktok",
+  "android",
   "dashboard",
+  "tracking",
+  "duello-bank",
+  "freebuff-cloud",
   "vps",
   "video",
   "transcription",
@@ -1613,6 +1807,9 @@ type DiscussionSummary = {
   // Identite du fichier rollout HEAD (le plus recent). Cible de `codex resume`
   // et de la copie vers un autre compte.
   rolloutId: string;
+  // Identifiant natif du provider lorsque l'identite logique de Switch ne peut
+  // pas etre donnee telle quelle au CLI (nom du dossier de chat Freebuff).
+  resumeId?: string | null;
   // Nombre de fichiers rollout regroupes sous ce sessionId (>1 = repris).
   forkCount: number;
   // Fournisseur d'origine (codex/claude) : badge + routage de la continuation.
@@ -1641,6 +1838,7 @@ type DiscussionAccountGroup = {
   provider?: Provider;
   codexHome: string;
   hasTokens: boolean;
+  sessionBusy?: boolean;
   discussionCount: number;
   discussions: DiscussionSummary[];
   error?: string | null;
@@ -1687,6 +1885,7 @@ type ActiveChatTurnSummary = {
   status: Exclude<ChatTurnStatus, "idle">;
   startedAt: number;
   waitingForUser: boolean;
+  projectDir?: string | null;
   nodeId?: string | null;
   nodeLabel?: string | null;
 };
@@ -1731,6 +1930,8 @@ type QueuedChatSubmission = {
 type ExpertChatPane = {
   key: string;
   discussion: DiscussionSummary | null;
+  /** Session connue avant meme que l'index des discussions soit actualise. */
+  resumeSessionId: string | null;
   messages: ChatMessage[];
   loading: boolean;
   error: string | null;
@@ -1741,6 +1942,8 @@ type ExpertChatPane = {
   liveUnlisten: UnlistenFn | null;
   fallbackPoll: number | null;
   loadInFlight: boolean;
+  /** Rattachement du rollout en cours, partage entre les polls du meme panneau. */
+  discussionAttachPromise: Promise<boolean> | null;
   turn: ChatTurnSnapshot | null;
   turnPoll: number | null;
   turnPollInFlight: boolean;
@@ -1772,8 +1975,12 @@ type ExpertChatPane = {
 type PersistedExpertChatPane = {
   key: string;
   sessionId: string | null;
+  /** La session existe cote serveur mais son resume n'est pas encore indexe. */
+  awaitingDiscussion?: boolean;
   accountId: string | null;
   executionTargetId?: string | null;
+  /** Dernieres bulles texte uniquement ; aucun thinking, outil ou raisonnement. */
+  recentMessages?: PersistedSentChatMessage[];
   draft: string;
   mode: ChatMode;
   enabledTools?: ChatAgentToolId[];
@@ -1874,6 +2081,7 @@ ensureEventHorizonBackground();
 
 let settings: AppSettings | null = null;
 let selectedAccountId: string | null = null;
+const accountDailyCompletionSaves = new Set<string>();
 let activeTerminalKey: string | null = null;
 let lastPointerClientX: number | null = null;
 let lastPointerClientY: number | null = null;
@@ -1882,21 +2090,18 @@ let statusText = "Pret";
 let ptyIdSeed = Date.now();
 let terminalSessions: TerminalSession[] = [];
 const terminalSessionsByPtyId = new Map<number, TerminalSession>();
+const freebuffTerminalAccountSwitches = new Set<string>();
 
 // Un terminal n'expose aucun etat de tour, contrairement a un chat dont le
 // serveur connait le statut. Le seul signal disponible est son flux de sortie :
 // les CLI d'agent animent un indicateur tant qu'elles travaillent, puis se
-// taisent en rendant la main. Une sortie recente vaut donc « reflechit ».
-// C'est une heuristique et non une mesure : un agent qui reste muet plus d'une
-// seconde en pleine reflexion passera au vert.
-const terminalLastOutputAt = new Map<string, number>();
-const TERMINAL_THINKING_IDLE_MS = 900;
-type TerminalActivityStatus = "off" | "running" | "idle";
-const terminalActivityStatus = (session: TerminalSession): TerminalActivityStatus => {
-  if (!session.running) return "off";
-  const last = terminalLastOutputAt.get(session.key) ?? 0;
-  return Date.now() - last < TERMINAL_THINKING_IDLE_MS ? "running" : "idle";
-};
+// taisent en rendant la main. La pastille combine fraicheur de la sortie et
+// volume sur la fenetre glissante (voir src/terminal-activity.ts) : un TUI au
+// repos qui repeint sa barre de statut ne maintient pas la pastille orange
+// indefiniment. C'est une heuristique et non une mesure.
+const terminalActivity = createTerminalActivityTracker();
+const terminalActivityStatus = (session: TerminalSession): TerminalActivityStatus =>
+  terminalActivity.status(session.key, session.running);
 const terminalActivityLabel = (status: TerminalActivityStatus) =>
   status === "running" ? "Reflechit" : status === "idle" ? "Pret" : "Ferme";
 // Meme pastille que les chats : vert au repos, orange pendant le travail.
@@ -1909,8 +2114,13 @@ const renderTerminalActivityDot = (session: TerminalSession): string => {
 // rafraichissement periodique elle resterait orange jusqu'au prochain rendu.
 let terminalActivityTimer = 0;
 const refreshTerminalActivityDots = () => {
-  document.querySelectorAll<HTMLElement>("[data-terminal-status]").forEach((node) => {
-    const session = terminalSessions.find((item) => item.key === node.dataset.terminalStatus);
+  if (activeView !== "chat" && activeView !== "terminal") return;
+  const statusNodes = document.querySelectorAll<HTMLElement>("[data-terminal-status]");
+  const dotNodes = document.querySelectorAll<HTMLElement>("[data-terminal-dot]");
+  if (!statusNodes.length && !dotNodes.length) return;
+  const sessionsByKey = new Map(terminalSessions.map((session) => [session.key, session]));
+  statusNodes.forEach((node) => {
+    const session = sessionsByKey.get(node.dataset.terminalStatus ?? "");
     if (!session) return;
     const status = terminalActivityStatus(session);
     node.classList.toggle("chat-side-status--running", status === "running");
@@ -1920,8 +2130,8 @@ const refreshTerminalActivityDots = () => {
     node.title = label;
     node.setAttribute("aria-label", `Statut : ${label}`);
   });
-  document.querySelectorAll<HTMLElement>("[data-terminal-dot]").forEach((node) => {
-    const session = terminalSessions.find((item) => item.key === node.dataset.terminalDot);
+  dotNodes.forEach((node) => {
+    const session = sessionsByKey.get(node.dataset.terminalDot ?? "");
     if (!session) return;
     node.classList.toggle("on", session.running);
     node.classList.toggle("thinking", terminalActivityStatus(session) === "running");
@@ -1969,10 +2179,6 @@ const setAppTheme = (theme: ThemeMode): void => {
 // environnement n'a encore ete choisi : on affiche alors le sas de selection,
 // jamais les terminaux de plusieurs projets dans un meme mur.
 let terminalFolderFilter: string | null = null;
-// Creations de terminaux en vol (pas encore poussees dans terminalSessions) :
-// permet de faire respecter la limite EXPERT_MAX_TERMINALS malgre les await
-// (deux creations concurrentes ne peuvent plus reserver le meme dernier slot).
-let pendingTerminalCreations = 0;
 // Un double clic (ou deux handlers rapproches) partage la meme creation de
 // terminal de connexion pour un compte donne.
 const loginTerminalCreations = new Map<string, Promise<TerminalSession | null>>();
@@ -2021,6 +2227,11 @@ let expertChatResponsiveRenderFrame = 0;
 let renderedExpertChatLayoutSignature = "";
 let terminalRestoreAttempted = false;
 let terminalRestorePromise: Promise<void> | null = null;
+let activeTerminalsPoll: number | null = null;
+let activeTerminalsTracking = false;
+let activeTerminalsInFlight = false;
+let activeTerminalsRefreshRequested = false;
+let activeTerminalsForceReattachRequested = false;
 let poolStatus: PoolStatus | null = null;
 let poolPoll: number | null = null;
 let poolStatusInFlight = false;
@@ -2082,16 +2293,26 @@ let usageDashboardSignature = "";
 let accountUsage: AccountUsageDashboard | null = null;
 let accountUsageLoaded = false;
 let accountUsageInFlight = false;
+let accountUsageLastRefreshAt = 0;
 let accountUsageSignature = "";
 let statsRangeDays: StatsRangeDays = 30;
 let selectedStatsDate: string | null = null;
-let statsActiveTab: "tokens" | "work-time" = "tokens";
+let statsActiveTab: "tokens" | "work-time" | "referral" = "tokens";
 let workTimeDashboard: WorkTimeDashboard | null = null;
 let workTimeLoaded = false;
 let workTimeInFlight = false;
 let workTimeSignature = "";
 let workTimeGranularity: WorkTimeGranularity = "day";
 let selectedWorkTimeBucket: string | null = null;
+let referralSnapshot: ReferralSnapshot | null = null;
+let referralLoaded = false;
+let referralInFlight = false;
+let referralError = "";
+let referralModalOpen = false;
+let referralSaving = false;
+let referralToast = "";
+let referralToastTimer: number | null = null;
+let referralDeleting = "";
 let kombaiStatus: KombaiStatus | null = null;
 let kombaiLoaded = false;
 let kombaiPoll: number | null = null;
@@ -2148,6 +2369,10 @@ let newChatAccountId: string | null = null;
 let newChatRoutingMode: NewChatRoutingMode = "automatic";
 let newChatMode: ChatMode = "build";
 let newChatModel = "";
+// Proxy choisi dans la modale de lancement d'un chat. Applique au compte au
+// moment de confirmer (comme le select du terminal) ; reinitialise a chaque
+// ouverture-fermeture de la modale.
+let newChatProxyId: string | null = null;
 let newChatExecutionTargetId: string | null = null;
 const newChatModelDrafts = new Map<string, string>();
 let newChatPendingWorkspace: string | null = null;
@@ -2157,6 +2382,15 @@ let newChatPendingPromptAutoSend = false;
 let newChatBestQuotaInFlight = false;
 let newChatBestQuotaRequestId = 0;
 let agentsModalOpen = false;
+// Fenetre dediee a la gestion des proxys. Les valeurs sont copiees dans un
+// brouillon a l'ouverture : fermer avec Annuler ne modifie jamais les reglages
+// actifs, et un seul enregistrement persiste a la fois liste + associations.
+let proxyManagerModalOpen = false;
+let proxyManagerDrafts: ProxyProfile[] = [];
+let proxyManagerAssignmentDrafts = new Map<string, string | null>();
+let proxyManagerControlsEnabled = true;
+let proxyManagerSaving = false;
+let proxyManagerFeedback: string | null = null;
 let autonomousAgents: AutonomousAgentSnapshot[] = [];
 let autonomousAgentsLoaded = false;
 let autonomousAgentsInFlight = false;
@@ -2184,7 +2418,10 @@ let autonomousAllowGitPublish = false;
 let autonomousMode: ChatMode = "build";
 type AutonomousLaunchMode = "autonomous" | "orchestrator";
 let autonomousLaunchMode: AutonomousLaunchMode = "autonomous";
-let autonomousLaunchWorkerCount = 3;
+const defaultOrchestrationWorkerCount = orchestrationWorkerCountFromEnv(
+  typeof import.meta !== "undefined" ? import.meta.env?.VITE_CST_ORCHESTRATION_WORKERS : undefined,
+);
+let autonomousLaunchWorkerCount = defaultOrchestrationWorkerCount;
 let autonomousLaunchWorkerAccountIds: string[] = [];
 let autonomousRequireUserReview = true;
 let autonomousConnectors: AutonomousConnectorId[] = [];
@@ -2321,7 +2558,7 @@ let orchestrationAccountId: string | null = null;
 let orchestrationProjectDir = "";
 let orchestrationTestCommandDraft = "";
 let orchestrationTestTimeoutSeconds = 10 * 60;
-let orchestrationWorkerCount = 3;
+let orchestrationWorkerCount = defaultOrchestrationWorkerCount;
 let orchestrationWorkerAccountIds: string[] = [];
 let orchestrationCreateOpen = false;
 let orchestrationCreatePreferenceSet = false;
@@ -2344,12 +2581,25 @@ let discussionSearch = "";
 let chatSidebarSearch = "";
 let chatSidebarWidth = CHAT_SIDEBAR_DEFAULT_WIDTH;
 let chatContextSidebarWidthPreference: number | null = null;
-// Compte cible choisi par discussion (sessionId -> accountId). Defaut : le
-// compte d'origine. Persiste entre les re-rendus (poll 60s) pour ne pas perdre
-// le choix en cours.
+// Compte cible choisi par discussion ([accountId, sessionId] -> accountId).
+// Freebuff conserve le meme identifiant natif lors d'une copie vers un autre
+// compte : inclure le compte source evite que les deux lignes partagent leur
+// selecteur. Persiste entre les re-rendus pour ne pas perdre le choix en cours.
 const discussionTargetSel = new Map<string, string>();
+// Verrou global d'operation, dont la valeur identifie precisement la ligne en
+// cours afin que deux copies de comptes differents ne soient pas toutes deux
+// affichees comme occupees.
 let discussionBusyId: string | null = null;
+const discussionIsBusy = (discussion: DiscussionSummary): boolean =>
+  discussionBusyId === discussionIdentityKey(discussion);
 let discussionArchiveCandidate: DiscussionSummary | null = null;
+// Deuxieme confirmation avant l'effacement definitif du disque : armer la
+// suppression permanente transforme le bouton danger en confirmation explicite.
+let discussionEraseArmed = false;
+// La corbeille d'un terminal est volontairement distincte de sa croix : la
+// croix masque/ferme seulement le PTY, tandis que la corbeille efface aussi la
+// discussion persistante qui lui est rattachee.
+let terminalDeleteCandidateKey: string | null = null;
 type ChatAccountTransition = {
   label: string;
   detail: string;
@@ -2367,6 +2617,7 @@ const automaticQuotaResumeVisibilityPins = new Set<string>();
 const explicitlyOpenedBusyChatVisibilityPins = new Set<string>();
 const CHAT_DRAG_MIME = "application/x-cst-chat";
 let draggedChatSessionId: string | null = null;
+let draggedChatAccountId: string | null = null;
 let chatSidebarRefreshPending = false;
 // Vue conversation : discussion ouverte en bulles + son transcript charge.
 let chatDiscussion: DiscussionSummary | null = null;
@@ -2387,16 +2638,44 @@ let activeChatTurns: ActiveChatTurnSummary[] = [];
 let activeChatTurnsPoll: number | null = null;
 let activeChatTurnsTracking = false;
 let activeChatTurnsInFlight = false;
+let activeChatTurnsRefreshRequested = false;
 let activeChatTurnsSidebarSignature = "";
 let runtimeSyncState: RealtimeConnectionState = "closed";
 let runtimeSyncUnlisten: UnlistenFn | null = null;
 let runtimeSyncRefreshTimer: number | null = null;
 const runtimeSyncPendingTopics = new Set<RuntimeSyncTopic>();
 const runtimeSyncRetryTimers = new Map<RuntimeSyncTopic, number>();
+let accountCompletionsSyncInFlight = false;
 let privateMessagesSyncInFlight = false;
 let chatOpenRequestsInFlight = false;
 let chatRuntimeClock: number | null = null;
 let chatDraft = "";
+// Le brouillon du chat principal survit aux rechargements imposes (web-update,
+// chunk Vite perime, F5) : ecriture differee pendant la frappe, forcee sur
+// pagehide. Voir tests/chat-draft-persistence.test.mjs.
+const CHAT_DRAFT_STORAGE_KEY = "cst-chat-draft";
+let chatDraftPersistTimer: number | null = null;
+
+const flushChatDraft = (): void => {
+  if (chatDraftPersistTimer !== null) {
+    window.clearTimeout(chatDraftPersistTimer);
+    chatDraftPersistTimer = null;
+  }
+  if (chatDraft === "") {
+    accountScopedStorage.removeItem(CHAT_DRAFT_STORAGE_KEY);
+    return;
+  }
+  accountScopedStorage.setItem(CHAT_DRAFT_STORAGE_KEY, chatDraft);
+};
+
+const scheduleChatDraftPersist = (): void => {
+  if (chatDraftPersistTimer !== null) window.clearTimeout(chatDraftPersistTimer);
+  chatDraftPersistTimer = window.setTimeout(flushChatDraft, 250);
+};
+
+const restoreChatDraft = (): void => {
+  chatDraft = accountScopedStorage.getItem(CHAT_DRAFT_STORAGE_KEY) ?? "";
+};
 let chatImageAttachments: ChatImageAttachment[] = [];
 let chatQueuedSubmissions: QueuedChatSubmission[] = [];
 let chatQueueDrainInFlight = false;
@@ -2418,7 +2697,30 @@ let skipNextChatScrollCapture = false;
 let chatPreferencesSave: Promise<void> = Promise.resolve();
 const chatModelCatalogs = new Map<string, AccountModelView[]>();
 const chatModelCatalogLoads = new Set<string>();
+const chatModelCatalogErrors = new Map<string, string>();
+const chatModelCatalogUpdatedAt = new Map<string, number>();
 let expertChatPanes: ExpertChatPane[] = [];
+// Un snapshot de discussions peut echouer ou arriver avant l'indexation du
+// rollout. Conserver ces references separement empeche alors une restauration
+// partielle de reecrire le localStorage en perdant des chats encore valides.
+let pendingExpertChatRecords: PersistedExpertChatPane[] = [];
+let pendingActiveExpertChatKey: string | null = null;
+
+let chatResourceAdmissionPausedUntil = 0;
+let chatResourceRetryTimer: number | null = null;
+
+const chatResourceAdmissionPaused = (): boolean =>
+  Date.now() < chatResourceAdmissionPausedUntil;
+
+const pauseChatResourceAdmission = (): void => {
+  chatResourceAdmissionPausedUntil = Date.now() + CHAT_RESOURCE_RETRY_DELAY_MS;
+  if (chatResourceRetryTimer !== null) window.clearTimeout(chatResourceRetryTimer);
+  chatResourceRetryTimer = window.setTimeout(() => {
+    chatResourceRetryTimer = null;
+    chatResourceAdmissionPausedUntil = 0;
+    void drainNextGlobalChatCapacityQueue();
+  }, CHAT_RESOURCE_RETRY_DELAY_MS);
+};
 let activeExpertChatKey: string | null = null;
 let expertChatFullscreenKey: string | null = null;
 let expertChatsRestored = false;
@@ -2452,10 +2754,12 @@ type ManagedDialog =
   | "autonomous-chat"
   | "autonomous-orchestration"
   | "discussion-archive"
+  | "terminal-delete"
   | "environment"
   | "new-chat"
   | "new-terminal"
   | "orchestration-convert"
+  | "proxies"
   | "workspace";
 
 type DialogFocusTarget = {
@@ -2471,6 +2775,7 @@ const DIALOG_TRIGGER_DATA_ATTRIBUTES = [
   "data-act",
   "data-view",
   "data-delete-session",
+  "data-delete-terminal-history",
 ] as const;
 const DIALOG_FOCUSABLE_SELECTOR = [
   "button:not([disabled])",
@@ -2709,6 +3014,8 @@ const lucideIcons = {
   CircleCheck,
   CircleDollarSign,
   CircleX,
+  Archive,
+  Cloud,
   CloudUpload,
   Coins,
   ClipboardCheck,
@@ -2734,10 +3041,12 @@ const lucideIcons = {
   Image: ImageIcon,
   ImageOff,
   Keyboard,
+  Key,
   KeyRound,
   Maximize2,
   Minimize2,
   MousePointer2,
+  Network,
   Play,
   PlugZap,
   Plus,
@@ -2768,6 +3077,7 @@ const lucideIcons = {
   Usb,
   Unplug,
   UserPlus,
+  UserRound,
   Users,
   Volume2,
   WandSparkles,
@@ -2796,6 +3106,7 @@ const lucideIcons = {
   Mic,
   Square,
   Reply,
+  Repeat2,
   RotateCcw,
   Wrench,
   Settings,
@@ -2819,6 +3130,8 @@ const lucideIcons = {
   UserCheck,
   UserX,
   Zap,
+  Gift,
+  Landmark,
 };
 
 // `lucide.createIcons()` reparcourt puis remplace toutes les icones du document
@@ -2852,6 +3165,22 @@ const renderIcons = (root: ParentNode = document) => {
   });
 };
 
+// Les listes d'actions restent hors du DOM tant que leur bloc est replie. Le
+// listener capture aussi les groupes ajoutes plus tard par un patch de flux.
+document.addEventListener("toggle", (event) => {
+  const details = event.target;
+  if (!(details instanceof HTMLDetailsElement) || !details.open) return;
+  const groupId = details.dataset.chatActionGroup;
+  if (!groupId) return;
+  const host = details.querySelector<HTMLElement>(":scope > [data-chat-action-content]");
+  if (!host || host.dataset.chatActionHydrated === "true") return;
+  const html = renderDeferredChatActionGroup(groupId);
+  if (html === null) return;
+  host.innerHTML = html;
+  host.dataset.chatActionHydrated = "true";
+  renderIcons(host);
+}, true);
+
 const chatRuntimeSignatures = new WeakMap<object, string>();
 const chatSidebarPaneStatuses = new WeakMap<ExpertChatPane, ChatSidebarStatus>();
 
@@ -2859,10 +3188,21 @@ type ChatFeedSnapshot = {
   messages: ChatMessage[];
   latestTurnStart: number;
   frameSignature: string;
-  latestSignature: string;
+  latestParts: ChatPart[];
+  turnStatus: ChatTurnStatus;
+  turnStartedAt: number | null;
+  turnFinishedAt: number | null;
 };
-
 const chatFeedSnapshots = new WeakMap<HTMLElement, ChatFeedSnapshot>();
+
+const pruneCurrentDeferredChatActionGroups = (): void => {
+  const activeIds = new Set<string>();
+  document.querySelectorAll<HTMLElement>("[data-chat-action-group]").forEach((element) => {
+    const id = element.dataset.chatActionGroup;
+    if (id) activeIds.add(id);
+  });
+  pruneDeferredChatActionGroups(activeIds);
+};
 
 const latestVisibleChatTurnStart = (messages: ChatMessage[]): number => {
   let start = messages.findIndex(chatMessageHasVisibleContent);
@@ -2904,12 +3244,38 @@ const chatHistoryPrefixStable = (
   latestTurnStart: number,
 ): boolean => {
   if (previous.latestTurnStart !== latestTurnStart) return false;
+  if (previous.messages === messages) return true;
   for (let index = 0; index < latestTurnStart; index += 1) {
     const before = previous.messages[index];
     const after = messages[index];
     if (!before || !after || !historicalChatMessageStable(before, after)) return false;
   }
   return true;
+};
+
+const chatLatestContentStable = (
+  previous: ChatFeedSnapshot,
+  model: ChatPanelModel,
+  latestTurnStart: number,
+): boolean => {
+  if (
+    previous.turnStatus !== model.turnStatus
+    || previous.turnStartedAt !== model.turnStartedAt
+    || previous.turnFinishedAt !== model.turnFinishedAt
+  ) return false;
+  if (previous.messages === model.messages && previous.latestParts === model.parts) return true;
+
+  const previousLatestCount = previous.messages.length - previous.latestTurnStart;
+  const nextLatestCount = model.messages.length - latestTurnStart;
+  if (previousLatestCount !== nextLatestCount) return false;
+  for (let offset = 0; offset < nextLatestCount; offset += 1) {
+    const before = previous.messages[previous.latestTurnStart + offset];
+    const after = model.messages[latestTurnStart + offset];
+    if (!before || !after || !historicalChatMessageStable(before, after)) return false;
+  }
+
+  return previous.latestParts.length === model.parts.length
+    && previous.latestParts.every((part, index) => chatPartStable(part, model.parts[index]));
 };
 
 const chatFeedSnapshot = (model: ChatPanelModel): ChatFeedSnapshot => {
@@ -2930,15 +3296,10 @@ const chatFeedSnapshot = (model: ChatPanelModel): ChatFeedSnapshot => {
       // invisible jusqu'au prochain message.
       microsoftPendingActionsSignature(),
     ]),
-    // Seul le tour courant varie pendant le streaming. Les longs tours restent
-    // serialises, mais tout l'historique stable ne l'est plus a chaque trame.
-    latestSignature: JSON.stringify([
-      model.messages.slice(latestTurnStart),
-      model.parts,
-      model.turnStatus,
-      model.turnStartedAt,
-      model.turnFinishedAt,
-    ]),
+    latestParts: model.parts,
+    turnStatus: model.turnStatus,
+    turnStartedAt: model.turnStartedAt,
+    turnFinishedAt: model.turnFinishedAt,
   };
 };
 
@@ -2954,7 +3315,7 @@ const patchChatFeedContent = (
     && previous.frameSignature === next.frameSignature
     && chatHistoryPrefixStable(previous, model.messages, next.latestTurnStart)
   ) {
-    if (previous.latestSignature === next.latestSignature) {
+    if (chatLatestContentStable(previous, model, next.latestTurnStart)) {
       chatFeedSnapshots.set(feed, next);
       return null;
     }
@@ -2968,6 +3329,7 @@ const patchChatFeedContent = (
   }
 
   feed.innerHTML = renderChatFeedInner(model, instanceId);
+  pruneCurrentDeferredChatActionGroups();
   chatFeedSnapshots.set(feed, next);
   return feed;
 };
@@ -3002,7 +3364,6 @@ const CHAT_COMPOSER_SELECTORS_STORAGE_KEY =
   "codex-switch-terminal.chat-composer-selectors-enabled.v1";
 const EXPERT_CHAT_TOOLBAR_HIDDEN_STORAGE_KEY =
   "codex-switch-terminal.expert-chat-toolbar-hidden.v1";
-const EXPERT_MAX_TERMINALS = 16;
 const TERMINAL_RESTORE_CONCURRENCY = 4;
 const EXPERT_OPEN_CHATS_STORAGE_KEY = "codex-switch-terminal.expert-open-chats.v1";
 // v2 applique la largeur plus lisible de la nouvelle coque sans conserver une
@@ -3027,7 +3388,22 @@ const LIMIT_POLL_INTERVAL_MS = 30_000;
 const LIMIT_REFRESH_FOLLOWUP_MS = 750;
 const UNCONNECTED_ACCOUNT_EXPIRY_MS = 10 * 60 * 1_000;
 const UNCONNECTED_ACCOUNT_CLEANUP_RETRY_MS = 30_000;
-const LOCAL_TRANSCRIPT_POLL_INTERVAL_MS = 2_000;
+const LOCAL_TRANSCRIPT_POLL_INTERVAL_MS = 3_000;
+const CHAT_TURN_POLL_INTERVAL_MS = 800;
+// Les tours actifs et le WebSocket portent les changements de statut. La liste
+// des discussions n'a pas besoin de rescanner les historiques toutes les 2 s.
+const DISCUSSIONS_POLL_INTERVAL_MS = 5_000;
+// Le dashboard de consommation parcourt potentiellement des centaines de
+// rollouts : il reste rafraîchissable manuellement, mais pas toutes les 5 s.
+const ACCOUNT_USAGE_REFRESH_INTERVAL_MS = 30_000;
+// Les dashboards sont des vues de synthese, pas des flux temps reel : eviter
+// de rescanner les historiques et les metriques cinq fois par seconde.
+const DASHBOARD_POLL_INTERVAL_MS = 15_000;
+const AUTONOMOUS_ACTIVE_POLL_INTERVAL_MS = 2_000;
+const AUTONOMOUS_BACKGROUND_POLL_INTERVAL_MS = 15_000;
+const ACTIVE_CHAT_TURNS_FALLBACK_POLL_INTERVAL_MS = 1_500;
+const ACTIVE_TERMINALS_FALLBACK_POLL_INTERVAL_MS = 2_000;
+const ORCHESTRATIONS_POLL_INTERVAL_MS = 3_000;
 let terminalRuntimePromise: Promise<typeof import("./terminal-runtime")> | null = null;
 
 const loadTerminalRuntime = () =>
@@ -3340,9 +3716,14 @@ const toggleChatSidebar = (): void => {
     if (document.body.classList.contains("chat-sidebar-open")) {
       closeMobileOverlays();
     } else {
-      document.body.classList.remove("m-drawer-open", "m-sheet-open");
+      document.body.classList.remove(
+        "m-drawer-open",
+        "m-sheet-open",
+        "chat-context-sidebar-open",
+      );
       document.body.classList.add("chat-sidebar-open");
       syncMobileSheetAccessibility(false);
+      syncMobileContextSidebarAccessibility(false);
       syncMobileDrawerAccessibility(true, true);
     }
   } else if (displayedChatSidebarWidth() === 0) {
@@ -3355,7 +3736,21 @@ const toggleChatSidebar = (): void => {
 };
 
 const toggleChatContextSidebar = (): void => {
-  if (displayedChatContextSidebarWidth() === CHAT_CONTEXT_SIDEBAR_COLLAPSED_WIDTH) {
+  if (window.matchMedia("(max-width: 860px)").matches) {
+    if (document.body.classList.contains("chat-context-sidebar-open")) {
+      closeMobileOverlays();
+    } else {
+      document.body.classList.remove(
+        "m-drawer-open",
+        "m-sheet-open",
+        "chat-sidebar-open",
+      );
+      document.body.classList.add("chat-context-sidebar-open");
+      syncMobileSheetAccessibility(false);
+      syncMobileDrawerAccessibility(false);
+      syncMobileContextSidebarAccessibility(true, true);
+    }
+  } else if (displayedChatContextSidebarWidth() === CHAT_CONTEXT_SIDEBAR_COLLAPSED_WIDTH) {
     setChatContextSidebarWidth(defaultChatContextSidebarWidth(window.innerWidth));
   } else {
     setChatContextSidebarWidth(CHAT_CONTEXT_SIDEBAR_COLLAPSED_WIDTH);
@@ -3925,6 +4320,11 @@ const loadOpenTerminalRecords = (): PersistedTerminalState => {
           key: item.key,
           accountId: item.accountId,
           agentId: typeof item.agentId === "string" ? item.agentId : "codex",
+          nodeId: typeof item.nodeId === "string" ? item.nodeId : null,
+          remoteId:
+            typeof item.remoteId === "number" && Number.isInteger(item.remoteId) && item.remoteId > 0
+              ? item.remoteId
+              : null,
           ptyId:
             typeof item.ptyId === "number" && Number.isInteger(item.ptyId) && item.ptyId > 0
               ? item.ptyId
@@ -3968,13 +4368,14 @@ const persistTerminalSessions = () => {
   if (!terminalRestoreAttempted) return;
   saveOpenTerminalRecords({
     v: 4,
-    activeKey: activeTerminalKey,
-    terminals: terminalSessions
-      .filter((session) => session.status !== "Ferme" && !session.loginOnly)
+    activeKey: activeTerminalKey,      terminals: terminalSessions
+      .filter((session) => session.status !== "Ferme" && session.ptyId !== null && !session.loginOnly)
       .map((session) => ({
         key: session.key,
         accountId: session.accountId,
         agentId: session.agentId,
+        nodeId: session.nodeId ?? null,
+        remoteId: session.remoteId ?? null,
         ptyId: session.ptyId,
         codexSessionId: session.codexSessionId,
         folderPath: session.folderPath,
@@ -3990,6 +4391,7 @@ const persistTerminalSessions = () => {
 // l'uuid (session id) pour relancer `codex resume <uuid>` a la reouverture.
 const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 const OPENCODE_SESSION_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,159}$/;
+const FREEBUFF_RESUME_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,159}$/;
 const isPlausibleSessionId = (id: string | null | undefined): id is string =>
   !!id && (UUID_RE.test(id) || OPENCODE_SESSION_RE.test(id));
 
@@ -4133,12 +4535,68 @@ const accountProvider = (account: AccountProfile | null | undefined): Provider =
 const accountSupportsChat = (account: AccountProfile | null | undefined) =>
   accountProvider(account) !== "freebuff";
 const chatCapableAccounts = () => (settings?.accounts ?? []).filter(accountSupportsChat);
+// Freebuff ne peut pas alimenter le panneau de chat structure, mais une
+// conversation Freebuff peut etre copiee/reprise dans le TUI d'un AUTRE compte
+// Freebuff. Son selecteur doit donc afficher les comptes Freebuff, pas les
+// comptes compatibles avec le chat non interactif.
+const continuationAccountsForDiscussion = (discussion: DiscussionSummary) => {
+  const provider = discussion.provider ?? accountProvider(accountById(discussion.accountId));
+  // Une discussion Codex peut aussi se poursuivre sur un compte Freebuff : le
+  // transcript est alors importe dans un nouveau chat Freebuff et repris dans
+  // son terminal TUI (branche Codex -> Freebuff de continueDiscussionWith).
+  const freebuffAccounts = (settings?.accounts ?? []).filter((account) => accountProvider(account) === "freebuff");
+  const candidates = provider === "freebuff"
+    ? freebuffAccounts
+    : provider === "codex"
+      ? [...chatCapableAccounts(), ...freebuffAccounts]
+      : chatCapableAccounts();
+  return [...candidates].sort((left, right) =>
+    left.id === discussion.accountId ? -1 : right.id === discussion.accountId ? 1 : 0,
+  );
+};
 // freebuff n'autorise qu'une session PAR COMPTE : son binaire inscrit son pid
 // dans le home du compte et refuse toute seconde instance. Le backend expose
 // cette occupation (`sessionBusy`), relue ici pour ne jamais ouvrir un
 // terminal condamne a afficher son ecran de blocage.
+const localFreebuffTerminalBusy = (accountId: string) =>
+  terminalSessions.some(
+    (session) =>
+      session.accountId === accountId &&
+      session.status !== "Ferme" &&
+      (session.running || session.ptyId !== null),
+  );
 const accountSessionBusy = (account: AccountProfile | null | undefined) =>
-  !!account && limitStatus.some((row) => row.id === account.id && row.sessionBusy === true);
+  !!account && accountProvider(account) === "freebuff" && (
+    localFreebuffTerminalBusy(account.id) ||
+    limitStatus.some((row) => row.id === account.id && row.sessionBusy === true) ||
+    discussions?.accounts.some(
+      (group) => group.accountId === account.id && group.sessionBusy === true,
+    ) === true
+  );
+
+const assertFreebuffAccountAvailable = async (account: AccountProfile) => {
+  if (accountProvider(account) !== "freebuff") return;
+  if (localFreebuffTerminalBusy(account.id)) {
+    throw new Error(`${account.label} est indisponible : un terminal Freebuff est déjà ouvert`);
+  }
+  let rows: AccountLimitView[];
+  try {
+    rows = await invoke<AccountLimitView[]>("account_limit_status", { force: false });
+  } catch (error) {
+    throw new Error(`impossible de vérifier la disponibilité de ${account.label} : ${String(error)}`);
+  }
+  limitStatus = rows;
+  limitStatusSignature = JSON.stringify(rows);
+  limitStatusLoaded = true;
+  const busyByAccount = new Map(rows.map((row) => [row.id, row.sessionBusy === true]));
+  discussions?.accounts.forEach((group) => {
+    const current = busyByAccount.get(group.accountId);
+    if (current !== undefined) group.sessionBusy = current;
+  });
+  if (rows.some((row) => row.id === account.id && row.sessionBusy === true)) {
+    throw new Error(`${account.label} est indisponible : un terminal Freebuff est déjà ouvert`);
+  }
+};
 
 // Compte freebuff exploitable pour une nouvelle session : celui demande s'il est
 // libre, sinon le premier autre compte freebuff disponible. `null` = tous pris.
@@ -4201,6 +4659,7 @@ const agentProvider = (agent: AgentProfile | null | undefined): Provider =>
 const providerLabel = (provider: Provider) =>
   provider === "freebuff"
     ? "Freebuff"
+    : provider === "aihubmix" ? "AIHubMix"
     : provider === "claude" ? "Claude" : provider === "opencode" ? "OpenCode" : "Codex";
 
 const openCodeProviderOption = (id: string | null | undefined) =>
@@ -4209,11 +4668,33 @@ const accountInferenceProvider = (
   account: AccountProfile | null | undefined,
 ): string | null =>
   accountProvider(account) === "opencode" ? account?.inferenceProvider?.trim() || null : null;
+const accountIsOpenRouter = (account: AccountProfile | null | undefined): boolean =>
+  accountProvider(account) === "opencode"
+  && accountInferenceProvider(account)?.toLocaleLowerCase() === "openrouter";
 const safeOpenCodeProviderId = (value: string | null | undefined): string | null =>
   value && /^[a-z0-9][a-z0-9_-]{0,63}$/.test(value) ? value : null;
 const safeCliModel = (value: string | null | undefined): string | null =>
   value && /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,159}$/.test(value) ? value : null;
+// OpenRouter publie notamment `openrouter/~z-ai/glm-latest`. Le tilde reste
+// strictement limite au debut du premier segment fournisseur ; les autres
+// modeles conservent le validateur CLI historique ci-dessus.
+const safeOpenRouterModel = (value: string | null | undefined): string | null =>
+  value
+  && value.length <= 160
+  && /^openrouter\/~?[A-Za-z0-9][A-Za-z0-9._-]{0,63}\/[A-Za-z0-9][A-Za-z0-9._:/-]*$/.test(value)
+    ? value
+    : null;
+// Compte special b.ai : identifiant reserve cote serveur. Le compte est
+// auto-cree depuis CST_BAI_API_KEY (comme le compte fal.ai environnemental) et
+// sa cle API est deja provisionnee dans le home isole du compte : aucun
+// collage de cle n'est necessaire. Modele DeepSeek V4 Flash, intensite max.
+const SPECIAL_BAI_ACCOUNT_ID = "bai";
+const BAI_ACCOUNT_MODEL = "deepseek/deepseek-v4-flash";
+const isBaiAccount = (account: AccountProfile | null | undefined): boolean =>
+  account?.id === SPECIAL_BAI_ACCOUNT_ID;
+
 const accountProviderLabel = (account: AccountProfile | null | undefined) => {
+  if (isBaiAccount(account)) return "b.ai (spécial)";
   if (accountProvider(account) !== "opencode") return providerLabel(accountProvider(account));
   const inference = accountInferenceProvider(account);
   return openCodeProviderOption(inference)?.label ?? (inference ? `${inference} via OpenCode` : "OpenCode");
@@ -4224,11 +4705,18 @@ const parseProviderChoice = (value: string | null | undefined): {
 } => {
   if (value?.startsWith("opencode:")) {
     const inferenceProvider = value.slice("opencode:".length);
+    // Type special b.ai : le fournisseur opencode reel reste DeepSeek (c'est
+    // sous ce nom que la cle vit dans auth.json et que le CLI opencode resout
+    // le modele), mais le compte porte l'identite b.ai cote Switch.
+    if (inferenceProvider === "b.ai") {
+      return { provider: "opencode", inferenceProvider: "deepseek" };
+    }
     const option = openCodeProviderOption(inferenceProvider);
     if (option) return { provider: "opencode", inferenceProvider: option.id };
   }
   if (value === "claude") return { provider: "claude", inferenceProvider: null };
   if (value === "freebuff") return { provider: "freebuff", inferenceProvider: null };
+  if (value === "aihubmix") return { provider: "aihubmix", inferenceProvider: null };
   return { provider: "codex", inferenceProvider: null };
 };
 const providerChoiceValue = (
@@ -4372,26 +4860,29 @@ const fastModeAvailabilityLabel = (
 const modelSuggestionsForProvider = (
   provider: Provider,
   inferenceProvider: string | null = null,
-  codexCatalog: AccountModelView[] | undefined = undefined,
+  catalog: AccountModelView[] | undefined = undefined,
 ): string[] => {
   if (provider === "claude") return [...CLAUDE_MODEL_SUGGESTIONS];
   if (provider === "opencode") {
+    if (inferenceProvider?.toLocaleLowerCase() === "openrouter" && catalog) {
+      return catalog.map((model) => model.id);
+    }
     return [
       ...(openCodeProviderOption(inferenceProvider)?.models ?? OPENCODE_MODEL_SUGGESTIONS),
     ];
   }
   if (provider === "freebuff") return [...FREEBUFF_MODEL_SUGGESTIONS];
-  return codexCatalog?.map((model) => model.id) ?? CODEX_MODEL_SUGGESTIONS;
+  return catalog?.map((model) => model.id) ?? CODEX_MODEL_SUGGESTIONS;
 };
 
 const modelSuggestionsForAccount = (
   account: AccountProfile | null | undefined,
-  codexCatalog: AccountModelView[] | undefined = undefined,
+  catalog: AccountModelView[] | undefined = undefined,
 ): string[] =>
   modelSuggestionsForProvider(
     accountProvider(account),
     accountInferenceProvider(account),
-    codexCatalog,
+    catalog,
   );
 
 // Datalist propre a un champ de modele. Les modales de creation laissent
@@ -4402,10 +4893,12 @@ const renderModelSuggestionDatalist = (id: string, models: string[]) =>
     .map((model) => `<option value="${escapeAttr(model)}"></option>`)
     .join("")}</datalist>`;
 
-// Codex ET Claude gerent une intensite de raisonnement. Claude Code l'expose
-// via `--effort` (verifie sur le CLI 2.1.x) ; OpenCode ne la gere pas.
-const providerSupportsReasoningEffort = (provider: Provider): boolean =>
-  provider === "codex" || provider === "claude";
+// Les chats Codex utilisent le Goal natif. Claude et OpenCode recoivent le
+// meme contrat via le serveur MCP interne de Switch. La whitelist reste
+// explicite afin qu'un futur provider ne soit pas annonce compatible avant
+// d'avoir recu et valide son transport Goal.
+const providerSupportsGoals = (provider: Provider): boolean =>
+  provider === "codex" || provider === "claude" || provider === "opencode";
 
 const accountReasoningEffort = (account: AccountProfile | null | undefined) => {
   const raw = account?.reasoningEffort;
@@ -4417,11 +4910,16 @@ const accountReasoningEffort = (account: AccountProfile | null | undefined) => {
       ? raw
       : DEFAULT_CLAUDE_REASONING_EFFORT;
   }
+  // Pour OpenRouter, null est une preference a part entiere : elle signifie
+  // « Automatique » et interdit au frontend de forcer une variante.
+  if (accountIsOpenRouter(account)) return isCodexReasoningEffort(raw) ? raw : null;
   return normalizeCodexReasoningEffort(raw);
 };
 
 const reasoningEffortLabel = (effort: CodexReasoningEffort) =>
-  CODEX_REASONING_EFFORTS.find((item) => item.value === effort)?.label ?? effort;
+  effort === "none"
+    ? "Aucune"
+    : CODEX_REASONING_EFFORTS.find((item) => item.value === effort)?.label ?? effort;
 
 const chatCatalogModel = (
   account: AccountProfile | null | undefined,
@@ -4449,6 +4947,14 @@ const reasoningEffortsForChatModel = (
   // Claude n'expose pas de catalogue par modele : les niveaux `--effort` sont
   // fixes (low/high/xhigh/max).
   if (accountProvider(account) === "claude") return [...CLAUDE_REASONING_EFFORTS];
+  // OpenRouter publie les niveaux exacts par modele. On n'invente aucun
+  // niveau de secours si le dernier snapshot sain n'en annonce pas.
+  if (accountIsOpenRouter(account)) {
+    return chatCatalogModel(account, model)?.supportedReasoningEfforts
+      .map((item) => item.reasoningEffort)
+      .filter(isCodexReasoningEffort) ?? [];
+  }
+  if (accountProvider(account) !== "codex") return [];
   const advertised =
     chatCatalogModel(account, model)?.supportedReasoningEfforts
       .map((item) => item.reasoningEffort)
@@ -4456,25 +4962,143 @@ const reasoningEffortsForChatModel = (
   return advertised.length ? advertised : fallbackReasoningEffortsForModel(model);
 };
 
-const reasoningEffortForChatModel = (
+const supportedReasoningEffortForModel = (
   account: AccountProfile | null | undefined,
   model: string,
   requested: string | null | undefined,
-): CodexReasoningEffort => {
+): CodexReasoningEffort | null => {
   const supported = reasoningEffortsForChatModel(account, model);
   if (isCodexReasoningEffort(requested) && supported.includes(requested)) return requested;
+  if (accountIsOpenRouter(account)) return null;
+  const provider = accountProvider(account);
+  if (provider !== "codex" && provider !== "claude") return null;
   const advertisedDefault = chatCatalogModel(account, model)?.defaultReasoningEffort;
   if (isCodexReasoningEffort(advertisedDefault) && supported.includes(advertisedDefault)) {
     return advertisedDefault;
   }
   const providerDefault =
-    accountProvider(account) === "claude"
+    provider === "claude"
       ? DEFAULT_CLAUDE_REASONING_EFFORT
       : DEFAULT_CODEX_REASONING_EFFORT;
   if (supported.includes(providerDefault)) {
     return providerDefault;
   }
   return supported[0] ?? providerDefault;
+};
+
+type ValidatedAccountModelSelection = {
+  model: string;
+  reasoningEffort: CodexReasoningEffort | null;
+  catalogModel: AccountModelView | null;
+  error: string | null;
+};
+
+// Frontiere commune aux chats, agents autonomes et orchestrations. Les
+// fournisseurs historiques conservent leur comportement souple ; OpenRouter
+// exige un ID present dans le dernier snapshot sain de la cle du compte.
+const validatedAccountModelSelection = (
+  account: AccountProfile | null | undefined,
+  requestedModel: string,
+  requestedReasoningEffort: string | null | undefined,
+): ValidatedAccountModelSelection => {
+  const model = requestedModel.trim();
+  if (!accountIsOpenRouter(account)) {
+    return {
+      model,
+      reasoningEffort: supportedReasoningEffortForModel(
+        account,
+        model,
+        requestedReasoningEffort,
+      ),
+      catalogModel: chatCatalogModel(account, model),
+      error: null,
+    };
+  }
+
+  const catalog = account ? chatModelCatalogs.get(account.id) : undefined;
+  if (!catalog?.length) {
+    return {
+      model,
+      reasoningEffort: null,
+      catalogModel: null,
+      error: "Scanne d'abord le catalogue OpenRouter de ce compte avant de choisir un modèle.",
+    };
+  }
+  const catalogModel = catalog.find(
+    (candidate) => candidate.id.toLocaleLowerCase() === model.toLocaleLowerCase(),
+  ) ?? null;
+  if (!catalogModel) {
+    return {
+      model,
+      reasoningEffort: null,
+      catalogModel: null,
+      error: "Choisis un modèle présent dans le dernier catalogue OpenRouter scanné.",
+    };
+  }
+  return {
+    model: catalogModel.id,
+    reasoningEffort: supportedReasoningEffortForModel(
+      account,
+      catalogModel.id,
+      requestedReasoningEffort,
+    ),
+    catalogModel,
+    error: null,
+  };
+};
+
+const requireValidatedAccountModelSelection = (
+  account: AccountProfile | null | undefined,
+  requestedModel: string,
+  requestedReasoningEffort: string | null | undefined,
+): ValidatedAccountModelSelection => {
+  const selection = validatedAccountModelSelection(
+    account,
+    requestedModel,
+    requestedReasoningEffort,
+  );
+  if (selection.error) throw new Error(selection.error);
+  return selection;
+};
+
+// Un rescan ne choisit jamais silencieusement un autre modele. Un effort
+// devenu incompatible revient sur Automatique ; un modele disparu reste
+// visible comme choix invalide jusqu'a une selection explicite.
+const reconcileOpenRouterAccountSelection = (
+  account: AccountProfile,
+  catalog: AccountModelView[],
+): boolean => {
+  if (!accountIsOpenRouter(account) || !catalog.length) return false;
+  const previousModel = account.model?.trim() || accountModel(account);
+  const previousEffort = account.reasoningEffort ?? null;
+  const selection = validatedAccountModelSelection(
+    account,
+    previousModel,
+    previousEffort,
+  );
+  if (selection.error || !selection.catalogModel) {
+    account.reasoningEffort = null;
+    return previousEffort !== null;
+  }
+  account.model = selection.model;
+  account.reasoningEffort = selection.reasoningEffort;
+  return selection.model !== previousModel || selection.reasoningEffort !== previousEffort;
+};
+
+const reasoningEffortForChatModel = (
+  account: AccountProfile | null | undefined,
+  model: string,
+  requested: string | null | undefined,
+): CodexReasoningEffort | null =>
+  supportedReasoningEffortForModel(account, model, requested);
+
+const accountSupportsReasoningEffort = (
+  account: AccountProfile | null | undefined,
+  model = accountModel(account),
+): boolean => {
+  const provider = accountProvider(account);
+  if (provider === "codex" || provider === "claude") return true;
+  return accountIsOpenRouter(account) && reasoningEffortsForChatModel(account, model).length > 0;
 };
 
 const chatReasoningEffortOptions = (
@@ -4503,16 +5127,52 @@ const syncAccountFastModeControl = (accountId: string) => {
   if (label) label.textContent = enabled ? "Fast" : "Normal";
 };
 
-const loadChatModelCatalog = async (accountId: string | null | undefined) => {
-  if (!accountId || chatModelCatalogs.has(accountId) || chatModelCatalogLoads.has(accountId)) return;
+const loadChatModelCatalog = async (
+  accountId: string | null | undefined,
+  force = false,
+) => {
+  if (
+    !accountId
+    || (!force && chatModelCatalogs.has(accountId))
+    || chatModelCatalogLoads.has(accountId)
+  ) return;
   const account = accountById(accountId);
-  if (!account || accountProvider(account) !== "codex") return;
+  if (!account || (accountProvider(account) !== "codex" && !accountIsOpenRouter(account))) return;
+  const accountContext = {
+    account,
+    provider: accountProvider(account),
+    inferenceProvider: accountInferenceProvider(account)?.toLocaleLowerCase() ?? null,
+    codexHome: account.codexHome,
+    proxyId: account.proxyId ?? null,
+  };
   chatModelCatalogLoads.add(accountId);
+  chatModelCatalogErrors.delete(accountId);
+  if (activeView === "pool") render();
   try {
     const catalog = await invoke<AccountModelView[]>("account_model_catalog", { accountId });
-    if (catalog.length) chatModelCatalogs.set(accountId, catalog);
-  } catch {
-    // Les valeurs de secours restent utilisables avec un ancien backend/CLI.
+    const currentAccount = accountById(accountId);
+    if (
+      currentAccount !== accountContext.account
+      || accountProvider(currentAccount) !== accountContext.provider
+      || (accountInferenceProvider(currentAccount)?.toLocaleLowerCase() ?? null)
+        !== accountContext.inferenceProvider
+      || currentAccount?.codexHome !== accountContext.codexHome
+      || (currentAccount?.proxyId ?? null) !== accountContext.proxyId
+    ) return;
+    if (!catalog.length && accountIsOpenRouter(currentAccount)) {
+      throw new Error("OpenRouter n'a retourné aucun modèle pour ce compte.");
+    }
+    if (catalog.length) {
+      chatModelCatalogs.set(accountId, catalog);
+      chatModelCatalogUpdatedAt.set(accountId, Date.now());
+      if (reconcileOpenRouterAccountSelection(currentAccount, catalog)) {
+        await persistChatPreferences(accountId);
+      }
+    }
+  } catch (error) {
+    // Le dernier snapshot sain reste disponible pendant et apres un echec de
+    // rafraichissement. Codex conserve egalement ses valeurs de secours.
+    chatModelCatalogErrors.set(accountId, String(error));
   } finally {
     chatModelCatalogLoads.delete(accountId);
     const visiblePanes = expertChatPanes.filter(
@@ -4523,9 +5183,7 @@ const loadChatModelCatalog = async (accountId: string | null | undefined) => {
     // mise a jour, ce qui rendait surtout les changements de compte saccades.
     if (activeView === "chat") {
       visiblePanes.forEach((pane) => refreshExpertChatPane(pane));
-    } else if (activeView === "pool") {
-      syncAccountFastModeControl(accountId);
-    }
+    } else if (activeView === "pool") render();
   }
 };
 
@@ -4568,7 +5226,10 @@ const agentRunCommand = (
     if (accountBypassEnabled(account) && !command.includes("--auto")) {
       command += " --auto";
     }
-    const model = account ? safeCliModel(accountModel(account)) : null;
+    const requestedModel = account ? accountModel(account) : null;
+    const model = accountIsOpenRouter(account)
+      ? safeOpenRouterModel(requestedModel)
+      : safeCliModel(requestedModel);
     if (model && !/(?:^|\s)(?:--model|-m)(?:\s|=)/.test(command)) {
       command += ` --model ${model}`;
     }
@@ -4684,7 +5345,7 @@ const expertTerminalSessions = () => {
   if (loginSession) return [loginSession];
   return terminalFolderFilter === null
     ? []
-    : terminalSessionsForFolder(terminalFolderFilter).slice(0, EXPERT_MAX_TERMINALS);
+    : terminalSessionsForFolder(terminalFolderFilter);
 };
 
 const expertGridSlotCount = () => Math.max(2, expertTerminalSessions().length);
@@ -4958,17 +5619,31 @@ const activateTerminalSession = (session: TerminalSession) => {
 
 const toggleExpertTerminalFullscreen = (session: TerminalSession) => {
   if (!terminalSessions.includes(session)) return;
-  expertTerminalFullscreenKey =
-    expertTerminalFullscreenKey === session.key ? null : session.key;
+  const entering = expertTerminalFullscreenKey !== session.key;
+  expertTerminalFullscreenKey = entering ? session.key : null;
   activateTerminalSession(session);
   requestTerminalFocusKey = session.key;
-  statusText = expertTerminalFullscreenKey
+  statusText = entering
     ? `Terminal en plein ecran: ${terminalTitle(session)}`
     : "Mur de terminaux";
   render();
+  // Le panneau passe en `position: fixed` après le rendu. Attendre deux frames
+  // laisse le navigateur appliquer 100dvh, les safe areas et le clavier mobile
+  // avant de mesurer xterm, sinon cols/rows restent ceux de la grille.
+  window.requestAnimationFrame(() => {
+    window.requestAnimationFrame(() => {
+      const current = terminalSessions.find((candidate) => candidate.key === session.key);
+      if (!current || !current.running) return;
+      fitAndResizeTerminal(current);
+      current.terminal.focus();
+    });
+  });
 };
 
+const terminalFitTimers = new Map<string, number>();
 const fitAndResizeTerminal = (session: TerminalSession) => {
+  const previousTimer = terminalFitTimers.get(session.key);
+  if (previousTimer !== undefined) window.clearTimeout(previousTimer);
   const element = session.terminal.element;
   const host = element?.parentElement;
   if (!host || host.clientWidth < 2 || host.clientHeight < 2) return;
@@ -4980,11 +5655,15 @@ const fitAndResizeTerminal = (session: TerminalSession) => {
   }
 
   if (session.ptyId !== null) {
-    void invoke("resize_terminal", {
-      id: session.ptyId,
-      cols: session.terminal.cols,
-      rows: session.terminal.rows,
-    }).catch(() => undefined);
+    const timer = window.setTimeout(() => {
+      terminalFitTimers.delete(session.key);
+      void invoke("resize_terminal", {
+        id: session.ptyId,
+        cols: session.terminal.cols,
+        rows: session.terminal.rows,
+      }).catch(() => undefined);
+    }, 90);
+    terminalFitTimers.set(session.key, timer);
   }
 };
 
@@ -5000,14 +5679,6 @@ const fitAndResizeExpertTerminals = () => {
 const fitAndResizeVisibleTerminals = () => {
   if (activeView === "terminal") {
     fitAndResizeExpertTerminals();
-    return;
-  }
-  // Le mur de chats affiche ses propres tuiles de terminal : elles doivent etre
-  // ajustees comme celles du mur de terminaux, sinon xterm conserve la taille
-  // heritee de son montage et le contenu deborde ou reste minuscule.
-  const wallTerminals = activeView === "chat" ? expertChatWallTerminals() : [];
-  if (wallTerminals.length > 0) {
-    wallTerminals.forEach(fitAndResizeTerminal);
     return;
   }
   fitAndResizeActiveTerminal();
@@ -5120,6 +5791,33 @@ const toggleAccountFastMode = async (accountId: string) => {
       : "Mode normal activé pour ce compte";
   } catch (error) {
     statusText = `Compte enregistré, mais configuration Fast mode non appliquée : ${String(error)}`;
+  }
+  render();
+};
+
+const toggleAccountDailyCompletion = async (accountId: string) => {
+  if (!settings || accountDailyCompletionSaves.has(accountId)) return;
+  const account = accountById(accountId);
+  if (!account) return;
+
+  const previous = account.completedOn ?? null;
+  const completed = !accountCompletedToday(account);
+  account.completedOn = completed ? localCalendarDay() : null;
+  accountDailyCompletionSaves.add(accountId);
+  statusText = completed
+    ? `Compte « ${account.label} » marqué terminé pour aujourd’hui`
+    : `Compte « ${account.label} » remis en cours pour aujourd’hui`;
+  render();
+
+  try {
+    settings = await invoke<AppSettings>("save_settings", { settings });
+    reconcileAccountSelections();
+  } catch (error) {
+    const current = accountById(accountId);
+    if (current) current.completedOn = previous;
+    statusText = `État quotidien non enregistré : ${String(error)}`;
+  } finally {
+    accountDailyCompletionSaves.delete(accountId);
   }
   render();
 };
@@ -5292,6 +5990,10 @@ const auditViewLabelFor = (view: AppView): string => {
       return "studio vidéo";
     case "transcription":
       return "transcription audio";
+    case "devices":
+      return "flotte d’appareils USB";
+    case "android":
+      return "contrôle Android";
     case "design":
       return "espace Design";
     case "discussions":
@@ -5860,6 +6562,7 @@ const insertPromptInMainChat = (
     selection ?? promptComposerSelection(input, chatDraft.length),
   );
   chatDraft = insertion.value;
+  scheduleChatDraftPersist();
   if (input) {
     input.value = chatDraft;
     input.dispatchEvent(new Event("input", { bubbles: true }));
@@ -6215,7 +6918,7 @@ const startOrchestrationsPoll = () => {
   if (orchestrationsPoll !== null) return;
   orchestrationsPoll = window.setInterval(
     () => runWhenPageVisible(() => void refreshOrchestrations()),
-    2_000,
+    ORCHESTRATIONS_POLL_INTERVAL_MS,
   );
 };
 
@@ -6356,11 +7059,56 @@ const setActiveView = (view: AppView) => {
       });
     return;
   }
+  if (view === "devices" && !deviceFleetModule) {
+    void loadDeviceFleetModule()
+      .then(() => setActiveView(view))
+      .catch((error) => {
+        statusText = `Flotte d’appareils indisponible : ${String(error)}`;
+        render();
+      });
+    return;
+  }
+  if (view === "android" && !androidControlModule) {
+    void loadAndroidControlModule()
+      .then(() => setActiveView(view))
+      .catch((error) => {
+        statusText = `Contrôle Android indisponible : ${String(error)}`;
+        render();
+      });
+    return;
+  }
   if (view === "dashboard" && !statsViewModule) {
     void loadStatsViewModule()
       .then(() => setActiveView(view))
       .catch((error) => {
         statusText = `Statistiques indisponibles : ${String(error)}`;
+        render();
+      });
+    return;
+  }
+  if (view === "tracking" && !trackingViewModule) {
+    void loadTrackingViewModule()
+      .then(() => setActiveView(view))
+      .catch((error) => {
+        statusText = `Tracking indisponible : ${String(error)}`;
+        render();
+      });
+    return;
+  }
+  if (view === "duello-bank" && !duelloBankModule) {
+    void loadDuelloBankModule()
+      .then(() => setActiveView(view))
+      .catch((error) => {
+        statusText = `Banque Duello indisponible : ${String(error)}`;
+        render();
+      });
+    return;
+  }
+  if (view === "freebuff-cloud" && !freebuffCloudModule) {
+    void loadFreebuffCloudModule()
+      .then(() => setActiveView(view))
+      .catch((error) => {
+        statusText = `Freebuff Cloud indisponible : ${String(error)}`;
         render();
       });
     return;
@@ -6411,7 +7159,12 @@ const setActiveView = (view: AppView) => {
     return;
   }
   lazyChunkTargetView = null;
-  document.body.classList.remove("chat-sidebar-open", "m-drawer-open", "m-sheet-open");
+  document.body.classList.remove(
+    "chat-sidebar-open",
+    "chat-context-sidebar-open",
+    "m-drawer-open",
+    "m-sheet-open",
+  );
   if (view !== "settings") keyboardShortcutCaptureId = null;
   if (view === "terminal" && !userEnvironmentPath(terminalFolderFilter)) {
     terminalFolderFilter = userEnvironmentPath(currentWorkspace());
@@ -6425,6 +7178,9 @@ const setActiveView = (view: AppView) => {
     pool: "Vue pool",
     limits: "Vue limites",
     dashboard: "Vue dashboard",
+    tracking: "Liens de tracking Duello",
+    "duello-bank": "Banque Duello",
+    "freebuff-cloud": "Freebuff Cloud",
     video: "Studio IA génératif",
     transcription: "Transcription audio sur le VPS",
     vps: "Déploiement VPS",
@@ -6435,6 +7191,8 @@ const setActiveView = (view: AppView) => {
     forum: "Forum communautaire",
     messaging: "Messagerie privée",
     tiktok: "Comptes émetteurs TikTok",
+    devices: "Appareils USB Android et iOS",
+    android: "Contrôle Android USB",
     design: "Espace Design",
     discussions: "Vue historique",
     history: "Vue historique",
@@ -6474,6 +7232,14 @@ const setActiveView = (view: AppView) => {
     startVoiceRuntimePoll();
   } else {
     stopVoiceRuntimePoll();
+  }
+
+  if (activeView === "tasks") {
+    // Le serveur est la source de vérité des tâches ; le cache local est adopté
+    // dès que l'onglet s'ouvre (ou re-poussé si des changements sont en attente).
+    void import("./tasks-sync").then(({ syncTasksFromServer }) => {
+      void syncTasksFromServer(accountScopedStorage, currentTaskAccountId(), render);
+    });
   }
 
   if (activeView === "autonomous") {
@@ -6516,28 +7282,48 @@ const setActiveView = (view: AppView) => {
   messagingModule?.setMessagingVisible(activeView === "messaging");
   messagingModule?.startMessagingPolling(render);
   if (activeView !== "tiktok") tiktokAccountsModule?.deactivateTikTokAccountsPanel();
+  if (activeView !== "devices") deviceFleetModule?.deactivateDeviceFleetPanel();
+  if (activeView !== "android") androidControlModule?.deactivateAndroidControlPanel();
 
   if (activeView !== "vps") vpsModule?.deactivateVpsPanel();
   if (activeView !== "video") videoModule?.deactivateVideoPanel();
   if (activeView !== "transcription") transcriptionModule?.deactivateTranscriptionPanel();
+  if (activeView !== "settings") maintenance.deactivateMaintenanceCard();
 
   if (activeView === "chat") startAllExpertChatWork();
   else stopAllExpertChatWork();
 
+  if (activeView === "terminal") {
+    requestTerminalFocusKey = activeTerminalKey;
+  }
   render();
 
+  if (activeView === "terminal") void recoverActiveTerminalInput();
+
   if (activeView === "pool") {
+    void refreshAccountCompletions();
     void refreshPoolStatus();
     settings?.accounts
-      .filter((account) => accountProvider(account) === "codex")
+      .filter((account) => accountProvider(account) === "codex" || accountIsOpenRouter(account))
       .forEach((account) => void loadChatModelCatalog(account.id));
   }
   if (activeView === "limits") void refreshLimitStatus();
   if (activeView === "chat" && !limitStatusLoaded) void refreshLimitStatus(true);
+  if (activeView === "discussions") void refreshLimitStatus(true);
   if (activeView === "dashboard") {
     void refreshUsageDashboard();
     void refreshAccountUsage();
     void refreshWorkTimeDashboard();
+    void refreshReferralDashboard(false, true);
+  }
+  if (activeView === "tracking") {
+    void trackingViewModule?.refreshTrackingPanel(render, true);
+  }
+  if (activeView === "duello-bank") {
+    void duelloBankModule?.refreshDuelloBankPanel(render, true);
+  }
+  if (activeView === "freebuff-cloud") {
+    void freebuffCloudModule?.refreshFreebuffCloudPanel(render, true);
   }
   if (activeView === "design" && activeDesignTool === "kombai") void refreshKombaiStatus();
   if (activeView === "design" && activeDesignTool === "claude") {
@@ -6558,12 +7344,19 @@ const setActiveView = (view: AppView) => {
   if (activeView === "tiktok") {
     tiktokAccountsModule?.activateTikTokAccountsPanel(render, isRemoteMode());
   }
+  if (activeView === "devices") {
+    deviceFleetModule?.activateDeviceFleetPanel(render, isRemoteMode());
+  }
+  if (activeView === "android") {
+    androidControlModule?.activateAndroidControlPanel(render, isRemoteMode());
+  }
   if (activeView === "vps") vpsModule?.activateVpsPanel(render);
   if (activeView === "video") videoModule?.activateVideoPanel(render);
   if (activeView === "transcription") transcriptionModule?.activateTranscriptionPanel(render);
   if (activeView === "history" && !promptHistoryLoaded) void refreshPromptHistory();
   if (activeView === "skills") void refreshSkills();
   if (activeView === "settings") {
+    maintenance.activateMaintenanceCard(render);
     void refreshVoiceRuntimeStatus();
     if (!telegramConnectionLoaded) void refreshTelegramConnection(true);
     if (!whatsappConnectionLoaded) void refreshWhatsAppConnection(true);
@@ -6579,6 +7372,15 @@ const setActiveView = (view: AppView) => {
   if (activeView === "doctolib-lab" && !doctolibLab.status) {
     void refreshDoctolibLabStatus();
   }
+};
+
+// Ouvrir l'Historique depuis la navigation signifie toujours « tout afficher ».
+// Un identifiant de session peut etre passe uniquement par le raccourci interne
+// qui cherche une conversation precise. Sans ce point d'entree unique, ce
+// filtre technique restait actif lorsque l'utilisateur revenait dans la vue.
+const openDiscussionHistory = (search = "") => {
+  discussionSearch = search;
+  setActiveView("discussions");
 };
 
 const stopLimitRefreshFollowup = () => {
@@ -6665,6 +7467,8 @@ const refreshLimitStatus = (silent = false, force = false): Promise<void> => {
     } else if (activeView === "chat" && (statusChanged || accountSettingsChanged)) {
       if (accountSettingsChanged) render();
       else refreshAllChatRuntimeStatus();
+    } else if (activeView === "discussions" && (statusChanged || accountSettingsChanged)) {
+      render();
     }
     if (
       activeView !== "chat" &&
@@ -6795,7 +7599,11 @@ const cleanupExpiredUnconnectedAccounts = async () => {
     reconcileAccountSelections();
     limitStatus = limitStatus.filter((row) => freshIds.has(row.id));
     limitStatusSignature = JSON.stringify(limitStatus);
-    removed.forEach((account) => chatModelCatalogs.delete(account.id));
+    removed.forEach((account) => {
+      chatModelCatalogs.delete(account.id);
+      chatModelCatalogErrors.delete(account.id);
+      chatModelCatalogUpdatedAt.delete(account.id);
+    });
 
     if (removed.length > 0 && poolStatus?.running) {
       try {
@@ -6969,8 +7777,8 @@ const normalizeAccountUsageDashboard = (
 };
 
 const refreshAccountUsage = async () => {
-  if (accountUsageInFlight) return;
-  accountUsageInFlight = true;
+  if (accountUsageInFlight) return;  accountUsageInFlight = true;
+  accountUsageLastRefreshAt = Date.now();
   let accountUsageChanged = false;
   try {
     const nextAccountUsage = normalizeAccountUsageDashboard(
@@ -7052,10 +7860,17 @@ const startUsagePoll = () => {
     () =>
       runWhenPageVisible(() => {
         void refreshUsageDashboard();
-        void refreshAccountUsage();
         void refreshWorkTimeDashboard();
+        void refreshReferralDashboard(false, true);
+        const now = Date.now();
+        if (
+          !accountUsageLoaded
+          || now - accountUsageLastRefreshAt >= ACCOUNT_USAGE_REFRESH_INTERVAL_MS
+        ) {
+          void refreshAccountUsage();
+        }
       }),
-    5000,
+    DASHBOARD_POLL_INTERVAL_MS,
   );
 };
 
@@ -7080,13 +7895,14 @@ const refreshKombaiStatus = async () => {
       const recoveredFromError = kombaiStatusError;
       const runningChanged = kombaiStatus.running !== wasRunning;
       kombaiStatusError = false;
-      if (activeView === "design" && activeDesignTool === "kombai") {
+          if (activeView === "design" && activeDesignTool === "kombai") {
         if (recoveredFromError || runningChanged) {
           statusText = kombaiStatusSummary(kombaiStatus);
         }
-        // Evite de recharger l'iframe a chaque tick : on ne re-render que si
-        // l'etat "running" change (ou tant qu'on n'est pas encore lance).
-        if (recoveredFromError || !kombaiStatus.running || runningChanged || !document.querySelector("#kombaiFrame")) {
+        // Evite de recharger l'iframe a chaque tick : le statut stable ne
+        // justifie aucun rendu global. Le premier rendu est couvert par
+        // l'absence de l'iframe, puis seuls les changements d'etat redessinent.
+        if (recoveredFromError || runningChanged || !document.querySelector("#kombaiFrame")) {
           render();
         }
       }
@@ -7119,11 +7935,13 @@ const stopKombaiPoll = () => {
 const applyDiscussionsSnapshot = (snapshot: DiscussionsView) => {
   discussions = snapshot;
   discussionsLoaded = true;
+  const latestDiscussions = snapshot.accounts.flatMap((group) => group.discussions);
+  const newlyAttachedPanes = attachPendingExpertChatRecords(latestDiscussions);
   const nextRenderSignature = JSON.stringify([snapshot.totalDiscussions, snapshot.accounts]);
-  if (nextRenderSignature === discussionsRenderSignature) return;
+  if (nextRenderSignature === discussionsRenderSignature && newlyAttachedPanes.length === 0) return;
   discussionsRenderSignature = nextRenderSignature;
-  const latestBySession = new Map(
-    snapshot.accounts.flatMap((group) => group.discussions).map((discussion) => [discussion.sessionId, discussion]),
+  const latestByDiscussion = new Map(
+    latestDiscussions.map((discussion) => [discussionIdentityKey(discussion), discussion]),
   );
   const syncPanelTitle = (root: ParentNode | null, discussion: DiscussionSummary) => {
     const element = root?.querySelector<HTMLElement>(".chat-title");
@@ -7152,7 +7970,7 @@ const applyDiscussionsSnapshot = (snapshot: DiscussionsView) => {
     if (next) renderIcons(next);
   };
   if (chatDiscussion) {
-    const latest = latestBySession.get(chatDiscussion.sessionId);
+    const latest = latestByDiscussion.get(discussionIdentityKey(chatDiscussion));
     if (latest) {
       Object.assign(chatDiscussion, latest);
       syncPanelTitle(document.querySelector<HTMLElement>("#chatPanel"), chatDiscussion);
@@ -7160,8 +7978,26 @@ const applyDiscussionsSnapshot = (snapshot: DiscussionsView) => {
     }
   }
   expertChatPanes.forEach((pane) => {
+    if (!pane.discussion && pane.accountId && pane.resumeSessionId) {
+      const restored = discussionForSession(
+        latestDiscussions,
+        pane.accountId,
+        pane.resumeSessionId,
+      );
+      if (restored) {
+        const capturedWorkspace = userEnvironmentPath(pane.pendingWorkspace);
+        if (capturedWorkspace && !restored.folderPath) restored.folderPath = capturedWorkspace;
+        pane.discussion = restored;
+        pane.resumeSessionId = restored.rolloutId?.trim() || pane.resumeSessionId;
+        pane.accountId = restored.accountId;
+        pane.contextUsage = null;
+        pane.loading = true;
+        pane.error = null;
+        newlyAttachedPanes.push(pane);
+      }
+    }
     if (!pane.discussion) return;
-    const latest = latestBySession.get(pane.discussion.sessionId);
+    const latest = latestByDiscussion.get(discussionIdentityKey(pane.discussion));
     if (latest) {
       Object.assign(pane.discussion, latest);
       syncPanelTitle(expertChatPaneRoot(pane), pane.discussion);
@@ -7195,6 +8031,14 @@ const applyDiscussionsSnapshot = (snapshot: DiscussionsView) => {
     // Garde le compteur global des workspaces et conversations a jour.
     refreshWorkspaceSwitcher();
   }
+  if (newlyAttachedPanes.length > 0) {
+    persistExpertChats();
+    newlyAttachedPanes.forEach((pane) => {
+      void loadChatModelCatalog(pane.accountId);
+      if (activeView === "chat") refreshExpertChatPane(pane);
+    });
+    if (activeView === "chat") startAllExpertChatWork();
+  }
 };
 
 const refreshDiscussions = (): Promise<void> => {
@@ -7223,8 +8067,10 @@ const startDiscussionsPoll = () => {
     // collantes des sessions.
     discussionsSyncState = "polling";
     discussionsPoll = window.setInterval(
-      () => runWhenPageVisible(() => void refreshDiscussions()),
-      2000,
+      () => runWhenPageVisible(() => {
+        void refreshDiscussions();
+      }),
+      DISCUSSIONS_POLL_INTERVAL_MS,
     );
   } else if (isRemoteMode()) {
     discussionsSyncState = "connecting";
@@ -7246,13 +8092,15 @@ const startDiscussionsPoll = () => {
       runWhenPageVisible(() => {
         if (discussionsSyncState !== "live") void refreshDiscussions();
       });
-    }, 2000);
+    }, DISCUSSIONS_POLL_INTERVAL_MS);
   } else {
     // Le bureau local n'a pas de serveur WebSocket : le scan ne tourne que tant
     // que la vue est ouverte, avec une cadence assez courte pour suivre un chat.
     discussionsPoll = window.setInterval(
-      () => runWhenPageVisible(() => void refreshDiscussions()),
-      2000,
+      () => runWhenPageVisible(() => {
+        void refreshDiscussions();
+      }),
+      DISCUSSIONS_POLL_INTERVAL_MS,
     );
   }
   startActiveChatTurnsPoll();
@@ -7291,7 +8139,7 @@ const renameDiscussion = async (discussion: DiscussionSummary): Promise<void> =>
     return;
   }
 
-  discussionBusyId = discussion.sessionId;
+  discussionBusyId = discussionIdentityKey(discussion);
   if (activeView === "discussions") refreshDiscussionList();
   else refreshChatSidebarConversations();
   try {
@@ -7399,10 +8247,73 @@ const persistTerminalDiscussionFolder = async (session: TerminalSession): Promis
   }
 };
 
-// Reprise dans le compte D'ORIGINE : ouvre le fil dans le chat classique et
-// lance automatiquement un nouveau tour sur le rollout HEAD. Aucun terminal
-// interactif n'est cree par ce bouton.
+const freebuffResumeId = (discussion: DiscussionSummary): string | null => {
+  const explicit = discussion.resumeId?.trim();
+  if (explicit && FREEBUFF_RESUME_ID_RE.test(explicit) && explicit !== "." && explicit !== "..") {
+    return explicit;
+  }
+  // Compatibilite avec un backend anterieur au champ `resumeId` : le fichier
+  // est toujours `<projet>/chats/<id>/chat-messages.json`.
+  const parts = discussion.filePath.replace(/\\/g, "/").split("/").filter(Boolean);
+  const inferred = parts.at(-2)?.trim() ?? "";
+  return FREEBUFF_RESUME_ID_RE.test(inferred) && inferred !== "." && inferred !== ".."
+    ? inferred
+    : null;
+};
+
+const launchFreebuffDiscussionTerminal = async (
+  discussion: DiscussionSummary,
+  target: AccountProfile,
+  folderPath: string,
+) => {
+  if (accountProvider(target) !== "freebuff") {
+    throw new Error("le compte cible n'est pas un compte Freebuff");
+  }
+  await assertFreebuffAccountAvailable(target);
+  const resumeId = freebuffResumeId(discussion);
+  if (!resumeId) {
+    throw new Error("l'identifiant natif de la conversation Freebuff est invalide");
+  }
+  const session = await createNewTerminal(
+    target.id,
+    false,
+    buildResumeCommand(resumeId, target),
+    providerAgentId("freebuff"),
+    resumeId,
+    folderPath,
+  );
+  if (!session) throw new Error(`le terminal Freebuff de ${target.label} n'a pas pu être créé`);
+  if (!session.running || session.ptyId === null || session.status === "Erreur") {
+    const failure = statusText || `${target.label} est indisponible`;
+    await closeTerminalSession(session.key);
+    throw new Error(failure);
+  }
+  return session;
+};
+
+// Reprise dans le compte D'ORIGINE : les providers non interactifs ouvrent le
+// fil dans le chat classique. Freebuff restaure son dossier natif dans un
+// terminal TUI, car il n'expose pas de mode chat structure/non interactif.
 const resumeDiscussion = async (discussion: DiscussionSummary) => {
+  const provider = discussion.provider ?? accountProvider(accountById(discussion.accountId));
+  if (provider === "freebuff") {
+    if (discussionBusyId) return;
+    const target = accountById(discussion.accountId);
+    if (!target) return;
+    discussionBusyId = discussionIdentityKey(discussion);
+    render();
+    try {
+      const folderPath = userEnvironmentPath(activateDiscussionFolder(discussion));
+      if (!folderPath) throw new Error("la discussion n'a pas d'environnement associe");
+      await launchFreebuffDiscussionTerminal(discussion, target, folderPath);
+      statusText = `Conversation Freebuff reprise avec ${target.label}`;
+    } catch (error) {
+      statusText = `Reprise Freebuff impossible : ${String(error)}`;
+    }
+    discussionBusyId = null;
+    render();
+    return;
+  }
   try {
     const folderPath = userEnvironmentPath(await restoreDiscussionFolder(discussion));
     if (!folderPath) {
@@ -7424,18 +8335,29 @@ const resumeDiscussion = async (discussion: DiscussionSummary) => {
   }
 };
 
-// Archive la version source APRES que la continuation cible est prete. Elle
-// disparait ainsi de l'onglet Discussions, tout en restant recuperable dans le
-// dossier d'archive si un retour arriere est necessaire.
-const closeTransferredDiscussionSource = (discussion: DiscussionSummary) => {
+const transferredDiscussionStatus = (
+  _target: AccountProfile,
+) => "Conversation poursuivie · historique complet conservé";
+
+const transferredDiscussionPendingStatus = (_target: AccountProfile) =>
+  "Conversation prête";
+
+// Ferme uniquement les vues encore rattachees a la source apres une reprise
+// reussie. Les fichiers de session ne sont ni archives ni supprimes : la
+// conversation reste donc dans l'Historique jusqu'au retrait manuel. Detacher
+// la vue evite aussi que le polling du tour source echoue relance la bascule en
+// boucle une fois le panneau cible actif.
+const detachTransferredDiscussionSourceFromOpenViews = (
+  discussion: DiscussionSummary,
+) => {
   const sourceIds = new Set([discussion.sessionId, discussion.rolloutId]);
   const isSourceDiscussion = (candidate: DiscussionSummary | null | undefined) =>
-    !!candidate &&
-    candidate.accountId === discussion.accountId &&
-    (sourceIds.has(candidate.sessionId) || sourceIds.has(candidate.rolloutId));
+    !!candidate
+    && candidate.accountId === discussion.accountId
+    && (sourceIds.has(candidate.sessionId) || sourceIds.has(candidate.rolloutId));
 
-  const closedPanes = expertChatPanes.filter((pane) => isSourceDiscussion(pane.discussion));
-  closedPanes.forEach((pane) => {
+  const sourcePanes = expertChatPanes.filter((pane) => isSourceDiscussion(pane.discussion));
+  sourcePanes.forEach((pane) => {
     stopExpertChatSync(pane);
     stopExpertChatTurnPoll(pane);
     resetExpertModelCapacityRetry(pane);
@@ -7444,13 +8366,13 @@ const closeTransferredDiscussionSource = (discussion: DiscussionSummary) => {
     explicitlyOpenedBusyChatVisibilityPins.delete(pane.key);
   });
   expertChatPanes = expertChatPanes.filter((pane) => !isSourceDiscussion(pane.discussion));
-  if (closedPanes.some((pane) => pane.key === activeExpertChatKey)) {
+  if (sourcePanes.some((pane) => pane.key === activeExpertChatKey)) {
     activeExpertChatKey = expertChatPanes.at(-1)?.key ?? null;
   }
-  if (closedPanes.some((pane) => pane.key === expertChatFullscreenKey)) {
+  if (sourcePanes.some((pane) => pane.key === expertChatFullscreenKey)) {
     expertChatFullscreenKey = null;
   }
-  if (closedPanes.length) {
+  if (sourcePanes.length) {
     reconcileExpertChatPage();
     persistExpertChats();
   }
@@ -7472,26 +8394,6 @@ const closeTransferredDiscussionSource = (discussion: DiscussionSummary) => {
     chatHistoryOpen = false;
   }
 };
-
-const archiveTransferredDiscussion = async (discussion: DiscussionSummary): Promise<number> => {
-  const result = await invoke<{ count?: number }>("delete_discussion", {
-    accountId: discussion.accountId,
-    // sessionId (identite logique) archive aussi tous les anciens forks Codex.
-    sessionId: discussion.sessionId,
-    archive: true,
-  });
-  discussionTargetSel.delete(discussion.sessionId);
-  closeTransferredDiscussionSource(discussion);
-  return result?.count ?? 1;
-};
-
-const transferredDiscussionStatus = (
-  _target: AccountProfile,
-  _archivedCount: number,
-) => "Conversation poursuivie sans interruption";
-
-const transferredDiscussionPendingStatus = (_target: AccountProfile) =>
-  "Conversation prête";
 
 const syncStatusTextDom = () => {
   document.querySelectorAll<HTMLElement>(".chat-status-toast").forEach((element) => {
@@ -7530,30 +8432,26 @@ const setExpertChatAccountTransition = (
 };
 
 // Le compte cible est utilisable des que start_chat_turn a confirme son
-// demarrage. L'archivage de la source et le rescannage de l'index restent
-// necessaires, mais ne doivent plus bloquer le compositeur pendant plusieurs
-// secondes sur une longue conversation.
+// demarrage. La source reste volontairement dans l'Historique : seul
+// l'utilisateur peut ensuite la retirer avec l'action dediee. Le rescannage de
+// l'index ne doit pas bloquer le compositeur pendant plusieurs secondes.
 const finalizeTransferredDiscussion = async (
   discussion: DiscussionSummary,
   target: AccountProfile,
   pendingStatus: string,
 ) => {
-  let finalStatus: string;
-  try {
-    const archivedCount = await archiveTransferredDiscussion(discussion);
-    finalStatus = transferredDiscussionStatus(target, archivedCount);
-  } catch (error) {
-    finalStatus = `Conversation poursuivie, mais l’ancienne version reste disponible : ${String(error)}`;
-  }
+  // Revenir au compte d'origine dans son ancienne ligne d'historique, au lieu
+  // de laisser le selecteur pointe vers la copie qui vient d'etre creee.
+  discussionTargetSel.delete(discussionIdentityKey(discussion));
 
-  // Le verrou protege uniquement la source contre une seconde mutation. Le
+  // Le verrou protege uniquement la source contre une seconde copie. Le
   // chat cible, lui, est deja interactif depuis releaseTransferredDiscussion.
-  if (discussionBusyId === discussion.sessionId) discussionBusyId = null;
+  if (discussionIsBusy(discussion)) discussionBusyId = null;
   await refreshDiscussions();
   // Ne pas ecraser une action plus recente de l'utilisateur avec la fin d'une
   // tache d'arriere-plan devenue stale.
   if (statusText === pendingStatus) {
-    statusText = finalStatus;
+    statusText = transferredDiscussionStatus(target);
     syncStatusTextDom();
   }
 };
@@ -7565,6 +8463,7 @@ const releaseTransferredDiscussion = (
 ) => {
   const pendingStatus = transferredDiscussionPendingStatus(target);
   statusText = pendingStatus;
+  detachTransferredDiscussionSourceFromOpenViews(discussion);
   setExpertChatAccountTransition(transferPane, null);
   void finalizeTransferredDiscussion(discussion, target, pendingStatus);
 };
@@ -7582,16 +8481,21 @@ const expertPaneForDiscussion = (
   return expertChatPanes.find(matches) ?? null;
 };
 
-// Reprise dans un AUTRE compte = deplacement, pas duplication. Deux cas :
+// Reprise dans un AUTRE compte = copie avec historique source conserve. Deux cas :
 //  - MEME provider Codex : copie FIDELE du rollout HEAD vers le compte cible,
-//    reprise native, puis archivage de la chaine source.
+//    puis reprise native sur la nouvelle copie.
 //  - INTER-provider (ou impliquant Claude) : export du transcript, injection
-//    dans une session NEUVE du provider cible, puis archivage de la source.
+//    dans une session NEUVE du provider cible.
 //
-// Dans les deux cas, la source n'est archivee qu'une fois le tour du chat cible
-// demarre. Un echec conserve donc l'ancienne discussion dans la liste.
+// Aucune bascule n'archive ni ne supprime automatiquement la source : elle
+// reste dans l'Historique jusqu'a ce que l'utilisateur choisisse de la retirer.
+// Freebuff garde seulement un flux d'ouverture TUI special ; son identifiant
+// natif identique sur deux comptes est distingue par l'identite composite UI.
 type DiscussionContinuationOptions = {
   preserveNavigation?: boolean;
+  /** Affiche explicitement le panneau cible (necessaire depuis le main-chat). */
+  activateTarget?: boolean;
+  sourceTerminalKey?: string;
 };
 
 const continueDiscussionWith = async (
@@ -7607,7 +8511,7 @@ const continueDiscussionWith = async (
   const transferPane = expertPaneForDiscussion(discussion, preferredPane);
   const sourceProvider = discussion.provider ?? accountProvider(accountById(discussion.accountId));
   const targetProvider = accountProvider(target);
-  discussionBusyId = discussion.sessionId;
+  discussionBusyId = discussionIdentityKey(discussion);
   if (transferPane) {
     setExpertChatAccountTransition(transferPane, {
       label: "Continuité automatique",
@@ -7617,6 +8521,39 @@ const continueDiscussionWith = async (
     render();
   }
   try {
+    if (sourceProvider === "freebuff") {
+      if (targetProvider !== "freebuff") {
+        throw new Error("une conversation Freebuff doit etre reprise avec un compte Freebuff");
+      }
+      // Controle avant la copie : si le compte est occupe, aucun doublon de
+      // conversation ni terminal d'erreur n'est cree. Le lancement refait ce
+      // controle juste avant le spawn pour couvrir le temps de la copie.
+      await assertFreebuffAccountAvailable(target);
+      const rawFolderPath = options.preserveNavigation
+        ? discussionFolderPath(discussion)
+        : activateDiscussionFolder(discussion);
+      const folderPath = userEnvironmentPath(rawFolderPath);
+      if (!folderPath) {
+        throw new Error("la discussion n'a pas d'environnement associe");
+      }
+      discussion.folderPath = folderPath;
+      const copied = await invoke<DiscussionSummary>("copy_discussion_to_account", {
+        sessionId: discussion.sessionId,
+        sourceAccountId: discussion.accountId,
+        targetAccountId,
+      });
+      copied.folderPath = folderPath;
+      await launchFreebuffDiscussionTerminal(copied, target, folderPath);
+      const sourceTerminal = options.sourceTerminalKey
+        ? terminalSessions.find((session) => session.key === options.sourceTerminalKey) ?? null
+        : null;
+      if (sourceTerminal && sourceTerminal.accountId === discussion.accountId) {
+        await closeTerminalSession(sourceTerminal.key);
+      }
+      releaseTransferredDiscussion(discussion, target, transferPane);
+      return;
+    }
+
     const folderPath = userEnvironmentPath(await (
       options.preserveNavigation
         ? preserveDiscussionFolder(discussion)
@@ -7624,6 +8561,30 @@ const continueDiscussionWith = async (
     ));
     if (!folderPath) {
       throw new Error("la discussion n'a pas d'environnement associe");
+    }
+    // Codex -> Freebuff : Freebuff n'expose ni chat structure ni mode non
+    // interactif, la reprise se fait donc dans son terminal TUI. Le transcript
+    // Codex est importe dans un nouveau chat natif (import_codex_transcript_to_freebuff,
+    // la source n'est jamais modifiee par cette commande), puis le terminal du
+    // compte cible est lance dessus. La source reste dans l'Historique ; toutes
+    // les actions frontend resolvent la ligne par compte ET identifiant.
+    if (targetProvider === "freebuff") {
+      await assertFreebuffAccountAvailable(target);
+      const transcript = await invoke<string>("export_discussion_transcript", {
+        accountId: discussion.accountId,
+        sessionId: discussion.rolloutId || discussion.sessionId,
+      });
+      const copied = await invoke<DiscussionSummary>("import_codex_transcript_to_freebuff", {
+        sourceAccountId: discussion.accountId,
+        sessionId: discussion.rolloutId || discussion.sessionId,
+        targetAccountId,
+        folderPath,
+        transcript,
+      });
+      copied.folderPath = folderPath;
+      await launchFreebuffDiscussionTerminal(copied, target, folderPath);
+      releaseTransferredDiscussion(discussion, target, transferPane);
+      return;
     }
     if (sourceProvider === "codex" && targetProvider === "codex") {
       const copied = await invoke<DiscussionSummary>("copy_discussion_to_account", {
@@ -7646,7 +8607,10 @@ const continueDiscussionWith = async (
         folderPath,
         "continue",
         transferPane,
-        { preserveNavigation: options.preserveNavigation },
+        {
+          preserveNavigation: options.preserveNavigation,
+          activateTarget: options.activateTarget,
+        },
       );
       if (!resumed) {
         discussionBusyId = null;
@@ -7670,7 +8634,10 @@ const continueDiscussionWith = async (
       folderPath,
       transcript,
       transferPane,
-      { preserveNavigation: options.preserveNavigation },
+      {
+        preserveNavigation: options.preserveNavigation,
+        activateTarget: options.activateTarget,
+      },
     );
     if (!resumed) {
       discussionBusyId = null;
@@ -7686,11 +8653,130 @@ const continueDiscussionWith = async (
   }
 };
 
+// Retrouve la conversation native liee a un terminal Freebuff. Les nouveaux
+// terminaux memorisent directement le resumeId ; le repli par compte+dossier
+// permet aussi de gerer un terminal deja ouvert avant cette mise a jour.
+//
+// Un terminal cree depuis le bouton « Nouveau terminal » n'a pas encore de
+// resumeId. Si plusieurs historiques partagent le meme environnement, le
+// dossier seul est donc ambigu. On utilise alors l'horodatage de demarrage du
+// PTY et l'activite recente de la discussion : Freebuff n'autorise qu'un seul
+// terminal par compte, donc la session creee par ce PTY est la plus recente dans
+// cette fenetre. Sans cette preuve temporelle, on conserve le refus plutot que
+// de transferer silencieusement le mauvais historique.
+const FREEBUFF_TERMINAL_MATCH_WINDOW_SECONDS = 60;
+const FREEBUFF_TERMINAL_RECENT_ACTIVITY_SECONDS = 15 * 60;
+
+const freebuffDiscussionSortNewest = (left: DiscussionSummary, right: DiscussionSummary) =>
+  right.lastActivity - left.lastActivity
+  || right.startedAt - left.startedAt
+  || (freebuffResumeId(right) ?? right.sessionId).localeCompare(
+    freebuffResumeId(left) ?? left.sessionId,
+  );
+
+const freebuffDiscussionForTerminal = (session: TerminalSession): DiscussionSummary | null => {
+  if (accountProvider(accountById(session.accountId)) !== "freebuff") return null;
+  const candidates = allDiscussions().filter((discussion) =>
+    discussion.accountId === session.accountId &&
+    (discussion.provider ?? "freebuff") === "freebuff"
+  );
+  const knownIds = new Set(
+    [session.resumeSessionId, session.codexSessionId].filter(
+      (id): id is string => !!id,
+    ),
+  );
+  const exact = candidates.find((discussion) =>
+    knownIds.has(discussion.sessionId) ||
+    knownIds.has(discussion.rolloutId) ||
+    knownIds.has(freebuffResumeId(discussion) ?? "")
+  );
+  if (exact) return exact;
+
+  const terminalFolder = session.workspacePath ?? session.folderPath ?? session.projectDir;
+  const sameFolder = terminalFolder
+    ? candidates.filter((discussion) => {
+      const folder = discussionFolderPath(discussion);
+      return !!folder && normalizeWorkspacePath(folder) === normalizeWorkspacePath(terminalFolder);
+    })
+    : [];
+  const scoped = sameFolder.length > 0 ? sameFolder : candidates;
+  const terminalStartedAt = session.startedAtUnix ?? 0;
+  if (terminalStartedAt > 0) {
+    const startedWithTerminal = scoped
+      .filter((discussion) =>
+        Math.abs(discussion.startedAt - terminalStartedAt) <= FREEBUFF_TERMINAL_MATCH_WINDOW_SECONDS,
+      )
+      .sort(freebuffDiscussionSortNewest);
+    if (startedWithTerminal.length > 0) return startedWithTerminal[0];
+  }
+
+  const recentlyActive = scoped
+    .filter((discussion) =>
+      discussion.lastActivity >= Math.floor(Date.now() / 1000) - FREEBUFF_TERMINAL_RECENT_ACTIVITY_SECONDS,
+    )
+    .sort(freebuffDiscussionSortNewest);
+  if (recentlyActive.length > 0) return recentlyActive[0];
+
+  if (sameFolder.length === 1) return sameFolder[0];
+  if (candidates.length === 1) return candidates[0];
+  return null;
+};
+
+// La creation du chat Freebuff et son apparition dans l'index ne sont pas
+// synchrones avec le lancement du PTY. Quelques lectures espacees evitent de
+// conclure a tort a une ambiguite juste apres l'ouverture du terminal.
+const findFreebuffDiscussionForTerminal = async (
+  session: TerminalSession,
+): Promise<DiscussionSummary | null> => {
+  for (const delay of [0, 200, 600, 1_200]) {
+    if (delay) await sleep(delay);
+    await refreshDiscussions();
+    const discussion = freebuffDiscussionForTerminal(session);
+    if (discussion) return discussion;
+  }
+  return null;
+};
+
+const switchFreebuffTerminalAccount = async (
+  session: TerminalSession,
+  targetAccountId: string,
+): Promise<void> => {
+  if (freebuffTerminalAccountSwitches.has(session.key) || targetAccountId === session.accountId) {
+    return;
+  }
+  const target = accountById(targetAccountId);
+  if (!target || accountProvider(target) !== "freebuff") return;
+
+  freebuffTerminalAccountSwitches.add(session.key);
+  statusText = `Transfert du terminal Freebuff vers ${target.label}…`;
+  render();
+  try {
+    await assertFreebuffAccountAvailable(target);
+    const discussion = await findFreebuffDiscussionForTerminal(session);
+    if (!discussion) {
+      throw new Error("la conversation active n’a pas pu être identifiée sans ambiguïté");
+    }
+    await continueDiscussionWith(discussion, target.id, null, {
+      preserveNavigation: true,
+      sourceTerminalKey: session.key,
+    });
+  } catch (error) {
+    statusText = `Transfert du terminal Freebuff impossible : ${String(error)}`;
+  } finally {
+    freebuffTerminalAccountSwitches.delete(session.key);
+    render();
+  }
+};
+
 const discussionHasRunningTurn = (discussion: DiscussionSummary): boolean =>
-  (chatDiscussion?.sessionId === discussion.sessionId && chatTurnIsBusy(chatTurn?.status)) ||
+  (chatDiscussion?.accountId === discussion.accountId
+    && chatDiscussion.sessionId === discussion.sessionId
+    && chatTurnIsBusy(chatTurn?.status)) ||
   expertChatPanes.some(
     (pane) =>
-      pane.discussion?.sessionId === discussion.sessionId && chatTurnIsBusy(pane.turn?.status),
+      pane.discussion?.accountId === discussion.accountId
+      && pane.discussion.sessionId === discussion.sessionId
+      && chatTurnIsBusy(pane.turn?.status),
   );
 
 // Deplacement persistant utilise par le drag-and-drop de la barre laterale.
@@ -7714,7 +8800,7 @@ const moveDiscussionToWorkspace = async (
     return;
   }
 
-  discussionBusyId = discussion.sessionId;
+  discussionBusyId = discussionIdentityKey(discussion);
   statusText = `Deplacement vers ${workspace.label}…`;
   render();
 
@@ -7726,11 +8812,17 @@ const moveDiscussionToWorkspace = async (
     });
     moved.folderPath = workspace.path;
     Object.assign(discussion, moved);
-    if (chatDiscussion?.sessionId === moved.sessionId) {
+    if (
+      chatDiscussion?.accountId === moved.accountId
+      && chatDiscussion.sessionId === moved.sessionId
+    ) {
       Object.assign(chatDiscussion, moved);
     }
     expertChatPanes.forEach((pane) => {
-      if (pane.discussion?.sessionId === moved.sessionId) {
+      if (
+        pane.discussion?.accountId === moved.accountId
+        && pane.discussion.sessionId === moved.sessionId
+      ) {
         Object.assign(pane.discussion, moved);
         pane.pendingWorkspace = workspace.path;
       }
@@ -7751,10 +8843,17 @@ const discussionMatchesAnyId = (
   ids: ReadonlySet<string>,
 ): boolean => !!discussion && (ids.has(discussion.sessionId) || ids.has(discussion.rolloutId));
 
-const removeArchivedDiscussionFromUi = (ids: ReadonlySet<string>) => {
-  ids.forEach((id) => discussionTargetSel.delete(id));
+const removeArchivedDiscussionFromUi = (accountId: string, ids: ReadonlySet<string>) => {
+  ids.forEach((id) => discussionTargetSel.delete(discussionIdentityKey({
+    accountId,
+    sessionId: id,
+  })));
+  const matchesArchivedDiscussion = (discussion: DiscussionSummary | null | undefined) =>
+    !!discussion
+    && discussion.accountId === accountId
+    && discussionMatchesAnyId(discussion, ids);
   const closedExpertPanes = expertChatPanes.filter((pane) =>
-    discussionMatchesAnyId(pane.discussion, ids),
+    matchesArchivedDiscussion(pane.discussion),
   );
   closedExpertPanes.forEach((pane) => {
     stopExpertChatSync(pane);
@@ -7763,14 +8862,14 @@ const removeArchivedDiscussionFromUi = (ids: ReadonlySet<string>) => {
     explicitlyOpenedBusyChatVisibilityPins.delete(pane.key);
   });
   expertChatPanes = expertChatPanes.filter(
-    (pane) => !discussionMatchesAnyId(pane.discussion, ids),
+    (pane) => !matchesArchivedDiscussion(pane.discussion),
   );
   if (closedExpertPanes.some((pane) => pane.key === activeExpertChatKey)) {
     activeExpertChatKey = expertChatPanes[0]?.key ?? null;
   }
   reconcileExpertChatPage();
   if (closedExpertPanes.length) persistExpertChats();
-  if (discussionMatchesAnyId(chatDiscussion, ids)) {
+  if (matchesArchivedDiscussion(chatDiscussion)) {
     resetMainModelCapacityRetry();
     chatDiscussion = null;
     chatMessages = [];
@@ -7783,19 +8882,42 @@ const removeArchivedDiscussionFromUi = (ids: ReadonlySet<string>) => {
     chatContextUsage = null;
     chatContextCompacting = false;
   }
+
+  // Retire immediatement la ligne du snapshot deja en memoire. Le rescan
+  // disque confirme ensuite l'etat en arriere-plan ; il ne bloque plus la
+  // disparition visuelle d'un long historique Freebuff.
+  if (discussions) {
+    const accounts = discussions.accounts.map((group) => {
+      if (group.accountId !== accountId) return group;
+      const remaining = group.discussions.filter(
+        (discussion) => !discussionMatchesAnyId(discussion, ids),
+      );
+      return {
+        ...group,
+        discussionCount: remaining.length,
+        discussions: remaining,
+      };
+    });
+    applyDiscussionsSnapshot({
+      ...discussions,
+      totalDiscussions: accounts.reduce((total, group) => total + group.discussionCount, 0),
+      accounts,
+    });
+  }
 };
 
 const archiveDiscussionById = async (
   accountId: string,
   archiveId: string,
   relatedIds: readonly string[] = [],
+  permanentDelete = false,
 ): Promise<number> => {
   const result = await invoke<{ count?: number }>("delete_discussion", {
     accountId,
     sessionId: archiveId,
-    archive: true,
+    archive: !permanentDelete,
   });
-  removeArchivedDiscussionFromUi(new Set([archiveId, ...relatedIds]));
+  removeArchivedDiscussionFromUi(accountId, new Set([archiveId, ...relatedIds]));
   return result?.count ?? 1;
 };
 
@@ -7803,6 +8925,7 @@ const openDiscussionArchiveModal = (discussion: DiscussionSummary) => {
   if (discussionBusyId) return;
   rememberDialogTrigger("discussion-archive", null);
   discussionArchiveCandidate = discussion;
+  discussionEraseArmed = false;
   render();
 };
 
@@ -7810,36 +8933,176 @@ const closeDiscussionArchiveModal = () => {
   if (!discussionArchiveCandidate) return;
   const returnFocus = takeDialogTrigger("discussion-archive");
   discussionArchiveCandidate = null;
+  discussionEraseArmed = false;
   render();
   restoreDialogTrigger(returnFocus);
 };
 
-const deleteDiscussion = async () => {
+const deleteDiscussion = async (permanentDelete = false) => {
   const discussion = discussionArchiveCandidate;
   if (!discussion || discussionBusyId) return;
   forgetDialogTrigger("discussion-archive");
   discussionArchiveCandidate = null;
-  discussionBusyId = discussion.sessionId;
+  discussionEraseArmed = false;
+  discussionBusyId = discussionIdentityKey(discussion);
   render();
   try {
     const count = await archiveDiscussionById(
       discussion.accountId,
       discussion.sessionId,
       [discussion.rolloutId],
+      permanentDelete,
     );
-    statusText = count > 1 ? `Discussion archivee (${count} fichiers)` : "Discussion archivee";
+    statusText = permanentDelete
+      ? (count > 1 ? `Discussion supprimee definitivement (${count} fichiers)` : "Discussion supprimee definitivement")
+      : (count > 1 ? `Discussion archivee (${count} fichiers)` : "Discussion archivee");
   } catch (error) {
     statusText = String(error);
   }
   discussionBusyId = null;
+  syncStatusTextDom();
+  // Le snapshot local a deja ete corrige apres le succes. La reconstruction
+  // complete de l'index ne fait plus partie du chemin critique utilisateur.
+  void refreshDiscussions();
+};
+
+const openTerminalDeleteModal = (session: TerminalSession) => {
+  rememberDialogTrigger("terminal-delete", null);
+  terminalDeleteCandidateKey = session.key;
+  render();
+};
+
+const closeTerminalDeleteModal = () => {
+  if (!terminalDeleteCandidateKey) return;
+  const returnFocus = takeDialogTrigger("terminal-delete");
+  terminalDeleteCandidateKey = null;
+  render();
+  restoreDialogTrigger(returnFocus);
+};
+
+type TerminalDiscussionDeletionTarget = {
+  archiveId: string | null;
+  relatedIds: string[];
+  discussion: DiscussionSummary | null;
+};
+
+// Resout uniquement une association prouvee. Pour un terminal adopte depuis un
+// autre appareil, le claim serveur recupere d'abord l'id du rollout avant que le
+// PTY soit arrete. On ne supprime jamais une discussion sur le seul critere du
+// dossier, qui peut contenir plusieurs chats simultanes.
+const terminalDiscussionDeletionTarget = async (
+  session: TerminalSession,
+): Promise<TerminalDiscussionDeletionTarget> => {
+  let terminalSessionId = session.codexSessionId ?? session.resumeSessionId;
+  if (!terminalSessionId && session.ptyId !== null && !session.loginOnly) {
+    try {
+      terminalSessionId = await claimSessionForTerminal(session);
+      if (terminalSessionId) {
+        session.codexSessionId = terminalSessionId;
+        session.sessionCaptureDone = true;
+        claimedSessionIds.add(terminalSessionId);
+        persistTerminalSessions();
+      }
+    } catch {
+      // La recherche dans l'index ci-dessous peut encore retrouver les
+      // providers dont le transcript n'est pas claimable comme un rollout Codex.
+    }
+  }
+
   await refreshDiscussions();
+  const linkedIds = new Set(
+    [terminalSessionId, session.codexSessionId, session.resumeSessionId].filter(
+      (id): id is string => !!id,
+    ),
+  );
+  let discussion = allDiscussions().find(
+    (candidate) =>
+      candidate.accountId === session.accountId
+      && (
+        linkedIds.has(candidate.sessionId)
+        || linkedIds.has(candidate.rolloutId)
+        || linkedIds.has(freebuffResumeId(candidate) ?? "")
+      ),
+  ) ?? null;
+  if (!discussion && accountProvider(accountById(session.accountId)) === "freebuff") {
+    discussion = await findFreebuffDiscussionForTerminal(session);
+  }
+
+  const archiveId = discussion?.sessionId ?? terminalSessionId ?? null;
+  return {
+    archiveId,
+    relatedIds: Array.from(new Set([
+      ...linkedIds,
+      discussion?.sessionId,
+      discussion?.rolloutId,
+      discussion ? freebuffResumeId(discussion) : null,
+    ].filter((id): id is string => !!id && id !== archiveId))),
+    discussion,
+  };
+};
+
+const deleteTerminalHistoryAndChat = async () => {
+  const key = terminalDeleteCandidateKey;
+  const session = terminalSessions.find((candidate) => candidate.key === key);
+  if (!key || !session) {
+    terminalDeleteCandidateKey = null;
+    render();
+    return;
+  }
+
+  forgetDialogTrigger("terminal-delete");
+  terminalDeleteCandidateKey = null;
+  statusText = "Suppression du terminal et de son historique…";
+  render();
+
+  let target: TerminalDiscussionDeletionTarget = {
+    archiveId: session.codexSessionId ?? session.resumeSessionId,
+    relatedIds: [],
+    discussion: null,
+  };
+  try {
+    target = await terminalDiscussionDeletionTarget(session);
+    if (target.discussion && discussionHasRunningTurn(target.discussion)) {
+      statusText = "Arretez la reponse du chat avant de supprimer son historique";
+      render();
+      return;
+    }
+  } catch {
+    // Le terminal doit rester supprimable meme si l'index des discussions est
+    // momentanement indisponible. Un id deja capture reste exploitable.
+  }
+
+  await closeTerminalSession(key);
+  if (!target.archiveId) {
+    statusText = "Terminal masque et historique local efface · aucun chat associe identifie";
+    syncStatusTextDom();
+    return;
+  }
+
+  try {
+    const count = await archiveDiscussionById(
+      session.accountId,
+      target.archiveId,
+      target.relatedIds,
+      true,
+    );
+    statusText = count > 1
+      ? `Terminal, chat et historique supprimes definitivement (${count} fichiers)`
+      : "Terminal, chat et historique supprimes definitivement";
+  } catch (error) {
+    statusText = `Terminal masque, mais suppression du chat impossible : ${String(error)}`;
+  }
+  syncStatusTextDom();
+  void refreshDiscussions();
 };
 
 // Compte cible retenu pour une discussion (defaut = compte d'origine, borne
 // aux comptes existants pour rester valide meme si la liste a change).
 const discussionTargetFor = (discussion: DiscussionSummary): string => {
-  const stored = discussionTargetSel.get(discussion.sessionId);
-  if (stored && settings?.accounts.some((account) => account.id === stored)) return stored;
+  const stored = discussionTargetSel.get(discussionIdentityKey(discussion));
+  if (stored && continuationAccountsForDiscussion(discussion).some((account) => account.id === stored)) {
+    return stored;
+  }
   return discussion.accountId;
 };
 
@@ -7891,7 +9154,7 @@ const quotaAlternativeForAccount = (
     accountId: best.account.id,
     accountLabel: best.account.label,
     remainingPercent: best.remainingPercent,
-    busy: discussionBusyId === discussion.sessionId,
+    busy: discussionIsBusy(discussion),
   };
 };
 
@@ -8152,6 +9415,10 @@ const automaticallyTransferQuotaExhaustedDiscussion = (
       statusText = "Continuité automatique en cours…";
       await continueDiscussionWith(currentDiscussion, suggestion.accountId, pane, {
         preserveNavigation: true,
+        // Le main-chat n'a aucun panneau a reutiliser : sans activation, la
+        // continuation demarrerait dans une tuile cachee tandis que l'ancien
+        // compte resterait affiche.
+        activateTarget: pane === null,
       });
     })
     .catch((error) => {
@@ -8377,33 +9644,42 @@ const scheduleExpertModelCapacityRetry = (
 };
 
 const readChatPreferences = (account: AccountProfile, root: ParentNode = document) => {
-  const provider = accountProvider(account);
   const previousModel = accountModel(account);
   const previousReasoningEffort = accountReasoningEffort(account);
   const previousFastMode = account.fastMode === true;
-  const model =
+  const requestedModel =
     root.querySelector<HTMLInputElement>("[data-chat-control='model'], #chatModel")?.value.trim() || previousModel;
-  const reasoningEffort =
-    providerSupportsReasoningEffort(provider)
-      ? reasoningEffortForChatModel(
-          account,
-          model,
-          root.querySelector<HTMLSelectElement>("[data-chat-control='reasoning-effort'], #chatReasoningEffort")?.value ??
-            previousReasoningEffort,
-        )
-      : null;
+  const requestedReasoningEffort =
+    root.querySelector<HTMLSelectElement>("[data-chat-control='reasoning-effort'], #chatReasoningEffort")?.value ??
+      previousReasoningEffort;
 
-  if (model.length > 160 || /\s/.test(model)) {
+  if (requestedModel.length > 160 || /\s/.test(requestedModel)) {
     return {
-      model,
-      reasoningEffort,
+      model: requestedModel,
+      reasoningEffort: null,
       changed: false,
       error: "Le nom du modele doit faire 160 caracteres maximum et ne contenir aucun espace",
     };
   }
 
+  const selection = validatedAccountModelSelection(
+    account,
+    requestedModel,
+    requestedReasoningEffort,
+  );
+  if (selection.error) {
+    return {
+      model: requestedModel,
+      reasoningEffort: null,
+      changed: false,
+      error: selection.error,
+    };
+  }
+  const { model, reasoningEffort } = selection;
+
   account.model = model;
-  if (reasoningEffort) account.reasoningEffort = reasoningEffort;
+  if (accountIsOpenRouter(account)) account.reasoningEffort = reasoningEffort;
+  else if (reasoningEffort) account.reasoningEffort = reasoningEffort;
   if (!accountSupportsFastMode(account, model)) account.fastMode = false;
 
   return {
@@ -8411,7 +9687,8 @@ const readChatPreferences = (account: AccountProfile, root: ParentNode = documen
     reasoningEffort,
     changed:
       model !== previousModel ||
-      (providerSupportsReasoningEffort(provider) && reasoningEffort !== previousReasoningEffort) ||
+      ((accountSupportsReasoningEffort(account, model) || accountIsOpenRouter(account))
+        && reasoningEffort !== previousReasoningEffort) ||
       (account.fastMode === true) !== previousFastMode,
     error: null,
   };
@@ -8420,17 +9697,22 @@ const readChatPreferences = (account: AccountProfile, root: ParentNode = documen
 // Les controles du chat deviennent aussi les valeurs par defaut du compte.
 // Les sauvegardes sont serialisees pour qu'un changement rapide de
 // modele puis d'intensite ne puisse pas s'ecraser dans settings.json.
-const persistChatPreferences = (accountId: string) => {
-  chatPreferencesSave = chatPreferencesSave
-    .catch(() => undefined)
-    .then(async () => {
-      if (!settings) return;
-      await invoke<AppSettings>("save_settings", { settings });
-      const account = accountById(accountId);
-      if (account) await provisionAccountHome(account);
-    })
+const persistChatPreferences = (accountId: string): Promise<boolean> => {
+  const save = chatPreferencesSave.then(async () => {
+    if (!settings) throw new Error("Réglages indisponibles");
+    await invoke<AppSettings>("save_settings", { settings });
+    const account = accountById(accountId);
+    if (account) await provisionAccountHome(account);
+  });
+  // Un echec est rendu visible, mais la file elle-meme reste resolue afin de
+  // ne pas bloquer les sauvegardes suivantes.
+  chatPreferencesSave = save.catch(() => undefined);
+  return save
+    .then(() => true)
     .catch((error) => {
-      statusText = `Preferences du chat non enregistrees : ${String(error)}`;
+      statusText = `Préférences du chat non enregistrées : ${String(error)}`;
+      render();
+      return false;
     });
 };
 
@@ -8511,9 +9793,10 @@ const chatPanelModel = (): ChatPanelModel => {
       account,
       selectedModel,
       accountReasoningEffort(account),
-    ),
+    ) ?? "",
     reasoningEffortOptions: chatReasoningEffortOptions(account, selectedModel),
-    supportsReasoningEffort: providerSupportsReasoningEffort(provider),
+    supportsReasoningEffort: accountSupportsReasoningEffort(account, selectedModel),
+    reasoningEffortAutomatic: accountIsOpenRouter(account),
     fastModeEnabled: accountFastModeEnabled(account),
     supportsFastMode: accountSupportsFastMode(account, selectedModel),
     fastModeHelp: fastModeAvailabilityLabel(
@@ -8523,7 +9806,7 @@ const chatPanelModel = (): ChatPanelModel => {
     ),
     composerSelectorsEnabled: chatComposerSelectorsEnabled,
     favoritePrompts: loadFavoritePromptShortcuts(accountScopedStorage),
-    supportsGoals: provider === "codex",
+    supportsGoals: providerSupportsGoals(provider),
     agentTools: chatAgentToolDefinitions(),
     enabledTools: chatEnabledTools,
     mode: chatMode,
@@ -8886,17 +10169,22 @@ const stopChatTurnPoll = () => {
   chatTurnPollInFlight = false;
 };
 
-const findDiscussionByRollout = (sessionId: string) =>
+const findDiscussionByRollout = (
+  sessionId: string,
+  accountId?: string | null,
+) =>
   allDiscussions().find(
-    (discussion) => discussion.sessionId === sessionId || discussion.rolloutId === sessionId,
+    (discussion) =>
+      (!accountId || discussion.accountId === accountId)
+      && (discussion.sessionId === sessionId || discussion.rolloutId === sessionId),
   ) ?? null;
 
 const attachCreatedChat = async (sessionId: string): Promise<boolean> => {
   if (chatDiscussion) return true;
-  let discussion = findDiscussionByRollout(sessionId);
+  let discussion = findDiscussionByRollout(sessionId, chatAccountId);
   if (!discussion) {
     await refreshDiscussions();
-    discussion = findDiscussionByRollout(sessionId);
+    discussion = findDiscussionByRollout(sessionId, chatAccountId);
   }
   if (!discussion) return false;
 
@@ -8993,6 +10281,7 @@ const applyChatTurnSnapshot = async (snapshot: ChatTurnSnapshot) => {
     // La file utilisateur attend d'abord la reprise automatique de ce tour.
   } else if (!chatTurnIsBusy(snapshot.status)) {
     void drainChatSubmissionQueue();
+    void drainNextGlobalChatCapacityQueue();
   }
 };
 
@@ -9016,7 +10305,7 @@ const startChatTurnPoll = () => {
       if (chatQueuedSubmissions.length > 0) void pollChatTurn();
       else runWhenPageVisible(() => void pollChatTurn());
     },
-    550,
+    CHAT_TURN_POLL_INTERVAL_MS,
   );
 };
 
@@ -9137,7 +10426,10 @@ const compactCurrentChatContext = async (
     return false;
   }
 
-  if (clearCommandDraft) chatDraft = "";
+  if (clearCommandDraft) {
+    chatDraft = "";
+    flushChatDraft();
+  }
   chatContextCompacting = true;
   updateCompactionStatus("Compaction du contexte Codex en cours…");
   if (activeView === "chat") render();
@@ -9187,8 +10479,8 @@ const sendChatMessage = async (
       : "Ajoutez d'abord un compte agent";
     return false;
   }
-  if (intent === "goal" && accountProvider(account) !== "codex") {
-    statusText = "Les goals sont disponibles avec Codex";
+  if (intent === "goal" && !providerSupportsGoals(accountProvider(account))) {
+    statusText = "Les goals ne sont pas pris en charge par ce fournisseur";
     return false;
   }
   if (
@@ -9204,12 +10496,19 @@ const sendChatMessage = async (
     return false;
   }
   const preferences = queuedSubmission
-    ? {
-        model: queuedSubmission.model,
-        reasoningEffort: queuedSubmission.reasoningEffort,
-        changed: false,
-        error: null,
-      }
+    ? (() => {
+        const selection = validatedAccountModelSelection(
+          account,
+          queuedSubmission.model,
+          queuedSubmission.reasoningEffort,
+        );
+        return {
+          model: selection.model,
+          reasoningEffort: selection.reasoningEffort,
+          changed: false,
+          error: selection.error,
+        };
+      })()
     : readChatPreferences(account);
   if (preferences.error) {
     const modelInput = document.querySelector<HTMLInputElement>("#chatModel");
@@ -9218,7 +10517,7 @@ const sendChatMessage = async (
     statusText = preferences.error;
     return false;
   }
-  if (preferences.changed) persistChatPreferences(account.id);
+  if (preferences.changed && !await persistChatPreferences(account.id)) return false;
 
   const submission = queuedSubmission ?? {
     prompt,
@@ -9230,34 +10529,48 @@ const sendChatMessage = async (
     enabledTools: [...chatEnabledTools],
     agentSkills: chatAgentSkillPrompts(chatEnabledTools),
   };
+  const resourceAdmissionPaused = chatResourceAdmissionPaused();
   if (
     chatTurnIsBusy(chatTurn?.status) ||
-    (!queuedSubmission && chatQueuedSubmissions.length > 0)
+    (!queuedSubmission && chatQueuedSubmissions.length > 0) ||
+    resourceAdmissionPaused
   ) {
     if (queuedSubmission) chatQueuedSubmissions.unshift(submission);
     else chatQueuedSubmissions.push(submission);
-    if (!queuedSubmission) chatDraft = "";
+    if (!queuedSubmission) {
+      chatDraft = "";
+      flushChatDraft();
+    }
     if (!queuedSubmission) {
       disposeChatImagePreviews(chatImageAttachments);
       chatImageAttachments = [];
     }
     statusText = chatTurnIsBusy(chatTurn?.status)
       ? `Message mis en attente · ${chatQueuedSubmissions.length} dans la file`
-      : "Envoi du prochain message en attente";
+      : resourceAdmissionPaused
+        ? "Mémoire temporairement saturée · message en attente"
+        : "Envoi du prochain message en attente";
     render();
     focusMainChatPrompt();
-    if (!chatTurnIsBusy(chatTurn?.status)) void drainChatSubmissionQueue();
+    if (!chatTurnIsBusy(chatTurn?.status) && !resourceAdmissionPaused) {
+      void drainChatSubmissionQueue();
+    }
     return true;
   }
 
   if (!submission.automaticCapacityRetry) resetMainModelCapacityRetry();
+  const turnBeforeStart = chatTurn;
+  const messagesBeforeStart = chatMessages;
   chatActiveSubmission = submission;
   const resumeSessionId =
     submission.resumeSessionId ??
     chatDiscussion?.rolloutId ??
     chatDiscussion?.sessionId ??
     null;
-  if (!queuedSubmission) chatDraft = "";
+  if (!queuedSubmission) {
+    chatDraft = "";
+    flushChatDraft();
+  }
   if (!queuedSubmission) {
     disposeChatImagePreviews(chatImageAttachments);
     chatImageAttachments = [];
@@ -9341,8 +10654,19 @@ const sendChatMessage = async (
       : { ...snapshot, startedAt: Math.min(optimisticStartedAt, snapshot.startedAt) };
     startChatTurnPoll();
     await applyChatTurnSnapshot(chatTurn);
+    void drainNextGlobalChatCapacityQueue();
     return snapshot.status !== "failed" && snapshot.status !== "cancelled";
   } catch (error) {
+    if (isNodeCapacityError(String(error))) {
+      pauseChatResourceAdmission();
+      chatTurn = turnBeforeStart;
+      chatMessages = messagesBeforeStart;
+      chatActiveSubmission = null;
+      chatQueuedSubmissions.unshift(submission);
+      statusText = "Mémoire temporairement saturée · message conservé dans la file";
+      render();
+      return true;
+    }
     const pane = expertChatPanes.find(
       (candidate) =>
         candidate.turn?.status === "running" &&
@@ -9429,6 +10753,7 @@ const drainChatSubmissionQueue = async (): Promise<void> => {
   if (
     chatQueueDrainInFlight ||
     chatTurnIsBusy(chatTurn?.status) ||
+    chatResourceAdmissionPaused() ||
     chatQueuedSubmissions.length === 0
   ) {
     return;
@@ -9442,6 +10767,7 @@ const drainChatSubmissionQueue = async (): Promise<void> => {
     chatQueueDrainInFlight = false;
     if (
       !chatTurnIsBusy(chatTurn?.status) &&
+      !chatResourceAdmissionPaused() &&
       !isQuotaExhaustionError(chatTurn?.error) &&
       !isModelCapacityError(chatTurn?.error) &&
       chatQueuedSubmissions.length > 0
@@ -9672,8 +10998,15 @@ const startChatSync = () => {
 
 const openDiscussionChat = async (discussion: DiscussionSummary) => {
   closeMobileOverlays();
+  const provider = discussion.provider ?? accountProvider(accountById(discussion.accountId));
+  if (provider === "freebuff") {
+    await resumeDiscussion(discussion);
+    return;
+  }
   const existing = expertChatPanes.find(
-    (pane) => pane.discussion?.sessionId === discussion.sessionId,
+    (pane) =>
+      pane.discussion?.accountId === discussion.accountId
+      && pane.discussion.sessionId === discussion.sessionId,
   );
   if (existing && minimizeActiveBusyExpertChat(existing)) return;
   try {
@@ -9692,6 +11025,7 @@ const createExpertChatPane = (
   persisted: Partial<PersistedExpertChatPane> = {},
 ): ExpertChatPane => {
   const capturedWorkspace = userEnvironmentPath(persisted.pendingWorkspace);
+  const recentMessages = restoreRecentSentChatMessages(persisted.recentMessages);
   if (discussion && capturedWorkspace && !discussion.folderPath) {
     discussion.folderPath = capturedWorkspace;
   }
@@ -9699,8 +11033,13 @@ const createExpertChatPane = (
   return {
     key: persisted.key || uid("chat-pane"),
     discussion,
-    messages: [],
-    loading: !!discussion,
+    resumeSessionId:
+      discussion?.rolloutId?.trim()
+      || persisted.sessionId?.trim()
+      || discussion?.sessionId?.trim()
+      || null,
+    messages: recentMessages,
+    loading: !!discussion && recentMessages.length === 0,
     error: null,
     truncated: false,
     contextUsage: null,
@@ -9709,6 +11048,7 @@ const createExpertChatPane = (
     liveUnlisten: null,
     fallbackPoll: null,
     loadInFlight: false,
+    discussionAttachPromise: null,
     turn: null,
     turnPoll: null,
     turnPollInFlight: false,
@@ -9737,9 +11077,15 @@ const createExpertChatPane = (
     pendingWorkspace:
       discussionFolderPath(discussion) ?? capturedWorkspace ?? currentWorkspace(),
     autonomousAgentId: persisted.autonomousAgentId ?? null,
-    // Le bouton « Orchestration auto » a été retiré : un ancien reglage persiste
-    // ne doit pas reactiver silencieusement le routage automatique.
-    automaticOrchestrationEnabled: false,
+    // Le mode orchestrateur est le nouveau defaut global. Les anciennes
+    // preferences `false` sont volontairement migrees ; seuls les chats deja
+    // pilotes par une orchestration et les agents autonomes restent exclus.
+    automaticOrchestrationEnabled: automaticOrchestrationEnabledByDefault({
+      surface: "classic-chat",
+      orchestrationRole: persisted.orchestrationRole,
+      autonomousAgentId: persisted.autonomousAgentId,
+      persistedEnabled: persisted.automaticOrchestrationEnabled,
+    }),
     automaticOrchestrationLaunching: false,
     orchestrationId: persisted.orchestrationId ?? null,
     orchestrationRole:
@@ -9878,16 +11224,6 @@ const responsiveExpertChatGridDimensions = (
   );
 };
 
-// Terminaux poses dans le mur de chats. Ils occupent des tuiles de la meme
-// grille que les chats de l'environnement courant, et restent visibles quelle
-// que soit la page de chats affichee : un terminal ne doit pas disparaitre
-// parce qu'on tourne les pages de conversations.
-const expertChatWallTerminals = (): TerminalSession[] => {
-  const environmentPath = userEnvironmentPath(currentWorkspace());
-  if (!environmentPath) return [];
-  return terminalSessionsForFolder(environmentPath).slice(0, EXPERT_MAX_TERMINALS);
-};
-
 const expertChatLayoutSignature = (visibleChatCount: number): string => {
   const viewport = expertChatResponsiveViewport();
   const pageSize = resolveExpertChatPageSize(effectiveExpertChatPageSizeMode());
@@ -9904,7 +11240,7 @@ const scheduleExpertChatResponsiveRender = () => {
     if (!settings || activeView !== "chat") return;
 
     reconcileExpertChatPage();
-    const visibleCount = visibleExpertChatPanes().length + expertChatWallTerminals().length;
+    const visibleCount = visibleExpertChatPanes().length;
     if (expertChatLayoutSignature(visibleCount) === renderedExpertChatLayoutSignature) {
       return;
     }
@@ -10015,6 +11351,7 @@ const orchestrationTaskForPane = (
 const expertChatResumeSessionId = (pane: ExpertChatPane): string | null =>
   pane.discussion?.rolloutId?.trim()
   || pane.turn?.sessionId?.trim()
+  || pane.resumeSessionId?.trim()
   || pane.discussion?.sessionId?.trim()
   || null;
 
@@ -10136,7 +11473,7 @@ const expertChatPanelModel = (pane: ExpertChatPane): ChatPanelModel => {
   // « Disponible » alors que le tour tourne encore cote serveur.
   const paneServerTurn =
     activeChatTurnForDiscussion(activeChatTurns, discussion)
-    ?? activeChatTurnBySourceKey(activeChatTurns, pane);
+    ?? activeChatTurnForPaneIdentity(activeChatTurns, pane);
   const paneLocalWaitsForUser = conversationWaitsForUser(
     pane.messages,
     pane.turn?.parts ?? [],
@@ -10197,9 +11534,10 @@ const expertChatPanelModel = (pane: ExpertChatPane): ChatPanelModel => {
       account,
       selectedModel,
       accountReasoningEffort(account),
-    ),
+    ) ?? "",
     reasoningEffortOptions: chatReasoningEffortOptions(account, selectedModel),
-    supportsReasoningEffort: providerSupportsReasoningEffort(provider),
+    supportsReasoningEffort: accountSupportsReasoningEffort(account, selectedModel),
+    reasoningEffortAutomatic: accountIsOpenRouter(account),
     fastModeEnabled: accountFastModeEnabled(account),
     supportsFastMode: accountSupportsFastMode(account, selectedModel),
     fastModeHelp: fastModeAvailabilityLabel(
@@ -10209,7 +11547,7 @@ const expertChatPanelModel = (pane: ExpertChatPane): ChatPanelModel => {
     ),
     composerSelectorsEnabled: chatComposerSelectorsEnabled,
     favoritePrompts: loadFavoritePromptShortcuts(accountScopedStorage),
-    supportsGoals: provider === "codex",
+    supportsGoals: providerSupportsGoals(provider),
     agentTools: chatAgentToolDefinitions(),
     enabledTools: pane.enabledTools,
     mode: pane.mode,
@@ -10281,17 +11619,47 @@ const refreshExpertChatSidebarStatus = (pane: ExpertChatPane) => {
   indicator.setAttribute("aria-label", `Statut : ${label}`);
 };
 
+const persistedRecentChatMessagesForPane = (
+  pane: ExpertChatPane,
+): PersistedSentChatMessage[] => {
+  const recentMessages = recentSentChatMessages(pane.messages);
+  if (pane.turn?.status !== "completed") return recentMessages;
+
+  // Le transcript durable peut arriver quelques instants apres la fin du tour.
+  // Conserver entre-temps le texte final deja recu, sans ses parts reasoning/tool.
+  const completedReply = recentSentChatMessages([{
+    role: "assistant",
+    text: "",
+    timestamp: pane.turn.finishedAt ?? pane.turn.startedAt,
+    parts: pane.turn.parts,
+  }]).at(-1);
+  if (!completedReply) return recentMessages;
+  const latest = recentMessages.at(-1);
+  if (latest?.role === "assistant" && latest.text === completedReply.text) {
+    return recentMessages;
+  }
+  return recentSentChatMessages([...recentMessages, completedReply]);
+};
+
 const persistExpertChats = () => {
   // Ne pas ecraser l'etat local par une liste vide avant sa restauration.
   if (!expertChatsRestored && expertChatPanes.length === 0) return;
+  const openKeys = new Set(expertChatPanes.map((pane) => pane.key));
   const state: PersistedExpertChats = {
     v: 1,
-    activeKey: activeExpertChatKey,
-    panes: expertChatPanes.map((pane) => ({
+    activeKey: activeExpertChatKey ?? pendingActiveExpertChatKey,
+    panes: [...expertChatPanes.map((pane) => ({
       key: pane.key,
-      sessionId: pane.discussion?.sessionId ?? null,
+      sessionId:
+        pane.turn?.sessionId?.trim()
+        || pane.resumeSessionId?.trim()
+        || pane.discussion?.rolloutId?.trim()
+        || pane.discussion?.sessionId?.trim()
+        || null,
+      awaitingDiscussion: !pane.discussion && !!expertChatResumeSessionId(pane),
       accountId: pane.accountId,
       executionTargetId: pane.executionTargetId,
+      recentMessages: persistedRecentChatMessagesForPane(pane),
       draft: pane.draft,
       mode: pane.mode,
       enabledTools: pane.enabledTools,
@@ -10301,9 +11669,47 @@ const persistExpertChats = () => {
       orchestrationId: pane.orchestrationId,
       orchestrationRole: pane.orchestrationRole,
       orchestrationTaskId: pane.orchestrationTaskId,
-    })),
+    })), ...pendingExpertChatRecords.filter((record) => !openKeys.has(record.key))],
   };
   accountScopedStorage.setItem(EXPERT_OPEN_CHATS_STORAGE_KEY, JSON.stringify(state));
+};
+
+const attachPendingExpertChatRecords = (
+  availableDiscussions: readonly DiscussionSummary[],
+): ExpertChatPane[] => {
+  if (pendingExpertChatRecords.length === 0) return [];
+  const remaining: PersistedExpertChatPane[] = [];
+  const attached: ExpertChatPane[] = [];
+
+  pendingExpertChatRecords.forEach((record) => {
+    const discussion = record.sessionId
+      ? (
+        record.accountId
+          ? discussionForSession(availableDiscussions, record.accountId, record.sessionId)
+          : availableDiscussions.find((candidate) =>
+            candidate.rolloutId === record.sessionId || candidate.sessionId === record.sessionId
+          ) ?? null
+      )
+      : null;
+    if (!discussion) {
+      remaining.push(record);
+      return;
+    }
+    if (expertChatPanes.some((pane) => pane.key === record.key)) return;
+    const pane = createExpertChatPane(discussion, record);
+    expertChatPanes.push(pane);
+    attached.push(pane);
+  });
+
+  pendingExpertChatRecords = remaining;
+  if (
+    pendingActiveExpertChatKey
+    && attached.some((pane) => pane.key === pendingActiveExpertChatKey)
+  ) {
+    if (!activeExpertChatKey) activeExpertChatKey = pendingActiveExpertChatKey;
+    pendingActiveExpertChatKey = null;
+  }
+  return attached;
 };
 
 const restoreExpertChats = () => {
@@ -10319,18 +11725,34 @@ const restoreExpertChats = () => {
     accountScopedStorage.removeItem(EXPERT_OPEN_CHATS_STORAGE_KEY);
   }
 
+  pendingExpertChatRecords = [];
+  pendingActiveExpertChatKey = null;
   expertChatPanes = (persisted?.panes ?? [])
     .flatMap((record) => {
       if (!record || typeof record.key !== "string") return [];
-      const discussion = record.sessionId ? findDiscussion(record.sessionId) : null;
+      const discussion = record.sessionId
+        ? (
+          record.accountId
+            ? discussionForSession(allDiscussions(), record.accountId, record.sessionId)
+            : findDiscussionByRollout(record.sessionId)
+        )
+        : null;
       if (
         record.sessionId
         && !discussion
+        && !record.awaitingDiscussion
         && !record.orchestrationId
         && !record.autonomousAgentId
-      ) return [];
+      ) {
+        pendingExpertChatRecords.push(record);
+        return [];
+      }
       return [createExpertChatPane(discussion, record)];
     });
+  pendingActiveExpertChatKey = persisted?.activeKey
+    && pendingExpertChatRecords.some((record) => record.key === persisted.activeKey)
+    ? persisted.activeKey
+    : null;
   activeExpertChatKey =
     (persisted?.activeKey && expertChatPanes.some((pane) => pane.key === persisted.activeKey)
       ? persisted.activeKey
@@ -10578,6 +12000,7 @@ const applyExpertChatTranscript = (
   pane.contextUsage = nextContextUsage;
   pane.loading = false;
   pane.error = null;
+  if (changed) persistExpertChats();
   if (activeView === "chat" && (changed || truncationChanged || wasLoading)) {
     if (pane.historyOpen && changed) refreshExpertChatPane(pane);
     else refreshExpertChatFeed(pane);
@@ -10661,34 +12084,63 @@ const startExpertChatSync = (pane: ExpertChatPane) => {
   }, 2000);
 };
 
-const attachCreatedExpertChat = async (
+const discussionMatchesExpertPaneSession = (
+  discussion: DiscussionSummary,
+  pane: ExpertChatPane,
+  sessionId: string,
+): boolean => {
+  if (pane.accountId && discussion.accountId !== pane.accountId) return false;
+  const expectedNode = pane.executionTargetId?.trim().toLowerCase() ?? "";
+  const discussionNode = discussion.nodeId?.trim().toLowerCase() ?? "";
+  if (expectedNode && discussionNode && discussionNode !== expectedNode) return false;
+  return discussion.sessionId === sessionId || discussion.rolloutId === sessionId;
+};
+
+const attachCreatedExpertChat = (
   pane: ExpertChatPane,
   sessionId: string,
 ): Promise<boolean> => {
-  if (pane.discussion) return true;
-  let discussion = findDiscussionByRollout(sessionId);
-  if (!discussion) {
-    await refreshDiscussions();
-    discussion = findDiscussionByRollout(sessionId);
-  }
-  if (!discussion || !expertChatPanes.includes(pane)) return false;
-  const capturedWorkspace = userEnvironmentPath(pane.pendingWorkspace);
-  if (capturedWorkspace) {
-    // Conserver l'environnement capture a la creation empeche le panneau de
-    // disparaitre de la grille avant la persistance du cwd dans le JSONL.
-    discussion.folderPath = capturedWorkspace;
-    pane.pendingWorkspace = capturedWorkspace;
-  }
-  pane.discussion = discussion;
-  pane.contextUsage = null;
-  pane.accountId = discussion.accountId;
-  pane.loading = false;
-  pane.error = null;
-  void loadChatModelCatalog(pane.accountId);
-  startExpertChatSync(pane);
-  persistExpertChats();
-  void loadExpertChatTranscript(pane);
-  return true;
+  const normalizedSessionId = sessionId.trim();
+  if (normalizedSessionId) pane.resumeSessionId = normalizedSessionId;
+  if (pane.discussion) return Promise.resolve(true);
+  if (pane.discussionAttachPromise) return pane.discussionAttachPromise;
+
+  const pending = (async () => {
+    let discussion = allDiscussions().find((candidate) =>
+      discussionMatchesExpertPaneSession(candidate, pane, normalizedSessionId)
+    ) ?? null;
+    if (!discussion) {
+      await refreshDiscussions();
+      discussion = allDiscussions().find((candidate) =>
+        discussionMatchesExpertPaneSession(candidate, pane, normalizedSessionId)
+      ) ?? null;
+    }
+    if (!discussion || !expertChatPanes.includes(pane)) return false;
+    const capturedWorkspace = userEnvironmentPath(pane.pendingWorkspace);
+    if (capturedWorkspace) {
+      // Conserver l'environnement capture a la creation empeche le panneau de
+      // disparaitre de la grille avant la persistance du cwd dans le JSONL.
+      discussion.folderPath = capturedWorkspace;
+      pane.pendingWorkspace = capturedWorkspace;
+    }
+    pane.discussion = discussion;
+    pane.resumeSessionId = discussion.rolloutId?.trim() || normalizedSessionId;
+    pane.contextUsage = null;
+    pane.accountId = discussion.accountId;
+    pane.loading = false;
+    pane.error = null;
+    void loadChatModelCatalog(pane.accountId);
+    startExpertChatSync(pane);
+    persistExpertChats();
+    void loadExpertChatTranscript(pane);
+    return true;
+  })();
+  pane.discussionAttachPromise = pending;
+  const clear = () => {
+    if (pane.discussionAttachPromise === pending) pane.discussionAttachPromise = null;
+  };
+  void pending.then(clear, clear);
+  return pending;
 };
 
 const automaticOrchestrationName = (objective: string): string => {
@@ -10737,6 +12189,11 @@ const launchAutomaticOrchestration = async (
   statusText = `Orchestration automatique retenue · préparation de ${decision.workerCount} worker${decision.workerCount > 1 ? "s" : ""}`;
   refreshExpertChatPane(pane);
   try {
+    const selection = requireValidatedAccountModelSelection(
+      account,
+      submission.model,
+      submission.reasoningEffort,
+    );
     const created = await invoke<OrchestrationSnapshot>("create_orchestration", {
       request: {
         name: automaticOrchestrationName(submission.prompt) || null,
@@ -10747,8 +12204,8 @@ const launchAutomaticOrchestration = async (
         workerAccountIds: Array.from({ length: decision.workerCount }, () => account.id),
         accountId: account.id,
         projectDir,
-        model: submission.model,
-        reasoningEffort: accountProvider(account) === "codex" ? submission.reasoningEffort : null,
+        model: selection.model,
+        reasoningEffort: selection.reasoningEffort,
         testCommand: orchestrationTestCommandDraft.trim() || "git diff --check",
         testTimeoutSeconds: Math.max(5, Math.min(1800, orchestrationTestTimeoutSeconds)),
       },
@@ -10825,6 +12282,9 @@ const applyExpertChatTurnSnapshot = async (
   ) {
     snapshot = { ...snapshot, startedAt: Math.min(previousStartedAt, snapshot.startedAt) };
   }
+  const learnedSessionId = snapshot.sessionId?.trim() || null;
+  const sessionIdentityChanged = !!learnedSessionId && pane.resumeSessionId !== learnedSessionId;
+  if (learnedSessionId) pane.resumeSessionId = learnedSessionId;
   pane.turn = snapshot;
   if (!chatTurnIsBusy(snapshot.status)) {
     automaticQuotaResumeVisibilityPins.delete(pane.key);
@@ -10834,14 +12294,27 @@ const applyExpertChatTurnSnapshot = async (
     snapshot.status === "failed" &&
     isQuotaExhaustionError(snapshot.error);
   const retryableFailure = failedTurnIsRetryable(snapshot, pane.activeSubmission);
-  let attached: boolean;
-  try {
-    attached = snapshot.sessionId
-      ? await attachCreatedExpertChat(pane, snapshot.sessionId)
-      : !!pane.discussion;
-  } catch (error) {
-    if (shouldLaunchAutomaticOrchestration) pane.automaticOrchestrationLaunching = false;
-    throw error;
+  let attached = !!pane.discussion;
+  if (sessionIdentityChanged && !attached) persistExpertChats();
+  if (snapshot.sessionId) {
+    const attachment = attachCreatedExpertChat(pane, snapshot.sessionId);
+    if (shouldLaunchAutomaticOrchestration) {
+      try {
+        attached = await attachment;
+      } catch (error) {
+        pane.automaticOrchestrationLaunching = false;
+        throw error;
+      }
+    } else {
+      // L'index des rollouts est un cache secondaire. Il ne doit jamais bloquer
+      // le statut, le flux de réponse ni l'adoption des autres chats pendant un
+      // scan lent : le rattachement coalescé se termine en arrière-plan.
+      void attachment.catch((error) => {
+        if (!expertChatPanes.includes(pane)) return;
+        statusText = `Indexation du chat : ${String(error)}`;
+        if (activeView === "chat") refreshExpertChatSyncIndicator(pane);
+      });
+    }
   }
 
   if (snapshot.status === "finalizing") {
@@ -10862,6 +12335,8 @@ const applyExpertChatTurnSnapshot = async (
   } else {
     statusText = `${expertChatPanelModel(pane).providerLabel} travaille…`;
   }
+
+  if (snapshot.status === "completed") persistExpertChats();
 
   if (retryableFailure) {
     scheduleExpertModelCapacityRetry(pane, snapshot);
@@ -10917,6 +12392,7 @@ const applyExpertChatTurnSnapshot = async (
     // Le premier traitement de ce verdict possède la réservation et lancera l'équipe.
   } else if (!chatTurnIsBusy(snapshot.status)) {
     void drainExpertChatSubmissionQueue(pane);
+    void drainNextGlobalChatCapacityQueue();
   }
 };
 
@@ -10940,7 +12416,7 @@ const startExpertChatTurnPoll = (pane: ExpertChatPane) => {
       if (pane.queuedSubmissions.length > 0) void pollExpertChatTurn(pane);
       else runWhenPageVisible(() => void pollExpertChatTurn(pane));
     },
-    550,
+    CHAT_TURN_POLL_INTERVAL_MS,
   );
 };
 
@@ -11037,8 +12513,8 @@ const sendExpertChatMessage = async (
       : "Ajoutez d'abord un compte agent";
     return false;
   }
-  if (intent === "goal" && accountProvider(account) !== "codex") {
-    statusText = "Les goals sont disponibles avec Codex";
+  if (intent === "goal" && !providerSupportsGoals(accountProvider(account))) {
+    statusText = "Les goals ne sont pas pris en charge par ce fournisseur";
     return false;
   }
   if (
@@ -11054,12 +12530,19 @@ const sendExpertChatMessage = async (
     return false;
   }
   const preferences = queuedSubmission
-    ? {
-        model: queuedSubmission.model,
-        reasoningEffort: queuedSubmission.reasoningEffort,
-        changed: false,
-        error: null,
-      }
+    ? (() => {
+        const selection = validatedAccountModelSelection(
+          account,
+          queuedSubmission.model,
+          queuedSubmission.reasoningEffort,
+        );
+        return {
+          model: selection.model,
+          reasoningEffort: selection.reasoningEffort,
+          changed: false,
+          error: selection.error,
+        };
+      })()
     : readChatPreferences(account, root ?? document);
   if (preferences.error) {
     const modelInput = root?.querySelector<HTMLInputElement>("[data-chat-control='model']");
@@ -11068,7 +12551,7 @@ const sendExpertChatMessage = async (
     statusText = preferences.error;
     return false;
   }
-  if (preferences.changed) persistChatPreferences(account.id);
+  if (preferences.changed && !await persistChatPreferences(account.id)) return false;
 
   const automaticOrchestration =
     intent === "message"
@@ -11089,9 +12572,11 @@ const sendExpertChatMessage = async (
     ],
     automaticOrchestration,
   };
+  const resourceAdmissionPaused = chatResourceAdmissionPaused();
   if (
     chatTurnIsBusy(pane.turn?.status) ||
-    (!queuedSubmission && pane.queuedSubmissions.length > 0)
+    (!queuedSubmission && pane.queuedSubmissions.length > 0) ||
+    resourceAdmissionPaused
   ) {
     if (queuedSubmission) pane.queuedSubmissions.unshift(submission);
     else pane.queuedSubmissions.push(submission);
@@ -11102,11 +12587,13 @@ const sendExpertChatMessage = async (
     }
     statusText = chatTurnIsBusy(pane.turn?.status)
       ? `Message mis en attente · ${pane.queuedSubmissions.length} dans la file`
-      : "Envoi du prochain message en attente";
+      : resourceAdmissionPaused
+        ? "Mémoire temporairement saturée · message en attente"
+        : "Envoi du prochain message en attente";
     persistExpertChats();
     refreshExpertChatPane(pane);
     if (!queuedSubmission) focusExpertChatPrompt(pane);
-    if (!chatTurnIsBusy(pane.turn?.status)) {
+    if (!chatTurnIsBusy(pane.turn?.status) && !resourceAdmissionPaused) {
       void drainExpertChatSubmissionQueue(pane);
     }
     return true;
@@ -11114,6 +12601,8 @@ const sendExpertChatMessage = async (
 
   const wasAvailable = expertChatPaneIsAvailable(pane);
   if (!submission.automaticCapacityRetry) resetExpertModelCapacityRetry(pane);
+  const turnBeforeStart = pane.turn;
+  const messagesBeforeStart = pane.messages;
   pane.activeSubmission = submission;
   const resumeSessionId =
     submission.resumeSessionId ??
@@ -11206,6 +12695,7 @@ const sendExpertChatMessage = async (
       : { ...snapshot, startedAt: Math.min(optimisticStartedAt, snapshot.startedAt) };
     startExpertChatTurnPoll(pane);
     await applyExpertChatTurnSnapshot(pane, pane.turn);
+    void drainNextGlobalChatCapacityQueue();
     refreshExpertChatDisplayAfterAvailabilityChange(
       pane,
       wasAvailableBeforeSnapshot,
@@ -11213,6 +12703,17 @@ const sendExpertChatMessage = async (
     return snapshot.status !== "failed" && snapshot.status !== "cancelled";
   } catch (error) {
     if (!expertChatPanes.includes(pane)) return false;
+    if (isNodeCapacityError(String(error))) {
+      pauseChatResourceAdmission();
+      pane.turn = turnBeforeStart;
+      pane.messages = messagesBeforeStart;
+      pane.activeSubmission = null;
+      pane.queuedSubmissions.unshift(submission);
+      statusText = "Mémoire temporairement saturée · message conservé dans la file";
+      persistExpertChats();
+      refreshExpertChatPane(pane);
+      return true;
+    }
     // Un poll ou une notification runtime a pu deja adopter le vrai tour serveur
     // (id != 0) avant que cette requete echoue : ne jamais l'ecraser en « failed ».
     if (pane.turn && pane.turn.id !== 0) {
@@ -11273,6 +12774,7 @@ const drainExpertChatSubmissionQueue = async (pane: ExpertChatPane): Promise<voi
     !expertChatPanes.includes(pane) ||
     pane.queueDrainInFlight ||
     chatTurnIsBusy(pane.turn?.status) ||
+    chatResourceAdmissionPaused() ||
     pane.queuedSubmissions.length === 0
   ) {
     return;
@@ -11293,6 +12795,7 @@ const drainExpertChatSubmissionQueue = async (pane: ExpertChatPane): Promise<voi
     if (
       expertChatPanes.includes(pane) &&
       !chatTurnIsBusy(pane.turn?.status) &&
+      !chatResourceAdmissionPaused() &&
       !isQuotaExhaustionError(pane.turn?.error) &&
       !isModelCapacityError(pane.turn?.error) &&
       pane.queuedSubmissions.length > 0
@@ -11300,6 +12803,29 @@ const drainExpertChatSubmissionQueue = async (pane: ExpertChatPane): Promise<voi
       void drainExpertChatSubmissionQueue(pane);
     }
   }
+};
+
+/**
+ * Lance un seul message global en attente lorsqu'une place se libere. Chaque
+ * lancement pose immediatement un tour optimiste id=0. En cas de pression
+ * memoire, le serveur met temporairement cette reprise en pause.
+ */
+const drainNextGlobalChatCapacityQueue = async (): Promise<void> => {
+  if (chatResourceAdmissionPaused()) return;
+  if (
+    chatQueuedSubmissions.length > 0 &&
+    !chatQueueDrainInFlight &&
+    !chatTurnIsBusy(chatTurn?.status)
+  ) {
+    await drainChatSubmissionQueue();
+    return;
+  }
+  const pane = expertChatPanes.find((candidate) =>
+    candidate.queuedSubmissions.length > 0 &&
+    !candidate.queueDrainInFlight &&
+    !chatTurnIsBusy(candidate.turn?.status)
+  );
+  if (pane) await drainExpertChatSubmissionQueue(pane);
 };
 
 const stopExpertChatTurn = async (pane: ExpertChatPane) => {
@@ -11432,7 +12958,9 @@ const openDiscussionInExpert = (
   revealBusyChat = false,
 ): ExpertChatPane => {
   const existing = expertChatPanes.find(
-    (pane) => pane.discussion?.sessionId === discussion.sessionId,
+    (pane) =>
+      pane.discussion?.accountId === discussion.accountId
+      && pane.discussion.sessionId === discussion.sessionId,
   );
   if (existing) {
     if (revealBusyChat) pinExplicitlyOpenedBusyExpertChat(existing);
@@ -11782,6 +13310,7 @@ const restoreExpertChatAfterAccountTransfer = (
 // ainsi dans l'interface de chat, sans creer de terminal interactif.
 type ResumeDiscussionInChatOptions = {
   preserveNavigation?: boolean;
+  activateTarget?: boolean;
 };
 
 const resumeDiscussionInChat = async (
@@ -11796,13 +13325,16 @@ const resumeDiscussionInChat = async (
   const targetAccount = accountById(accountId);
   if (!targetAccount) return null;
   const preserveNavigation = options.preserveNavigation === true;
+  const activateTarget = options.activateTarget === true;
   const keepReusedPaneVisible = preserveNavigation
     && !!reusePane
     && !!expertChatPaneRoot(reusePane);
   const transferSnapshot = reusePane
     ? captureExpertChatAccountTransfer(reusePane)
     : null;
-  const activateReusePane = !!reusePane && !preserveNavigation && activeView !== "chat";
+  const activateReusePane = !!reusePane
+    && (!preserveNavigation || activateTarget)
+    && activeView !== "chat";
   let pane = reusePane;
   if (!pane && preserveNavigation) {
     pane = discussion
@@ -11836,12 +13368,17 @@ const resumeDiscussionInChat = async (
       discussion,
       targetAccount,
       folderPath,
-      activateReusePane,
+      activateReusePane || activateTarget,
     );
   } else {
     pane.accountId = accountId;
     pane.pendingWorkspace = folderPath;
     pane.mode = "build";
+  }
+  if (activateTarget) {
+    activeExpertChatKey = pane.key;
+    moveExpertChatPageToPane(pane);
+    activeView = "chat";
   }
   if (
     !preserveNavigation &&
@@ -11854,12 +13391,13 @@ const resumeDiscussionInChat = async (
   persistExpertChats();
 
   let root = expertChatPaneRoot(pane);
-  if (!root && !transferSnapshot && !preserveNavigation) {
+  const targetMustBeRendered = activateTarget || (!transferSnapshot && !preserveNavigation);
+  if (!root && targetMustBeRendered) {
     render();
     await waitForFrame();
     root = expertChatPaneRoot(pane);
   }
-  if (!root && !transferSnapshot && !preserveNavigation) {
+  if (!root && targetMustBeRendered) {
     return null;
   }
 
@@ -12115,7 +13653,7 @@ const bindExpertChatPaneUi = (pane: ExpertChatPane, root: HTMLElement) => {
       document.body.classList.add("chat-sidebar-open");
       syncMobileDrawerAccessibility(true, true);
     } else {
-      setActiveView("discussions");
+      openDiscussionHistory();
     }
   });
   root.querySelector<HTMLButtonElement>("[data-chat-action='new']")?.addEventListener("click", () => openNewChatModal());
@@ -12286,7 +13824,7 @@ const bindExpertChatGridUi = () => {
 };
 
 const renderDiscussionRow = (discussion: DiscussionSummary, accountLabel: string) => {
-  const busy = discussionBusyId === discussion.sessionId;
+  const busy = discussionIsBusy(discussion);
   const title = discussion.title?.trim() || "(sans titre)";
   const subtitle = discussionSubtitle(discussion);
   const provider = discussion.provider ?? "codex";
@@ -12309,17 +13847,35 @@ const renderDiscussionRow = (discussion: DiscussionSummary, accountLabel: string
     .join("");
 
   // Compte cible : origine EN PREMIER (marquee), puis les autres. Choisir un
-  // autre compte transforme la reprise en deplacement (copie fidele puis
-  // archivage de la source) — logique portee par continueDiscussionWith.
-  const accounts = chatCapableAccounts();
+  // autre compte cree une copie fidele et conserve la source dans l'Historique
+  // jusqu'a son retrait manuel — logique portee par continueDiscussionWith.
+  const accounts = continuationAccountsForDiscussion(discussion);
   const target = discussionTargetFor(discussion);
+  const targetAccount = accounts.find((account) => account.id === target) ?? null;
+  // La disponibilite ne concerne que les comptes Freebuff (un seul terminal par
+  // compte) : un compte cible Freebuff occupe desactive la reprise.
+  const targetUnavailable = accountSessionBusy(targetAccount);
+  const sourceUnavailable = provider === "freebuff"
+    && accountSessionBusy(accountById(discussion.accountId));
+  const targetIsFreebuff = accountProvider(targetAccount) === "freebuff";
   const willCopy = target !== discussion.accountId;
+  const copyLabel = "Copier + reprendre";
+  const copyTitle = provider === "freebuff"
+    ? "Copier la conversation vers le compte Freebuff choisi, la reprendre et conserver la source dans l’Historique"
+    : targetIsFreebuff
+      ? "Copier la discussion dans le compte Freebuff choisi, la reprendre dans son terminal et conserver la source dans l’Historique"
+      : "Copier la discussion dans le compte choisi, la reprendre automatiquement et conserver la source dans l’Historique";
   const options =
     accounts
       .map((account) => {
         const selected = account.id === target ? " selected" : "";
         const suffix = account.id === discussion.accountId ? " (origine)" : "";
-        return `<option value="${escapeAttr(account.id)}"${selected}>${escapeHtml(account.label)}${suffix}</option>`;
+        const isFreebuffOption = accountProvider(account) === "freebuff";
+        const unavailable = accountSessionBusy(account);
+        const availability = isFreebuffOption
+          ? unavailable ? " · indisponible (terminal ouvert)" : " · disponible"
+          : "";
+        return `<option value="${escapeAttr(account.id)}"${selected}${unavailable ? " disabled" : ""}>${escapeHtml(account.label)}${suffix}${availability}</option>`;
       })
       .join("") ||
     `<option value="${escapeAttr(discussion.accountId)}" selected>${escapeHtml(accountLabel)}</option>`;
@@ -12334,20 +13890,21 @@ const renderDiscussionRow = (discussion: DiscussionSummary, accountLabel: string
       <div class="discussion-actions">
         <label class="discussion-account" title="Choisir le compte dans lequel reprendre cette discussion">
           <i data-lucide="users"></i>
-          <select class="discussion-target" data-target-for="${escapeAttr(discussion.sessionId)}">
+          <select class="discussion-target" data-target-for="${escapeAttr(discussion.sessionId)}" data-target-account="${escapeAttr(discussion.accountId)}">
             ${options}
           </select>
+          ${targetIsFreebuff ? `<span class="discussion-account-state ${targetUnavailable ? "is-busy" : "is-available"}" data-account-state>${targetUnavailable ? "Indisponible · terminal ouvert" : "Disponible"}</span>` : ""}
         </label>
-        <button class="tool-button" data-resume-session="${escapeAttr(discussion.sessionId)}" title="${willCopy ? "Déplacer la discussion dans le compte choisi puis la reprendre automatiquement" : "Reprendre automatiquement dans le chat"}">
-          <i data-lucide="${willCopy ? "copy" : "play"}"></i><span data-resume-label>${willCopy ? "Déplacer + reprendre" : "Reprendre"}</span>
+        <button class="tool-button" data-resume-session="${escapeAttr(discussion.sessionId)}" data-resume-account="${escapeAttr(discussion.accountId)}"${targetUnavailable ? " disabled" : ""} title="${targetUnavailable ? escapeAttr(`${targetAccount?.label ?? "Ce compte"} est indisponible : un terminal Freebuff est déjà ouvert`) : willCopy ? copyTitle : provider === "freebuff" ? "Continuer dans le TUI Freebuff" : "Reprendre automatiquement dans le chat"}">
+          <i data-lucide="${willCopy ? "copy" : "play"}"></i><span data-resume-label>${willCopy ? copyLabel : "Reprendre"}</span>
         </button>
-        <button class="tool-button primary" data-open-chat="${escapeAttr(discussion.sessionId)}" title="Ouvrir cette conversation dans le chat">
-          <i data-lucide="messages-square"></i><span>Ouvrir le chat</span>
+        <button class="tool-button primary" data-open-chat="${escapeAttr(discussion.sessionId)}" data-open-account="${escapeAttr(discussion.accountId)}"${sourceUnavailable ? " disabled" : ""} title="${sourceUnavailable ? "Compte source indisponible : un terminal Freebuff est déjà ouvert" : provider === "freebuff" ? "Ouvrir cette conversation dans un terminal Freebuff" : "Ouvrir cette conversation dans le chat"}">
+          <i data-lucide="${provider === "freebuff" ? "terminal" : "messages-square"}"></i><span>${provider === "freebuff" ? "Ouvrir le terminal" : "Ouvrir le chat"}</span>
         </button>
         <button class="icon-button wide" data-rename-session="${escapeAttr(discussion.sessionId)}" data-rename-account="${escapeAttr(discussion.accountId)}" title="Renommer ce chat" aria-label="Renommer ${escapeAttr(title)}">
           <i data-lucide="pencil"></i>
         </button>
-        <button class="icon-button wide danger" data-delete-session="${escapeAttr(discussion.sessionId)}" title="Retirer de l'historique (archive toutes les reprises)">
+        <button class="icon-button wide danger" data-delete-session="${escapeAttr(discussion.sessionId)}" data-delete-account="${escapeAttr(discussion.accountId)}" title="Retirer de l'historique (archive toutes les reprises)">
           <i data-lucide="trash-2"></i>
         </button>
       </div>
@@ -12355,16 +13912,150 @@ const renderDiscussionRow = (discussion: DiscussionSummary, accountLabel: string
   `;
 };
 
+const compactOpenHistoryText = (value: string, maxChars: number): string => {
+  const compact = value.replace(/\s+/g, " ").trim();
+  if (compact.length <= maxChars) return compact;
+  return `${compact.slice(0, Math.max(1, maxChars - 1)).trimEnd()}…`;
+};
+
+const openHistoryPaneText = (pane: ExpertChatPane): string =>
+  pane.messages.find((message) => message.role === "user" && chatMessageHasVisibleContent(message))
+    ?.text.trim()
+  ?? pane.messages.find((message) => chatMessageHasVisibleContent(message))?.text.trim()
+  ?? "";
+
+const openHistoryPaneTitle = (pane: ExpertChatPane): string => {
+  const persistedTitle = pane.discussion?.title?.trim();
+  if (persistedTitle) return persistedTitle;
+  const firstMessage = openHistoryPaneText(pane);
+  if (firstMessage) return compactOpenHistoryText(firstMessage, 80);
+
+  // Certains tours recuperes depuis le serveur n'exposent pas encore leur
+  // premier message. Leur identifiant court donne alors un titre stable et
+  // distinct, au lieu de plusieurs rangees « conversation sans titre ».
+  const identity = expertChatResumeSessionId(pane) ?? pane.key;
+  const shortId = identity.slice(-8);
+  return `${chatTurnIsBusy(pane.turn?.status) ? "Chat en cours" : "Chat ouvert"} · ${shortId}`;
+};
+
+// Le serveur peut connaitre une session active avant que son index de fichiers
+// ait produit DiscussionSummary (notamment juste apres une mise a jour du format
+// Codex). Ces panneaux restent de vrais chats utilisateur : l'Historique doit
+// donc les montrer immediatement, puis les dedupliquer des que l'index les voit.
+const unindexedOpenHistoryPanes = (): ExpertChatPane[] => {
+  const indexed = new Set<string>();
+  allDiscussions().forEach((discussion) => {
+    [discussion.sessionId, discussion.rolloutId, discussion.resumeId]
+      .filter((id): id is string => !!id?.trim())
+      .forEach((id) => indexed.add(`${discussion.accountId}:${id.trim()}`));
+  });
+
+  const seen = new Set<string>();
+  return expertChatPanes.filter((pane) => {
+    const account = expertChatSelectedAccount(pane);
+    if (!account) return false;
+    const identities = [
+      pane.discussion?.sessionId,
+      pane.discussion?.rolloutId,
+      pane.discussion?.resumeId,
+      pane.turn?.sessionId,
+      pane.resumeSessionId,
+    ].filter((id): id is string => !!id?.trim());
+    if (identities.some((id) => indexed.has(`${account.id}:${id.trim()}`))) return false;
+
+    const identity = `${account.id}:${identities[0]?.trim() || pane.key}`;
+    if (seen.has(identity)) return false;
+    seen.add(identity);
+    return true;
+  });
+};
+
+const openHistoryPaneMatches = (pane: ExpertChatPane): boolean => {
+  const query = discussionSearch.trim().toLocaleLowerCase();
+  if (!query) return true;
+  const account = expertChatSelectedAccount(pane);
+  return [
+    openHistoryPaneTitle(pane),
+    openHistoryPaneText(pane),
+    account?.label ?? "",
+    expertChatPaneEnvironmentPath(pane) ?? "",
+    expertChatResumeSessionId(pane) ?? "",
+  ].some((value) => value.toLocaleLowerCase().includes(query));
+};
+
+const renderOpenHistoryPaneRow = (pane: ExpertChatPane): string => {
+  const account = expertChatSelectedAccount(pane);
+  const provider = accountProvider(account);
+  const title = openHistoryPaneTitle(pane);
+  const firstMessage = openHistoryPaneText(pane);
+  const preview = firstMessage && firstMessage !== title
+    ? compactOpenHistoryText(firstMessage, 200)
+    : "";
+  const workspace = expertChatPaneEnvironmentPath(pane);
+  const status = expertChatSidebarStatus(pane);
+  const statusLabel = chatSidebarStatusLabel(status);
+  const sessionId = expertChatResumeSessionId(pane);
+  const meta = [
+    `<span class="discussion-badge prov-${provider}" title="Fournisseur d'origine"><i data-lucide="cpu"></i>${escapeHtml(providerLabel(provider))}</span>`,
+    account ? `<span><i data-lucide="user-round"></i>${escapeHtml(account.label)}</span>` : "",
+    workspace
+      ? `<span title="${escapeAttr(workspace)}"><i data-lucide="folder-open"></i>${escapeHtml(displayProjectDir(workspace))}</span>`
+      : "",
+    `<span><i data-lucide="activity"></i>${escapeHtml(statusLabel)}</span>`,
+    sessionId ? `<span title="Session ${escapeAttr(sessionId)}"><i data-lucide="history"></i>Indexation en cours</span>` : "",
+  ].filter(Boolean).join("");
+
+  return `
+    <div class="discussion-row pending-index">
+      <div class="discussion-main">
+        <strong class="discussion-title" title="${escapeAttr(title)}">${escapeHtml(title)}</strong>
+        ${preview ? `<span class="discussion-preview">${escapeHtml(preview)}</span>` : ""}
+        <span class="discussion-meta">${renderChatSidebarStatus(pane)}${meta}</span>
+      </div>
+      <div class="discussion-actions">
+        <button class="tool-button primary" data-open-pane="${escapeAttr(pane.key)}" title="Ouvrir ce chat déjà actif">
+          <i data-lucide="messages-square"></i><span>Ouvrir le chat</span>
+        </button>
+      </div>
+    </div>
+  `;
+};
+
+const discussionHistoryCounts = () => {
+  const groups = discussions?.accounts ?? [];
+  const openPanes = unindexedOpenHistoryPanes();
+  return {
+    total: groups.reduce((sum, group) => sum + group.discussionCount, 0) + openPanes.length,
+    visible: groups.reduce(
+      (sum, group) => sum + group.discussions.filter((discussion) => discussionMatches(discussion, group.label)).length,
+      0,
+    ) + openPanes.filter(openHistoryPaneMatches).length,
+  };
+};
+
 const renderDiscussionGroups = () => {
   if (!discussionsLoaded) {
     return `<div class="pool-empty">Lecture des discussions Codex…</div>`;
   }
   const groups = discussions?.accounts ?? [];
-  if (groups.length === 0) {
+  const openPanes = unindexedOpenHistoryPanes();
+  if (groups.length === 0 && openPanes.length === 0) {
     return `<div class="pool-empty">Aucune discussion trouvee</div>`;
   }
 
-  const blocks = groups
+  const visibleOpenPanes = openPanes.filter(openHistoryPaneMatches);
+  const openBlock = visibleOpenPanes.length
+    ? `
+      <section class="discussion-group discussion-group--open">
+        <header class="discussion-group-head">
+          <strong>Chats ouverts</strong>
+          <span>${visibleOpenPanes.length}/${openPanes.length} chat(s) pas encore indexé(s)</span>
+        </header>
+        <div class="discussion-list">${visibleOpenPanes.map(renderOpenHistoryPaneRow).join("")}</div>
+      </section>
+    `
+    : "";
+  const indexedBlocks = groups
     .map((group) => {
       const rows = group.discussions.filter((discussion) => discussionMatches(discussion, group.label));
       if (rows.length === 0) return "";
@@ -12382,25 +14073,31 @@ const renderDiscussionGroups = () => {
     .filter(Boolean)
     .join("");
 
+  const blocks = `${openBlock}${indexedBlocks}`;
+
   return blocks || `<div class="pool-empty">Aucune discussion ne correspond a « ${escapeHtml(discussionSearch)} »</div>`;
 };
 
 const renderDiscussionsPanel = () => {
   const groups = discussions?.accounts ?? [];
-  const total = groups.reduce((sum, group) => sum + group.discussionCount, 0);
+  const { total, visible } = discussionHistoryCounts();
+  const hasSearch = discussionSearch.trim().length > 0;
   const connected = groups.filter((group) => group.hasTokens).length;
   return `
     <section class="discussions-panel">
       <div class="discussions-head">
         <div>
           <strong>Historique</strong>
-          <span>${total} discussion(s) · ${connected}/${settings?.accounts.length ?? 0} compte(s)</span>
+          <span id="discussionCountSummary">${hasSearch ? `${visible} affichée(s) sur ${total}` : `${total} discussion(s)`} · ${connected}/${settings?.accounts.length ?? 0} compte(s)</span>
         </div>
         <div class="discussions-tools">
           <label class="discussion-search">
             <i data-lucide="search"></i>
             <input id="discussionSearch" type="search" placeholder="Rechercher (titre, environnement, id)" value="${escapeAttr(discussionSearch)}" />
           </label>
+          <button id="clearDiscussionSearch" class="tool-button" title="Effacer le filtre et afficher toutes les conversations">
+            <i data-lucide="list"></i><span>Tout afficher</span>
+          </button>
           <button id="refreshDiscussions" class="tool-button" title="Actualiser">
             <i data-lucide="refresh-ccw"></i><span>Actualiser</span>
           </button>
@@ -12418,12 +14115,20 @@ const refreshDiscussionList = () => {
     return;
   }
   host.innerHTML = renderDiscussionGroups();
+  const groups = discussions?.accounts ?? [];
+  const { total, visible } = discussionHistoryCounts();
+  const hasSearch = discussionSearch.trim().length > 0;
+  const summary = document.querySelector<HTMLElement>("#discussionCountSummary");
+  if (summary) {
+    summary.textContent = `${hasSearch ? `${visible} affichée(s) sur ${total}` : `${total} discussion(s)`} · ${groups.filter((group) => group.hasTokens).length}/${settings?.accounts.length ?? 0} compte(s)`;
+  }
   renderIcons(host);
   bindDiscussionRowUi();
 };
 
 const clearChatDragUi = () => {
   draggedChatSessionId = null;
+  draggedChatAccountId = null;
   document
     .querySelectorAll<HTMLElement>(".chat-side-item.dragging, .chat-workspace-group.drag-over")
     .forEach((element) => element.classList.remove("dragging", "drag-over"));
@@ -12465,6 +14170,15 @@ const bindWorkspaceSwitcherUi = (root: ParentNode = document) => {
       persistTerminalSessions();
     });
   });
+  root.querySelectorAll<HTMLButtonElement>("[data-delete-terminal-history]").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const session = terminalSessions.find(
+        (candidate) => candidate.key === button.dataset.deleteTerminalHistory,
+      );
+      if (session) openTerminalDeleteModal(session);
+    });
+  });
   root.querySelectorAll<HTMLButtonElement>("[data-new-chat-workspace]").forEach((button) => {
     button.addEventListener("click", () => {
       const workspace = knownWorkspaces().find(
@@ -12495,13 +14209,24 @@ const bindWorkspaceSwitcherUi = (root: ParentNode = document) => {
       row.addEventListener("dragstart", (event) => {
         const dragEvent = event as DragEvent;
         const sessionId = row.dataset.dragChat;
-        const discussion = findDiscussion(sessionId);
-        if (!sessionId || !discussion || discussionBusyId || discussionHasRunningTurn(discussion)) {
+        const accountId = row.dataset.dragAccount;
+        const discussion = findDiscussion(sessionId, accountId);
+        if (
+          !sessionId
+          || !accountId
+          || !discussion
+          || discussionBusyId
+          || discussionHasRunningTurn(discussion)
+        ) {
           dragEvent.preventDefault();
           return;
         }
         draggedChatSessionId = sessionId;
-        dragEvent.dataTransfer?.setData(CHAT_DRAG_MIME, sessionId);
+        draggedChatAccountId = accountId;
+        dragEvent.dataTransfer?.setData(
+          CHAT_DRAG_MIME,
+          discussionIdentityKey(discussion),
+        );
         dragEvent.dataTransfer?.setData("text/plain", sessionId);
         if (dragEvent.dataTransfer) dragEvent.dataTransfer.effectAllowed = "move";
         document.body.classList.add("chat-dragging");
@@ -12512,13 +14237,33 @@ const bindWorkspaceSwitcherUi = (root: ParentNode = document) => {
 
   root.querySelectorAll<HTMLElement>("[data-chat-drop-workspace]").forEach((target) => {
     const dropContext = (event: DragEvent) => {
-      const sessionId =
-        draggedChatSessionId || event.dataTransfer?.getData(CHAT_DRAG_MIME) || null;
-      const discussion = findDiscussion(sessionId);
+      let transferredAccountId: string | null = null;
+      let transferredSessionId: string | null = null;
+      try {
+        const transferred = JSON.parse(event.dataTransfer?.getData(CHAT_DRAG_MIME) || "null");
+        if (
+          Array.isArray(transferred)
+          && typeof transferred[0] === "string"
+          && typeof transferred[1] === "string"
+        ) {
+          [transferredAccountId, transferredSessionId] = transferred;
+        }
+      } catch {
+        // Un payload externe ou ancien n'est jamais resolu par session seule.
+      }
+      const sessionId = draggedChatSessionId || transferredSessionId;
+      const accountId = draggedChatAccountId || transferredAccountId;
+      const discussion = findDiscussion(sessionId, accountId);
       const workspace = knownWorkspaces().find(
         (candidate) => candidate.id === target.dataset.chatDropWorkspace,
       );
-      if (!discussion || !workspace || discussionBusyId || discussionHasRunningTurn(discussion)) {
+      if (
+        !accountId
+        || !discussion
+        || !workspace
+        || discussionBusyId
+        || discussionHasRunningTurn(discussion)
+      ) {
         return null;
       }
       const folderPath = discussionFolderPath(discussion);
@@ -12578,13 +14323,19 @@ const bindDiscussionRowUi = () => {
   });
   document.querySelectorAll<HTMLButtonElement>("[data-delete-session]").forEach((button) => {
     button.addEventListener("click", () => {
-      const discussion = findDiscussion(button.dataset.deleteSession);
+      const discussion = findDiscussion(
+        button.dataset.deleteSession,
+        button.dataset.deleteAccount,
+      );
       if (discussion) openDiscussionArchiveModal(discussion);
     });
   });
   document.querySelectorAll<HTMLButtonElement>("[data-open-chat]").forEach((button) => {
     button.addEventListener("click", () => {
-      const discussion = findDiscussion(button.dataset.openChat);
+      const discussion = findDiscussion(
+        button.dataset.openChat,
+        button.dataset.openAccount,
+      );
       if (discussion) openDiscussionChat(discussion);
     });
   });
@@ -12616,13 +14367,7 @@ const bindDiscussionRowUi = () => {
       if (!session) return;
       closeMobileOverlays();
       activateTerminalSession(session);
-      // Le mur de chats affiche desormais les terminaux de l'environnement.
-      // Quand la tuile est deja sous les yeux, basculer de vue ferait
-      // disparaitre les chats pour rien : on se contente d'y donner le focus.
-      const shownInChatWall =
-        activeView === "chat" &&
-        expertChatWallTerminals().some((item) => item.key === session.key);
-      if (!shownInChatWall) activeView = "terminal";
+      activeView = "terminal";
       requestTerminalFocusKey = session.key;
       render();
     });
@@ -12633,24 +14378,49 @@ const bindDiscussionRowUi = () => {
   document.querySelectorAll<HTMLSelectElement>(".discussion-target[data-target-for]").forEach((select) => {
     select.addEventListener("change", () => {
       const id = select.dataset.targetFor ?? "";
-      const discussion = findDiscussion(id);
+      const discussion = findDiscussion(id, select.dataset.targetAccount);
       if (!discussion) return;
-      discussionTargetSel.set(id, select.value);
+      discussionTargetSel.set(discussionIdentityKey(discussion), select.value);
       const willCopy = select.value !== discussion.accountId;
+      const provider = discussion.provider ?? accountProvider(accountById(discussion.accountId));
+      const targetAccount = accountById(select.value);
+      const targetIsFreebuff = accountProvider(targetAccount) === "freebuff";
+      const copyLabel = "Copier + reprendre";
       const row = select.closest(".discussion-row");
       const button = row?.querySelector<HTMLButtonElement>("[data-resume-session]");
       const label = button?.querySelector<HTMLElement>("[data-resume-label]");
-      if (label) label.textContent = willCopy ? "Déplacer + reprendre" : "Reprendre";
+      const targetUnavailable = accountSessionBusy(targetAccount);
+      const accountState = row?.querySelector<HTMLElement>("[data-account-state]");
+      if (label) label.textContent = willCopy ? copyLabel : "Reprendre";
+      if (accountState) {
+        accountState.textContent = targetUnavailable
+          ? "Indisponible · terminal ouvert"
+          : "Disponible";
+        accountState.classList.toggle("is-busy", targetUnavailable);
+        accountState.classList.toggle("is-available", !targetUnavailable);
+      }
       if (button) {
-        button.title = willCopy
-          ? "Déplacer la discussion dans le compte choisi puis la reprendre automatiquement"
-          : "Reprendre automatiquement dans le chat";
+        button.disabled = targetUnavailable;
+        button.title = targetUnavailable
+          ? `${targetAccount?.label ?? "Ce compte"} est indisponible : un terminal Freebuff est déjà ouvert`
+          : willCopy
+          ? provider === "freebuff"
+            ? "Copier la conversation vers le compte Freebuff choisi, la reprendre et conserver la source dans l’Historique"
+            : targetIsFreebuff
+              ? "Copier la discussion dans le compte Freebuff choisi, la reprendre dans son terminal et conserver la source dans l’Historique"
+              : "Copier la discussion dans le compte choisi, la reprendre automatiquement et conserver la source dans l’Historique"
+          : provider === "freebuff"
+            ? "Continuer dans le TUI Freebuff"
+            : "Reprendre automatiquement dans le chat";
       }
     });
   });
   document.querySelectorAll<HTMLButtonElement>("[data-resume-session]").forEach((button) => {
     button.addEventListener("click", () => {
-      const discussion = findDiscussion(button.dataset.resumeSession);
+      const discussion = findDiscussion(
+        button.dataset.resumeSession,
+        button.dataset.resumeAccount,
+      );
       if (!discussion) return;
       const target = discussionTargetFor(discussion);
       if (target && target !== discussion.accountId) {
@@ -12687,9 +14457,61 @@ const refreshPromptHistory = (): Promise<void> => {
 const promptHistoryPanelModel = () => ({
   history: promptHistory,
   loaded: promptHistoryLoaded,
+  freebuffAccounts: (settings?.accounts ?? [])
+    .filter((account) => accountProvider(account) === "freebuff")
+    .map((account) => ({ id: account.id, label: account.label })),
   formatTimestamp,
   displayProjectDir,
 });
+
+const importCodexHistoryToFreebuff = async (
+  sourceAccountId: string,
+  sessionId: string,
+  targetAccountId: string,
+) => {
+  const source = accountById(sourceAccountId);
+  const target = accountById(targetAccountId);
+  if (!source || !target || accountProvider(target) !== "freebuff") return;
+  if (accountProvider(source) !== "codex") {
+    statusText = "Seuls les historiques Codex peuvent être importés vers Freebuff pour le moment.";
+    render();
+    return;
+  }
+  statusText = `Import de « ${source.label} » vers ${target.label}…`;
+  render();
+  try {
+    const folderPath = userEnvironmentPath(promptHistory?.prompts.find(
+      (entry) => entry.accountId === sourceAccountId && entry.sessionId === sessionId,
+    )?.cwd ?? source.projectDir ?? null);
+    // Ne pas creer un chat orphelin si le compte est deja occupe par un autre
+    // terminal Freebuff : la disponibilite est controlee avant l'import, puis
+    // reverifiee par launchFreebuffDiscussionTerminal juste avant le spawn.
+    await assertFreebuffAccountAvailable(target);
+    const transcript = await invoke<string>("export_discussion_transcript", {
+      accountId: sourceAccountId,
+      sessionId,
+    });
+    const imported = await invoke<DiscussionSummary>("import_codex_transcript_to_freebuff", {
+      sourceAccountId,
+      sessionId,
+      targetAccountId,
+      folderPath,
+      transcript,
+    });
+    if (!folderPath) {
+      statusText = `Historique Codex importé dans Freebuff « ${target.label} » (terminal non ouvert : aucun environnement associé à cet historique).`;
+    } else {
+      // Freebuff n'expose pas de chat structure : la discussion se poursuit
+      // dans le terminal TUI du compte cible, ouvert sur le chat importe.
+      imported.folderPath = folderPath;
+      await launchFreebuffDiscussionTerminal(imported, target, folderPath);
+      statusText = `Historique Codex importé et repris dans Freebuff « ${target.label} ».`;
+    }
+  } catch (error) {
+    statusText = `Import Codex → Freebuff échoué : ${String(error)}`;
+  }
+  render();
+};
 
 const openDiscussionForSession = (accountId: string, sessionId: string) => {
   const discussion = discussionForSession(allDiscussions(), accountId, sessionId);
@@ -12697,35 +14519,71 @@ const openDiscussionForSession = (accountId: string, sessionId: string) => {
     openDiscussionChat(discussion);
     return;
   }
-  discussionSearch = sessionId;
-  if (activeView === "discussions") {
-    refreshDiscussionList();
-  } else {
-    setActiveView("discussions");
-  }
+  openDiscussionHistory(sessionId);
 };
 
 // Rattache une session restauree a son PTY encore vivant sur le noeud.
-// Renvoie false si le terminal n'existe plus : l'appelant repart alors sur
-// un demarrage normal, avec reprise de la discussion.
+// Renvoie false si le terminal n'existe plus. En mode web, l'appelant oublie
+// alors cet ancien onglet au lieu de recreer un CLI devenu inutile.
 const attachRestoredTerminal = async (
   session: TerminalSession,
   ptyId: number,
+  remoteMetadata: { nodeId?: string | null; remoteId?: number | null } = {},
 ): Promise<boolean> => {
+  const previousPtyId = session.ptyId;
+  const previousNodeId = session.nodeId ?? null;
+  const previousRemoteId = session.remoteId ?? null;
+  const currentOwner = terminalSessionsByPtyId.get(ptyId);
+  if (currentOwner && currentOwner !== session) {
+    // Deux restaurations concurrentes ne doivent jamais partager le même PTY :
+    // la seconde sonde peut réussir, mais son socket écraserait ensuite celui
+    // de la première session.
+    return false;
+  }
+  if (previousPtyId !== null && previousPtyId !== ptyId) {
+    terminalSessionsByPtyId.delete(previousPtyId);
+  }
+  session.ptyId = ptyId;
+  if (remoteMetadata.nodeId !== undefined) session.nodeId = remoteMetadata.nodeId ?? null;
+  if (remoteMetadata.remoteId !== undefined) session.remoteId = remoteMetadata.remoteId ?? null;
+  terminalSessionsByPtyId.set(ptyId, session);
   try {
     await invoke("attach_terminal", {
       id: ptyId,
+      nodeId: session.nodeId ?? undefined,
+      remoteId: session.remoteId ?? undefined,
       cols: session.terminal.cols,
       rows: session.terminal.rows,
     });
   } catch {
+    if (terminalSessionsByPtyId.get(ptyId) === session) {
+      terminalSessionsByPtyId.delete(ptyId);
+    }
+    session.ptyId = previousPtyId;
+    if (remoteMetadata.nodeId !== undefined) session.nodeId = previousNodeId;
+    if (remoteMetadata.remoteId !== undefined) session.remoteId = previousRemoteId;
+    if (previousPtyId !== null) terminalSessionsByPtyId.set(previousPtyId, session);
     return false;
-  }
-  session.ptyId = ptyId;
-  session.running = true;
-  session.status = "Rattache";
-  terminalSessionsByPtyId.set(ptyId, session);
-  terminalLastOutputAt.set(session.key, Date.now());
+  }    session.running = true;
+    session.status = "Rattache";
+    flushTerminalInput(session);
+    // La sonde et l'association sont atomiques du point de vue du registre
+    // local : aucune autre restauration ne peut prendre ce PTY entre les deux.
+    if (terminalSessionsByPtyId.get(ptyId) !== session) {
+      terminalSessionsByPtyId.delete(ptyId);
+      session.ptyId = previousPtyId;
+      session.nodeId = previousNodeId;
+      session.remoteId = previousRemoteId;
+      if (previousPtyId !== null) terminalSessionsByPtyId.set(previousPtyId, session);
+      return false;
+    }
+  terminalActivity.touch(session.key);
+  // Les dimensions du PTY distant ne sont plus celles du DOM local apres
+  // rattachement. Sans ce resize, l'affichage wrapperait a 80 colonnes alors
+  // que le panneau en offre 120. Si le terminal n'est pas encore monte dans le
+  // DOM, l'appel est sans effet (host.clientWidth < 2) ; mountExpertTerminals
+  // prendra le relais au prochain render().
+  fitAndResizeTerminal(session);
   return true;
 };
 
@@ -12737,21 +14595,13 @@ const restoreTerminals = async () => {
       settings!.accounts.some((account) => account.id === record.accountId) &&
       !!userEnvironmentPath(record.folderPath),
   );
-  // Un login temporaire peut deja etre affiche sans avoir declenche la
-  // restauration. Ne jamais depasser la limite en ajoutant les sessions
-  // sauvegardees a celles qui sont deja en memoire / en cours de creation.
-  const availableSlots = Math.max(
-    0,
-    EXPERT_MAX_TERMINALS - terminalSessions.length - pendingTerminalCreations,
-  );
-  const records = eligibleRecords.slice(0, availableSlots);
+  const records = eligibleRecords;
   if (records.length === 0) {
     if (eligibleRecords.length === 0 && state.terminals.length > 0) persistTerminalSessions();
     return;
   }
 
-  const restored: TerminalSession[] = [];
-  const reattached = new Set<string>();
+  let restored: TerminalSession[] = [];
   for (const record of records) {
     const account = settings.accounts.find((candidate) => candidate.id === record.accountId);
     if (!account) continue;
@@ -12767,6 +14617,8 @@ const restoreTerminals = async () => {
       agentId,
       restoredFolder,
     );
+    session.nodeId = record.nodeId ?? null;
+    session.remoteId = record.remoteId ?? null;
     session.key = record.key;
     session.codexSessionId = record.codexSessionId ?? null;
     session.resumeSessionId = record.codexSessionId ?? null;
@@ -12776,17 +14628,55 @@ const restoreTerminals = async () => {
     if (session.codexSessionId) claimedSessionIds.add(session.codexSessionId);
     terminalSessions.push(session);
     restored.push(session);
-    // Le PTY appartient au noeud et a survecu au rechargement : s'y rattacher
-    // evite de laisser un processus orphelin derriere soi et de repartir sur
-    // une session neuve a chaque rechargement de la page.
-    if (isRemoteMode() && typeof record.ptyId === "number") {
-      if (await attachRestoredTerminal(session, record.ptyId)) {
-        reattached.add(session.key);
-      }
+  }
+
+  if (isRemoteMode()) {
+    const recordByKey = new Map(records.map((record) => [record.key, record]));
+    const liveRemoteKeys = new Set<string>();
+
+    // Sonder les PTY existants par petits lots garde l'ouverture du mur rapide,
+    // meme si le navigateur avait memorise beaucoup d'anciens onglets.
+    for (let index = 0; index < restored.length; index += TERMINAL_RESTORE_CONCURRENCY) {
+      const results = await Promise.all(
+        restored.slice(index, index + TERMINAL_RESTORE_CONCURRENCY).map(async (session) => {
+          const record = recordByKey.get(session.key);
+          const attached =
+            typeof record?.ptyId === "number"
+            && await attachRestoredTerminal(session, record.ptyId, {
+              nodeId: record.nodeId,
+              remoteId: record.remoteId,
+            });
+          return { session, attached };
+        }),
+      );
+      results.forEach(({ session, attached }) => {
+        if (attached) liveRemoteKeys.add(session.key);
+      });
+    }
+
+    // Un identifiant absent correspond a un ancien terminal deja termine. Le
+    // relancer automatiquement recreait jusqu'a 16 CLI et bloquait la fenetre.
+    const staleSessions = restored.filter((session) => !liveRemoteKeys.has(session.key));
+    staleSessions.forEach((session) => {
+      if (session.codexSessionId) claimedSessionIds.delete(session.codexSessionId);
+      terminalActivity.forget(session.key);
+      session.terminal.dispose();
+    });
+    if (staleSessions.length > 0) {
+      const staleKeys = new Set(staleSessions.map((session) => session.key));
+      terminalSessions = terminalSessions.filter((session) => !staleKeys.has(session.key));
+      restored = restored.filter((session) => !staleKeys.has(session.key));
     }
   }
 
-  if (restored.length === 0) return;
+  if (restored.length === 0) {
+    if (activeTerminalKey && !terminalSessions.some((session) => session.key === activeTerminalKey)) {
+      activeTerminalKey = terminalSessions[0]?.key ?? null;
+    }
+    persistTerminalSessions();
+    if (activeView === "terminal" || activeView === "chat") render();
+    return;
+  }
 
   activeTerminalKey =
     (state.activeKey && restored.some((session) => session.key === state.activeKey) && state.activeKey) ||
@@ -12798,10 +14688,12 @@ const restoreTerminals = async () => {
   // la prochaine action de l'utilisateur, qui les faisait apparaitre d'un coup.
   if (activeView === "terminal" || activeView === "chat") render();
 
-  for (let index = 0; index < restored.length; index += TERMINAL_RESTORE_CONCURRENCY) {
-    const batch = restored
-      .slice(index, index + TERMINAL_RESTORE_CONCURRENCY)
-      .filter((session) => !reattached.has(session.key));
+  // Les PTY desktop disparaissent avec l'application : leur reprise reste utile.
+  // En mode web, seuls les PTY effectivement rattaches ci-dessus sont conserves
+  // et aucune ancienne commande n'est relancee automatiquement.
+  const restartable = isRemoteMode() ? [] : restored;
+  for (let index = 0; index < restartable.length; index += TERMINAL_RESTORE_CONCURRENCY) {
+    const batch = restartable.slice(index, index + TERMINAL_RESTORE_CONCURRENCY);
     await Promise.all(batch.map((session) => {
       const command = isPlausibleSessionId(session.codexSessionId)
         ? buildResumeCommand(session.codexSessionId, accountById(session.accountId))
@@ -12815,6 +14707,165 @@ const restoreTerminals = async () => {
     statusText = `${records.length} terminaux restaures; la limite de la fenetre est atteinte`;
   }
   persistTerminalSessions();
+};
+
+const refreshActiveTerminals = async (forceReattach = false): Promise<boolean> => {
+  if (!isRemoteMode() || !settings) return true;
+  if (activeTerminalsInFlight) {
+    activeTerminalsRefreshRequested = true;
+    activeTerminalsForceReattachRequested ||= forceReattach;
+    return true;
+  }
+  activeTerminalsInFlight = true;
+  try {
+    // Le catalogue est lu avant la restauration locale : la couche distante
+    // memorise ainsi le noeud de chaque PTY, indispensable pour sonder un
+    // terminal qui vit sur un VPS secondaire.
+    const active = await invoke<ActiveTerminalSummary[]>("list_active_terminals");
+    await ensureTerminalsRestored();
+
+    let changed = false;
+    for (const summary of active) {
+      const ptyId = Number(summary.id);
+      if (!Number.isInteger(ptyId) || ptyId <= 0 || summary.loginOnly) continue;
+      const compatibilityFallback = summary.compatibilityFallback === true;
+      const account = accountById(summary.accountId)
+        ?? (compatibilityFallback ? selectedAccount() ?? settings.accounts[0] ?? null : null);
+      const folderPath = userWorkspacePath(summary.workspacePath)
+        ?? (compatibilityFallback
+          ? userEnvironmentPath(currentWorkspace()) ?? userEnvironmentPath(account?.projectDir)
+          : null);
+      if (!account || !folderPath) continue;
+
+      const sourceTerminalKey = summary.sourceTerminalKey?.trim()
+        || (compatibilityFallback ? `terminal-compat-${ptyId}` : null);
+      let session = terminalSessions.find((candidate) => candidate.ptyId === ptyId) ?? null;
+      if (!session && sourceTerminalKey) {
+        session = terminalSessions.find((candidate) =>
+          candidate.key === sourceTerminalKey
+          && candidate.accountId === summary.accountId,
+        ) ?? null;
+      }
+
+      if (!session) {
+        const requestedAgentId = summary.agentId?.trim() || null;
+        const agentId = requestedAgentId && settings.agents.some((agent) => agent.id === requestedAgentId)
+          ? requestedAgentId
+          : codexAgentId();
+        session = await createTerminalSession(
+          account,
+          proxyForAccount(account),
+          agentId,
+          folderPath,
+        );
+        if (compatibilityFallback) {
+          session.displayTitleOverride = `Terminal existant #${String(ptyId).slice(-6)}`;
+        }
+        if (
+          sourceTerminalKey
+          && !terminalSessions.some((candidate) => candidate.key === sourceTerminalKey)
+        ) {
+          session.key = sourceTerminalKey;
+        } else {
+          session.key = uid("terminal-synced");
+        }
+        session.workspaceId = summary.workspaceId?.trim() || null;
+        session.workspacePath = summary.workspacePath?.trim() || folderPath;
+        session.nodeId = summary.nodeId ?? null;
+        session.remoteId = Number.isSafeInteger((summary as ActiveTerminalSummary & { remoteId?: number }).remoteId)
+          ? Number((summary as ActiveTerminalSummary & { remoteId?: number }).remoteId)
+          : ptyId;
+        session.projectDir = account.projectDir?.trim() || null;
+        session.startedAtUnix = Number.isFinite(summary.startedAt) ? summary.startedAt : null;
+        session.externalSync = summary.external === true;
+        terminalSessions.push(session);
+
+        if (!session.externalSync && !await attachRestoredTerminal(session, ptyId)) {
+          terminalSessions = terminalSessions.filter((candidate) => candidate !== session);
+          session.terminal.dispose();
+          continue;
+        }
+        rememberWorkspace(folderPath);
+        if (!activeTerminalKey) activeTerminalKey = session.key;
+        changed = true;
+        continue;
+      }
+
+      if (compatibilityFallback) {
+        session.displayTitleOverride = `Terminal existant #${String(ptyId).slice(-6)}`;
+      }
+
+      const metadataChanged =
+        session.folderPath !== folderPath
+        || session.workspaceId !== (summary.workspaceId?.trim() || null)
+        || session.workspacePath !== (summary.workspacePath?.trim() || folderPath)
+        || session.startedAtUnix !== (Number.isFinite(summary.startedAt) ? summary.startedAt : null);
+      session.folderPath = folderPath;
+      session.workspaceId = summary.workspaceId?.trim() || null;
+      session.workspacePath = summary.workspacePath?.trim() || folderPath;
+      session.startedAtUnix = Number.isFinite(summary.startedAt) ? summary.startedAt : null;
+      session.externalSync = summary.external === true;
+      let reattached = false;
+      if (
+        !session.externalSync
+        && (session.ptyId !== ptyId
+          || !session.running
+          || (forceReattach && session.key === activeTerminalKey))
+      ) {
+        if (!await attachRestoredTerminal(session, ptyId)) continue;
+        reattached = true;
+      }
+      if (metadataChanged || reattached) changed = true;
+      rememberWorkspace(folderPath);
+    }
+
+    if (changed) {
+      persistTerminalSessions();
+      if (activeView === "terminal" || activeView === "chat") render();
+    }
+    return true;
+  } catch {
+    return false;
+  } finally {
+    activeTerminalsInFlight = false;
+    if (activeTerminalsRefreshRequested) {
+      const forceNextRefresh = activeTerminalsForceReattachRequested;
+      activeTerminalsRefreshRequested = false;
+      activeTerminalsForceReattachRequested = false;
+      window.setTimeout(() => void refreshActiveTerminals(forceNextRefresh), 0);
+    }
+    scheduleRuntimeSyncFlush();
+  }
+};
+
+// Reconcile le PTY serveur, remplace un WebSocket eventuellement semi-ouvert,
+// puis redonne le clavier a xterm apres le remontage du DOM et des overlays.
+const recoverActiveTerminalInput = async (): Promise<void> => {
+  if (activeView !== "terminal") return;
+  requestTerminalFocusKey = activeTerminalKey;
+  await refreshActiveTerminals(true);
+  if (activeView !== "terminal") return;
+
+  const session = activeTerminal();
+  if (!session?.running) return;
+  requestTerminalFocusKey = session.key;
+  window.requestAnimationFrame(() => {
+    window.requestAnimationFrame(() => {
+      const current = activeTerminal();
+      if (
+        activeView !== "terminal"
+        || current?.key !== session.key
+        || !current.running
+        || activeModalDialog()
+        || !current.terminal.element?.isConnected
+      ) {
+        return;
+      }
+      fitAndResizeTerminal(current);
+      current.terminal.focus();
+      if (requestTerminalFocusKey === current.key) requestTerminalFocusKey = null;
+    });
+  });
 };
 
 const readClaudeDesignSessions = (): Record<string, string> => {
@@ -13594,7 +15645,7 @@ const finalizeClosedExpertChatDiscussion = async (
     finalStatus = `Suppression du chat impossible : ${String(error)}`;
   }
 
-  if (discussionBusyId === discussion.sessionId) discussionBusyId = null;
+  if (discussionIsBusy(discussion)) discussionBusyId = null;
   await refreshDiscussions();
   // Le snapshot peut rester identique apres un echec : retire dans tous les cas
   // l'etat visuel « en cours » sans reconstruire les autres panneaux de chat.
@@ -13626,14 +15677,14 @@ const closeExpertChatAndDiscussion = (pane: ExpertChatPane) => {
   }
   if (discussionBusyId) return;
 
-  discussionBusyId = discussion.sessionId;
+  discussionBusyId = discussionIdentityKey(discussion);
   // La fermeture visible ne doit pas attendre le deplacement des fichiers ni
   // le rescannage de tout l'historique. L'archivage se termine en arriere-plan.
   closeExpertChatPane(pane);
   if (expertChatPanes.includes(pane)) {
     // closeExpertChatPane peut refuser pendant une compaction demarree entre les
     // controles ci-dessus et la fermeture effective.
-    if (discussionBusyId === discussion.sessionId) discussionBusyId = null;
+    if (discussionIsBusy(discussion)) discussionBusyId = null;
     return;
   }
 
@@ -13746,11 +15797,6 @@ const closeWorkspaceModal = () => {
 
 const createPoolTerminal = async () => {
   await ensureTerminalsRestored();
-  if (terminalSessions.length >= EXPERT_MAX_TERMINALS) {
-    statusText = `Limite atteinte: ${EXPERT_MAX_TERMINALS} terminaux maximum dans une fenetre`;
-    render();
-    return;
-  }
   try {
     const picked = await invoke<AccountProfile>("pool_pick_terminal_account");
     settings = await invoke<AppSettings>("load_settings");
@@ -13802,7 +15848,9 @@ const renderPoolRow = (account: PoolAccountView) => {
 };
 
 const terminalTitle = (session: TerminalSession) =>
-  settings?.accounts.find((account) => account.id === session.accountId)?.label ?? session.title;
+  session.displayTitleOverride
+  ?? settings?.accounts.find((account) => account.id === session.accountId)?.label
+  ?? session.title;
 
 const syncSessionsForAccount = (account: AccountProfile) => {
   const proxy = proxyForAccount(account);
@@ -13854,16 +15902,45 @@ const syncMobileDrawerAccessibility = (open: boolean, focusFirst = false): void 
   }
 };
 
+const syncMobileContextSidebarAccessibility = (
+  open: boolean,
+  focusFirst = false,
+): void => {
+  const sidebar = document.querySelector<HTMLElement>(".chat-context-sidebar");
+  const trigger = document.querySelector<HTMLButtonElement>("[data-m='context']");
+  const mobile = window.matchMedia("(max-width: 860px)").matches;
+  if (sidebar) {
+    sidebar.inert = mobile && !open;
+    if (mobile) sidebar.setAttribute("aria-hidden", open ? "false" : "true");
+    else sidebar.removeAttribute("aria-hidden");
+  }
+  trigger?.setAttribute("aria-expanded", open ? "true" : "false");
+  if (mobile && open && focusFirst) {
+    window.requestAnimationFrame(() =>
+      sidebar?.querySelector<HTMLButtonElement>("#chatContextSidebarCollapse")?.focus(),
+    );
+  }
+};
+
 function closeMobileOverlays(): void {
   const sheetWasOpen = document.body.classList.contains("m-sheet-open");
   const drawerWasOpen = document.body.classList.contains("chat-sidebar-open");
-  document.body.classList.remove("m-drawer-open", "m-sheet-open", "chat-sidebar-open");
+  const contextSidebarWasOpen = document.body.classList.contains("chat-context-sidebar-open");
+  document.body.classList.remove(
+    "m-drawer-open",
+    "m-sheet-open",
+    "chat-sidebar-open",
+    "chat-context-sidebar-open",
+  );
   syncMobileSheetAccessibility(false);
   syncMobileDrawerAccessibility(false);
+  syncMobileContextSidebarAccessibility(false);
   if (sheetWasOpen) {
     document.querySelector<HTMLButtonElement>("[data-m='menu']")?.focus();
   } else if (drawerWasOpen) {
     document.querySelector<HTMLButtonElement>("[data-m='drawer']")?.focus();
+  } else if (contextSidebarWasOpen) {
+    document.querySelector<HTMLButtonElement>("[data-m='context']")?.focus();
   }
 }
 
@@ -13883,6 +15960,12 @@ function mobileViewLabel(view: AppView): string {
       return "Limites";
     case "dashboard":
       return "Stats";
+    case "tracking":
+      return "Tracking";
+    case "duello-bank":
+      return "Banque Duello";
+    case "freebuff-cloud":
+      return "Freebuff Cloud";
     case "video":
       return "Vidéo";
     case "transcription":
@@ -13905,6 +15988,10 @@ function mobileViewLabel(view: AppView): string {
       return "Messagerie";
     case "tiktok":
       return "TikTok";
+    case "devices":
+      return "Appareils";
+    case "android":
+      return "Android";
     case "discussions":
       return "Historique";
     case "chat":
@@ -13925,8 +16012,13 @@ function mobileViewLabel(view: AppView): string {
 function syncMobileChrome(): void {
   const chrome = document.querySelector(".m-chrome");
   if (!chrome) return;
-  const tutorialBadge = chrome.querySelector<HTMLElement>("[data-tutorial-nav-badge]");
-  if (tutorialBadge) tutorialBadge.hidden = tutorialHasStarted();
+  // Le terminal mobile utilise un mode immersif : toute la coque de navigation
+  // et les bandeaux descriptifs cedent la place au PTY. La classe portee par
+  // body permet aussi de masquer le moniteur autonome, rendu hors de #app.
+  document.body.classList.toggle(
+    "m-terminal-focus",
+    activeView === "terminal" && !!activeTerminal(),
+  );
   const privateMessageUnreadCount = messagingModule?.messagingUnreadCount() ?? 0;
   const messagingBadge = chrome.querySelector<HTMLElement>("[data-messaging-nav-count]");
   if (messagingBadge) {
@@ -13997,6 +16089,9 @@ function syncMobileChrome(): void {
     newAction.tabIndex = available ? 0 : -1;
   }
   syncMobileDrawerAccessibility(document.body.classList.contains("chat-sidebar-open"));
+  syncMobileContextSidebarAccessibility(
+    document.body.classList.contains("chat-context-sidebar-open"),
+  );
 }
 
 const bindGlobalMobileListeners = () => {
@@ -14012,8 +16107,10 @@ const bindGlobalMobileListeners = () => {
     }
   });
   document.addEventListener("keydown", (event) => {
+    const leftSidebarOpen = document.body.classList.contains("chat-sidebar-open");
+    const contextSidebarOpen = document.body.classList.contains("chat-context-sidebar-open");
     if (
-      !document.body.classList.contains("chat-sidebar-open") ||
+      (!leftSidebarOpen && !contextSidebarOpen) ||
       !window.matchMedia("(max-width: 860px)").matches ||
       activeModalDialog()
     ) {
@@ -14026,7 +16123,9 @@ const bindGlobalMobileListeners = () => {
       return;
     }
     if (event.key !== "Tab") return;
-    const sidebar = document.querySelector<HTMLElement>(".chat-app-sidebar");
+    const sidebar = document.querySelector<HTMLElement>(
+      contextSidebarOpen ? ".chat-context-sidebar" : ".chat-app-sidebar",
+    );
     const focusable = sidebar ? dialogFocusableElements(sidebar) : [];
     if (!sidebar || !focusable.length) return;
     const current = focusable.indexOf(document.activeElement as HTMLElement);
@@ -14040,11 +16139,16 @@ const bindGlobalMobileListeners = () => {
     window.clearTimeout(mobileRefitTimer);
     mobileRefitTimer = window.setTimeout(() => {
       const mobile = window.matchMedia("(max-width: 860px)").matches;
-      if (!mobile) document.body.classList.remove("m-sheet-open");
+      if (!mobile) {
+        document.body.classList.remove("m-sheet-open", "chat-context-sidebar-open");
+      }
       syncMobileSheetAccessibility(
         mobile && document.body.classList.contains("m-sheet-open"),
       );
       syncMobileDrawerAccessibility(document.body.classList.contains("chat-sidebar-open"));
+      syncMobileContextSidebarAccessibility(
+        mobile && document.body.classList.contains("chat-context-sidebar-open"),
+      );
       fitAndResizeVisibleTerminals();
     }, 120);
   };
@@ -14066,10 +16170,13 @@ function ensureMobileChrome(): void {
   chrome.className = "m-chrome";
   chrome.innerHTML = `
     <header class="m-topbar">
-      <button class="m-icon" type="button" data-m="drawer" aria-label="Ouvrir les conversations et l'environnement" aria-expanded="false" aria-controls="chatAppSidebar">
-        <i data-lucide="panel-left-open"></i>
+      <button class="m-icon" type="button" data-m="drawer" title="Voir tous les chats" aria-label="Voir tous les chats" aria-expanded="false" aria-controls="chatAppSidebar">
+        <i data-lucide="messages-square"></i>
       </button>
       <div class="m-title"><strong id="mTitle">Codex Terminal</strong></div>
+      <button class="m-icon" type="button" data-m="context" title="Ouvrir le centre d'activité" aria-label="Ouvrir la colonne de droite" aria-expanded="false" aria-controls="chatContextSidebar">
+        <i data-lucide="panel-right-open"></i>
+      </button>
       <button class="m-icon" type="button" data-m="new" aria-label="Nouveau terminal">
         <i data-lucide="plus"></i>
       </button>
@@ -14086,7 +16193,7 @@ function ensureMobileChrome(): void {
       <div class="m-sheet-panel" role="menu" aria-label="Plus d'actions">
         <div class="m-sheet-handle"></div>
         <div class="m-sheet-grid">
-          <button type="button" class="m-tutorial-entry" role="menuitem" data-view="tutorial"><i data-lucide="compass"></i><span>Tuto</span><b class="tutorial-nav-badge" data-tutorial-nav-badge>Nouveau</b></button>
+          <button type="button" class="m-proxy-entry" role="menuitem" data-act="proxies"><i data-lucide="network"></i><span>Proxy</span></button>
           <button type="button" role="menuitem" data-view="pool"><i data-lucide="users"></i><span>Comptes</span></button>
           <button type="button" role="menuitem" data-view="tasks"><i data-lucide="list-checks"></i><span>Tâches</span></button>
           <button type="button" role="menuitem" data-view="scheduled-chat"><i data-lucide="calendar-clock"></i><span>Chat planifié</span></button>
@@ -14094,8 +16201,13 @@ function ensureMobileChrome(): void {
           <button type="button" role="menuitem" data-view="video"><i data-lucide="wand-sparkles"></i><span>Studio IA</span></button>
           <button type="button" role="menuitem" data-view="transcription"><i data-lucide="audio-lines"></i><span>Transcrire</span></button>
           <button type="button" role="menuitem" data-view="tiktok"><i data-lucide="music-2"></i><span>TikTok</span></button>
+          <button type="button" role="menuitem" data-view="devices"><i data-lucide="usb"></i><span>Appareils</span></button>
+          <button type="button" role="menuitem" data-view="android"><i data-lucide="smartphone"></i><span>Android</span></button>
           <button type="button" role="menuitem" data-view="limits"><i data-lucide="calendar-clock"></i><span>Limites</span></button>
           <button type="button" role="menuitem" data-view="dashboard"><i data-lucide="bar-chart-3"></i><span>Stats</span></button>
+          ${isRemoteMode() ? `<button type="button" role="menuitem" data-view="tracking"><i data-lucide="route"></i><span>Tracking</span></button>` : ""}
+          ${isRemoteMode() ? `<button type="button" role="menuitem" data-view="duello-bank"><i data-lucide="landmark"></i><span>Banque Duello</span></button>` : ""}
+          ${isRemoteMode() ? `<button type="button" role="menuitem" data-view="freebuff-cloud"><i data-lucide="cloud"></i><span>Freebuff Cloud</span></button>` : ""}
           ${isRemoteMode() ? `<button type="button" role="menuitem" data-view="vps"><i data-lucide="server"></i><span>VPS</span></button>` : ""}
           <button type="button" class="m-bug-report-entry" role="menuitem" data-view="bug-report"><i data-lucide="bug"></i><span><strong>Signaler un bug</strong><small>Lancer un agent de correction</small></span><b data-bug-report-nav-badge>Auto</b></button>
           <button type="button" class="m-autonomous-entry" role="menuitem" data-view="autonomous"><i data-lucide="bot"></i><span><strong>Agents autonomes</strong><small>Création et suivi 24/7</small></span><b class="${autonomousReportDeliveries(true).length ? "has-results" : ""}">${autonomousReportDeliveries(true).length || "24/7"}</b></button>
@@ -14115,8 +16227,11 @@ function ensureMobileChrome(): void {
   document.body.appendChild(chrome);
 
   const gotoView = (view: AppView) => {
-    if (view === "terminal") {
+    if (view === "discussions") {
+      openDiscussionHistory();
+    } else if (view === "terminal") {
       if (activeView !== "terminal") setActiveView("terminal");
+      else void recoverActiveTerminalInput();
     } else if (activeView !== view) {
       setActiveView(view);
     }
@@ -14142,6 +16257,7 @@ function ensureMobileChrome(): void {
       if (act === "poolTerminal") void createPoolTerminal();
       else if (act === "agents") openAgentsModal();
       else if (act === "fullscreen") void toggleFullscreen();
+      else if (act === "proxies") openProxyManagerModal();
       return;
     }
 
@@ -14149,10 +16265,22 @@ function ensureMobileChrome(): void {
       case "drawer":
         document.body.classList.remove("m-sheet-open");
         document.body.classList.remove("m-drawer-open");
+        document.body.classList.remove("chat-context-sidebar-open");
         document.body.classList.toggle("chat-sidebar-open");
         syncMobileSheetAccessibility(false);
+        syncMobileContextSidebarAccessibility(false);
         syncMobileDrawerAccessibility(
           document.body.classList.contains("chat-sidebar-open"),
+          true,
+        );
+        break;
+      case "context":
+        document.body.classList.remove("m-sheet-open", "m-drawer-open", "chat-sidebar-open");
+        document.body.classList.toggle("chat-context-sidebar-open");
+        syncMobileSheetAccessibility(false);
+        syncMobileDrawerAccessibility(false);
+        syncMobileContextSidebarAccessibility(
+          document.body.classList.contains("chat-context-sidebar-open"),
           true,
         );
         break;
@@ -14173,8 +16301,13 @@ function ensureMobileChrome(): void {
         }
         break;
       case "menu":
-        document.body.classList.remove("m-drawer-open", "chat-sidebar-open");
+        document.body.classList.remove(
+          "m-drawer-open",
+          "chat-sidebar-open",
+          "chat-context-sidebar-open",
+        );
         syncMobileDrawerAccessibility(false);
+        syncMobileContextSidebarAccessibility(false);
         document.body.classList.toggle("m-sheet-open");
         syncMobileSheetAccessibility(
           document.body.classList.contains("m-sheet-open"),
@@ -14372,7 +16505,7 @@ const renderChatSidebarOpenTerminals = (): string => {
   const terminalItems = terminalSessions
     .map((session) => {
       const account = accountById(session.accountId);
-      const label = account?.label || session.title || "Terminal";
+      const label = terminalTitle(session) || "Terminal";
       const provider = accountProvider(account);
       const current = session.key === activeTerminalKey;
       const state = session.running
@@ -14415,6 +16548,29 @@ const renderChatSidebarConversations = (): string => {
   }
 
   const environmentId = workspaceIdForPath(environmentPath);
+  const environmentTerminals = terminalSessions.filter((session) => {
+    const path = session.workspacePath ?? session.folderPath ?? session.projectDir;
+    return !!path && workspaceIdForPath(path) === environmentId;
+  });
+  const environmentTerminalItems = environmentTerminals.map((session) => {
+    const account = accountById(session.accountId);
+    const state = session.running ? "en cours" : session.status || "ouvert";
+    const current = session.key === activeTerminalKey;
+    const label = terminalTitle(session) || "Terminal";
+    return `<div class="chat-side-item ${current ? "current" : ""}">
+      <button type="button" class="chat-side-open" data-open-terminal="${escapeAttr(session.key)}" title="${escapeAttr(label)}">
+        ${renderTerminalActivityDot(session)}
+        <i class="chat-side-terminal-icon" data-lucide="square-terminal"></i>
+        <span class="chat-side-copy">
+          <strong>${escapeHtml(label)}</strong>
+          <small>${escapeHtml(account?.label ?? "Compte distant")} · ${escapeHtml(state)}</small>
+        </span>
+      </button>
+      <button type="button" class="chat-side-terminal-delete" data-delete-terminal-history="${escapeAttr(session.key)}" title="Supprimer l'historique et le chat associés" aria-label="Supprimer définitivement ${escapeAttr(label)} et son chat associé">
+        <i data-lucide="trash-2"></i>
+      </button>
+    </div>`;
+  }).join("");
   const discussions = orderChatSidebarDiscussions(
     allDiscussions()
       .filter((discussion) => {
@@ -14435,16 +16591,20 @@ const renderChatSidebarConversations = (): string => {
   const conversationItems = discussions
     .map((discussion) => {
       const openedPane = expertChatPanes.find(
-        (pane) => pane.discussion?.sessionId === discussion.sessionId,
+        (pane) =>
+          pane.discussion?.accountId === discussion.accountId
+          && pane.discussion.sessionId === discussion.sessionId,
       );
       const current = openedPane?.key === activeExpertChatKey;
-      const title = discussion.title?.trim() || "Conversation sans titre";
-      const busy = discussionBusyId === discussion.sessionId;
+      const title = discussion.title?.trim()
+        || discussion.preview?.trim()
+        || "Conversation sans titre";
+      const busy = discussionIsBusy(discussion);
       const status = expertChatSidebarStatus(openedPane ?? null, discussion);
       return {
         status,
         html: `<div class="chat-side-item ${openedPane ? "active" : ""} ${current ? "current" : ""} ${busy ? "moving" : ""}" aria-busy="${busy}">
-        <button type="button" class="chat-side-open" data-open-chat="${escapeAttr(discussion.sessionId)}" title="${escapeAttr(title)}">
+        <button type="button" class="chat-side-open" data-open-chat="${escapeAttr(discussion.sessionId)}" data-open-account="${escapeAttr(discussion.accountId)}" title="${escapeAttr(title)}">
           ${renderChatSidebarStatus(openedPane ?? null, discussion)}
           <i class="chat-side-terminal-icon" data-lucide="message-square"></i>
           <span class="chat-side-copy">
@@ -14455,7 +16615,7 @@ const renderChatSidebarConversations = (): string => {
         <button type="button" class="chat-side-rename" data-rename-session="${escapeAttr(discussion.sessionId)}" data-rename-account="${escapeAttr(discussion.accountId)}" title="Renommer ce chat" aria-label="Renommer ${escapeAttr(title)}">
           <i data-lucide="pencil"></i>
         </button>
-        <button type="button" class="chat-side-delete" data-delete-session="${escapeAttr(discussion.sessionId)}" title="Supprimer la conversation" aria-label="Supprimer ${escapeAttr(title)}">
+        <button type="button" class="chat-side-delete" data-delete-session="${escapeAttr(discussion.sessionId)}" data-delete-account="${escapeAttr(discussion.accountId)}" title="Supprimer la conversation" aria-label="Supprimer ${escapeAttr(title)}">
           <i data-lucide="trash-2"></i>
         </button>
       </div>`,
@@ -14472,7 +16632,7 @@ const renderChatSidebarConversations = (): string => {
     ? []
     : draftEnvironmentChatPanes(
         expertChatPanesForCurrentEnvironment(),
-        discussions.map((discussion) => discussion.sessionId),
+        discussions,
       );
 
   const draftItems = draftPanes
@@ -14519,7 +16679,10 @@ const renderChatSidebarConversations = (): string => {
       ? "Aucun résultat"
       : "Aucun chat. Ouvrez-en un avec l'agent de votre choix.";
 
-  return `${renderChatSidebarOpenTerminals()}<section class="chat-workspace-group active chat-current-environment-chats">
+  return `<section class="chat-workspace-group active chat-current-environment-chats">
+    <div class="chat-folder-section-label"><span>Terminaux de cet environnement</span><b>${environmentTerminalItems ? environmentTerminals.length : 0}</b></div>
+    <div class="chat-workspace-terminals">${environmentTerminalItems || `<div class="chat-workspace-empty">Aucun terminal ouvert.</div>`}</div>
+  </section><section class="chat-workspace-group active chat-current-environment-chats">
     <div class="chat-folder-section-label"><span>Chats de cet environnement</span><b title="${escapeAttr(countTitle)}">${visibleItems.length}</b></div>
     <div class="chat-workspace-terminals">
       ${listItems || `<div class="chat-workspace-empty">${escapeHtml(emptyMessage)}</div>`}
@@ -14528,7 +16691,14 @@ const renderChatSidebarConversations = (): string => {
 };
 
 const refreshChatSidebarConversations = () => {
-  if (activeView !== "chat" || draggedChatSessionId) return;
+  if (activeView !== "chat") return;
+  // Un changement de statut peut arriver pendant un glisser-deposer. Le DOM
+  // doit rester stable sous le pointeur, mais l'actualisation ne doit pas etre
+  // perdue : clearChatDragUi la rejouera des la fin du geste.
+  if (draggedChatSessionId) {
+    chatSidebarRefreshPending = true;
+    return;
+  }
   const host = document.querySelector<HTMLElement>("#chatSideConversations");
   if (!host) return;
   chatSidebarRefreshPending = false;
@@ -14632,9 +16802,146 @@ const activeChatTurnBySourceKey = (
     )
     .sort((left, right) => right.startedAt - left.startedAt || right.id - left.id)[0] ?? null;
 
+const activeChatTurnForPaneIdentity = (
+  turns: readonly ActiveChatTurnSummary[],
+  pane: ExpertChatPane,
+): ActiveChatTurnSummary | null => {
+  const sourceMatch = activeChatTurnBySourceKey(turns, pane);
+  if (sourceMatch) return sourceMatch;
+  return turns
+    .filter(
+      (turn) =>
+        chatTurnIsBusy(turn.status)
+        && activeChatTurnBelongsToPane(turn, {
+          key: pane.key,
+          accountId: pane.accountId,
+          turnId: pane.turn?.id,
+          sessionIds: [
+            pane.resumeSessionId,
+            pane.discussion?.sessionId,
+            pane.discussion?.rolloutId,
+          ],
+        }),
+    )
+    .sort((left, right) => right.startedAt - left.startedAt || right.id - left.id)[0] ?? null;
+};
+
+const expertChatPaneRepresentsActiveTurn = (
+  pane: ExpertChatPane,
+  turn: ActiveChatTurnSummary,
+): boolean =>
+  activeChatTurnBelongsToPane(turn, {
+    key: pane.key,
+    accountId: pane.accountId,
+    turnId: pane.turn?.id,
+    sessionIds: [
+      pane.resumeSessionId,
+      pane.discussion?.sessionId,
+      pane.discussion?.rolloutId,
+    ],
+  });
+
+const workspaceForSyncedChatTurn = (
+  turn: ActiveChatTurnSummary,
+  snapshot: ChatTurnSnapshot,
+  discussion: DiscussionSummary | null,
+): string | null => {
+  const discussionWorkspace = discussionFolderPath(discussion);
+  if (discussionWorkspace) return discussionWorkspace;
+  const serverWorkspace = userEnvironmentPath(turn.projectDir);
+  if (serverWorkspace) return serverWorkspace;
+
+  // Les serveurs plus anciens n'incluent pas encore `projectDir` dans le
+  // catalogue leger. Le premier evenement du snapshot conserve toutefois le
+  // nom exact du dossier dans lequel le tour a ete lance.
+  const folderLabel = snapshot.activities
+    .find((activity) => activity.id === "agent-start")
+    ?.detail
+    ?.trim();
+  if (folderLabel) {
+    const normalizedLabel = folderLabel.toLocaleLowerCase();
+    const matches = knownWorkspaces().filter((workspace) =>
+      workspace.label.trim().toLocaleLowerCase() === normalizedLabel
+      || workspaceBaseName(workspace.path).trim().toLocaleLowerCase() === normalizedLabel
+    );
+    if (matches.length === 1) return matches[0].path;
+  }
+  return currentWorkspace() ?? knownWorkspaces()[0]?.path ?? null;
+};
+
+const syncedChatPaneKey = (turn: ActiveChatTurnSummary): string => {
+  const sourceChatKey = turn.sourceChatKey?.trim();
+  if (sourceChatKey && !expertChatPanes.some((pane) => pane.key === sourceChatKey)) {
+    return sourceChatKey;
+  }
+  return uid("chat-pane-synced");
+};
+
+const adoptMissingActiveChatTurns = async (
+  turns: readonly ActiveChatTurnSummary[],
+): Promise<boolean> => {
+  if (!expertChatsRestored) return false;
+  let changed = false;
+  for (const turn of [...turns].sort((left, right) => left.startedAt - right.startedAt || left.id - right.id)) {
+    if (
+      !chatTurnIsBusy(turn.status)
+      || expertChatPanes.some((pane) => expertChatPaneRepresentsActiveTurn(pane, turn))
+    ) {
+      continue;
+    }
+
+    let snapshot: ChatTurnSnapshot;
+    try {
+      snapshot = await invoke<ChatTurnSnapshot>("chat_turn_status", { id: turn.id });
+    } catch {
+      // Le tour peut se terminer entre le catalogue leger et la lecture de son
+      // snapshot. La prochaine actualisation tentera de rattacher sa discussion.
+      continue;
+    }
+    if (expertChatPanes.some((pane) => expertChatPaneRepresentsActiveTurn(pane, turn))) {
+      continue;
+    }
+
+    const sessionId = snapshot.sessionId?.trim() || turn.sessionId?.trim() || null;
+    const discussion = sessionId
+      ? discussionForSession(allDiscussions(), turn.accountId, sessionId)
+      : null;
+    const pane = createExpertChatPane(discussion, {
+      key: syncedChatPaneKey(turn),
+      sessionId,
+      awaitingDiscussion: !!sessionId && !discussion,
+      accountId: turn.accountId,
+      executionTargetId: turn.nodeId ?? snapshot.nodeId ?? null,
+      pendingWorkspace: workspaceForSyncedChatTurn(turn, snapshot, discussion),
+      mode: "build",
+    });
+    pane.resumeSessionId = sessionId;
+    expertChatPanes.push(pane);
+    if (expertChatDisplayMode === "available" && chatTurnIsBusy(snapshot.status)) {
+      explicitlyOpenedBusyChatVisibilityPins.add(pane.key);
+    }
+    await applyExpertChatTurnSnapshot(pane, snapshot);
+    changed = true;
+  }
+
+  if (changed) {
+    reconcileExpertChatPage();
+    persistExpertChats();
+    if (activeView === "chat") {
+      render();
+      startAllExpertChatWork();
+    }
+  }
+  return changed;
+};
+
 const refreshActiveChatTurns = async (): Promise<boolean> => {
-  if (activeChatTurnsInFlight) return false;
+  if (activeChatTurnsInFlight) {
+    activeChatTurnsRefreshRequested = true;
+    return false;
+  }
   activeChatTurnsInFlight = true;
+  activeChatTurnsRefreshRequested = false;
   try {
     await claimChatOpenRequests();
     const next = await invoke<ActiveChatTurnSummary[]>("list_active_chat_turns");
@@ -14643,12 +16950,27 @@ const refreshActiveChatTurns = async (): Promise<boolean> => {
     activeChatTurns = next;
     activeChatTurnsSidebarSignature = nextSidebarSignature;
 
+    // La colonne de gauche depend uniquement du catalogue leger ci-dessus.
+    // Ne pas attendre l'adoption des chats ni leurs snapshots individuels :
+    // avec beaucoup de panneaux, une requete lente figeait toutes les pastilles.
+    if (sidebarChanged) refreshChatSidebarConversations();
+
+    await adoptMissingActiveChatTurns(next);
     const visiblePanes = new Set(visibleExpertChatPanes());
     await Promise.allSettled(expertChatPanes.map(async (pane) => {
       const candidate =
         activeChatTurnForDiscussion(next, pane.discussion)
-        ?? activeChatTurnBySourceKey(next, pane);
+        ?? activeChatTurnForPaneIdentity(next, pane);
       if (candidate && shouldAdoptActiveChatTurn(pane.turn, candidate)) {
+        if (
+          shouldPinRestoredBusyExpertChat(
+            expertChatDisplayMode,
+            chatTurnIsBusy(pane.turn?.status),
+            chatTurnIsBusy(candidate.status),
+          )
+        ) {
+          explicitlyOpenedBusyChatVisibilityPins.add(pane.key);
+        }
         if (
           pane.turn?.id !== candidate.id ||
           pane.turn.status !== candidate.status
@@ -14680,7 +17002,8 @@ const refreshActiveChatTurns = async (): Promise<boolean> => {
       }
     }));
 
-    if (sidebarChanged) refreshChatSidebarConversations();
+    if (!chatResourceAdmissionPaused()) void drainNextGlobalChatCapacityQueue();
+
     return true;
   } catch {
     // Une panne de cette reconciliation ne doit jamais effacer un etat local
@@ -14688,6 +17011,10 @@ const refreshActiveChatTurns = async (): Promise<boolean> => {
     return false;
   } finally {
     activeChatTurnsInFlight = false;
+    if (activeChatTurnsRefreshRequested) {
+      activeChatTurnsRefreshRequested = false;
+      window.setTimeout(() => void refreshActiveChatTurns(), 0);
+    }
     scheduleRuntimeSyncFlush();
   }
 };
@@ -14710,17 +17037,44 @@ const startActiveChatTurnsPoll = () => {
   syncRuntimeFallbackPolling();
 };
 
+const clearActiveTerminalsPoll = () => {
+  if (activeTerminalsPoll !== null) {
+    clearInterval(activeTerminalsPoll);
+    activeTerminalsPoll = null;
+  }
+};
+
+const stopActiveTerminalsTracking = () => {
+  activeTerminalsTracking = false;
+  clearActiveTerminalsPoll();
+};
+
+const startActiveTerminalsTracking = () => {
+  if (!isRemoteMode()) return;
+  activeTerminalsTracking = true;
+  void refreshActiveTerminals();
+  syncRuntimeFallbackPolling();
+};
+
 function syncRuntimeFallbackPolling(): void {
   const fallback = runtimeSyncState !== "live";
   if (fallback) clearRuntimeSyncRetryTimers();
   messagingModule?.setMessagingRealtimeAvailable(!fallback);
   if (fallback && autonomousAgentsTracking) {
-    if (autonomousAgentsPoll === null) {
-      autonomousAgentsPoll = window.setInterval(
-        () => runWhenPageVisible(() => void refreshAutonomousAgents()),
-        2_000,
-      );
-    }
+    // Les badges restent a jour en arriere-plan, mais le scan complet des
+    // agents ne doit pas concurrencer le chat toutes les deux secondes. On
+    // garde la cadence rapide uniquement sur les vues qui affichent le detail.
+    const interval =
+      activeView === "autonomous"
+      || activeView === "bug-report"
+      || autonomousMonitorOpen
+        ? AUTONOMOUS_ACTIVE_POLL_INTERVAL_MS
+        : AUTONOMOUS_BACKGROUND_POLL_INTERVAL_MS;
+    clearAutonomousAgentsPoll();
+    autonomousAgentsPoll = window.setInterval(
+      () => runWhenPageVisible(() => void refreshAutonomousAgents()),
+      interval,
+    );
   } else {
     clearAutonomousAgentsPoll();
   }
@@ -14729,17 +17083,56 @@ function syncRuntimeFallbackPolling(): void {
     if (activeChatTurnsPoll === null) {
       activeChatTurnsPoll = window.setInterval(
         () => runWhenPageVisible(() => void refreshActiveChatTurns()),
-        1_000,
+        ACTIVE_CHAT_TURNS_FALLBACK_POLL_INTERVAL_MS,
       );
     }
   } else {
     clearActiveChatTurnsPoll();
   }
+
+  if (fallback && activeTerminalsTracking) {
+    if (activeTerminalsPoll === null) {
+      activeTerminalsPoll = window.setInterval(
+        () => runWhenPageVisible(() => void refreshActiveTerminals()),
+        ACTIVE_TERMINALS_FALLBACK_POLL_INTERVAL_MS,
+      );
+    }
+  } else {
+    clearActiveTerminalsPoll();
+  }
 }
+
+const refreshAccountCompletions = async (): Promise<boolean> => {
+  if (!settings || accountCompletionsSyncInFlight) return false;
+  accountCompletionsSyncInFlight = true;
+  try {
+    const freshSettings = await invoke<AppSettings>("load_settings");
+    const freshById = new Map(
+      freshSettings.accounts.map((account) => [account.id, account.completedOn ?? null]),
+    );
+    let changed = false;
+    settings.accounts.forEach((account) => {
+      if (!freshById.has(account.id)) return;
+      const completedOn = freshById.get(account.id) ?? null;
+      if ((account.completedOn ?? null) === completedOn) return;
+      account.completedOn = completedOn;
+      changed = true;
+    });
+    if (changed && activeView === "pool") render();
+    return true;
+  } catch {
+    return false;
+  } finally {
+    accountCompletionsSyncInFlight = false;
+    scheduleRuntimeSyncFlush();
+  }
+};
 
 const runtimeSyncRetryDelay = (topic: RuntimeSyncTopic): number => {
   if (topic === "activeChatTurns") return 1_000;
+  if (topic === "activeTerminals") return 1_000;
   if (topic === "autonomousAgents") return 2_000;
+  if (topic === "accountCompletions") return 3_000;
   return 8_000;
 };
 
@@ -14773,8 +17166,12 @@ const refreshRuntimeSyncTopic = (topic: RuntimeSyncTopic) => {
   let refresh: Promise<boolean>;
   if (topic === "activeChatTurns") {
     refresh = refreshActiveChatTurns();
+  } else if (topic === "activeTerminals") {
+    refresh = refreshActiveTerminals();
   } else if (topic === "autonomousAgents") {
     refresh = refreshAutonomousAgents();
+  } else if (topic === "accountCompletions") {
+    refresh = refreshAccountCompletions();
   } else {
     privateMessagesSyncInFlight = true;
     refresh = loadMessagingModule()
@@ -14801,11 +17198,25 @@ const flushRuntimeSyncUpdates = () => {
     refreshRuntimeSyncTopic("activeChatTurns");
   }
   if (
+    runtimeSyncPendingTopics.has("activeTerminals")
+    && !activeTerminalsInFlight
+  ) {
+    runtimeSyncPendingTopics.delete("activeTerminals");
+    refreshRuntimeSyncTopic("activeTerminals");
+  }
+  if (
     runtimeSyncPendingTopics.has("autonomousAgents")
     && !autonomousAgentsInFlight
   ) {
     runtimeSyncPendingTopics.delete("autonomousAgents");
     refreshRuntimeSyncTopic("autonomousAgents");
+  }
+  if (
+    runtimeSyncPendingTopics.has("accountCompletions")
+    && !accountCompletionsSyncInFlight
+  ) {
+    runtimeSyncPendingTopics.delete("accountCompletions");
+    refreshRuntimeSyncTopic("accountCompletions");
   }
   if (
     runtimeSyncPendingTopics.has("privateMessages")
@@ -14826,7 +17237,9 @@ const handleRuntimeSyncMessage = (message: RuntimeSyncMessage) => {
   if (message.type === "pong") return;
   if (message.type === "hello" || message.type === "resync") {
     queueRuntimeSyncUpdate("activeChatTurns");
+    queueRuntimeSyncUpdate("activeTerminals");
     queueRuntimeSyncUpdate("autonomousAgents");
+    queueRuntimeSyncUpdate("accountCompletions");
     queueRuntimeSyncUpdate("privateMessages");
     return;
   }
@@ -14834,7 +17247,9 @@ const handleRuntimeSyncMessage = (message: RuntimeSyncMessage) => {
     message.type === "change"
     && (
       message.topic === "activeChatTurns"
+      || message.topic === "activeTerminals"
       || message.topic === "autonomousAgents"
+      || message.topic === "accountCompletions"
       || message.topic === "privateMessages"
     )
   ) {
@@ -15948,6 +18363,17 @@ const executeAutonomousProposal = async (
     openAutonomousMonitor(existing.id);
     return;
   }
+  const account = accountById(sourceAgent.accountId);
+  const selection = validatedAccountModelSelection(
+    account,
+    sourceAgent.model?.trim() || accountModel(account),
+    sourceAgent.reasoningEffort,
+  );
+  if (!account || selection.error) {
+    statusText = selection.error ?? "Le compte de cette proposition n'est plus disponible";
+    render();
+    return;
+  }
 
   autonomousBusyId = `proposal:${proposal.id}`;
   statusText = `Lancement de « ${proposal.title} »`;
@@ -15964,8 +18390,8 @@ const executeAutonomousProposal = async (
         mode: "build",
         requireUserReview: true,
         connectors: [],
-        model: sourceAgent.model?.trim() || null,
-        reasoningEffort: sourceAgent.reasoningEffort?.trim() || null,
+        model: selection.model,
+        reasoningEffort: selection.reasoningEffort,
         intervalSeconds: 15 * 60,
         triggerKind: "schedule",
         watchPaths: [],
@@ -16591,7 +19017,7 @@ const autonomousAgentEditDraftFromSnapshot = (
     mode: agent.mode,
     model,
     reasoningEffort: accountProvider(account) === "codex"
-      ? reasoningEffortForChatModel(account, model, agent.reasoningEffort)
+      ? reasoningEffortForChatModel(account, model, agent.reasoningEffort) ?? ""
       : "",
     connectors: normalizeAutonomousConnectors(agent.connectors),
     mobileNotificationsEnabled: !!agent.mobileNotificationsEnabled,
@@ -17553,6 +19979,17 @@ const bindBugReportPanelUi = (): void => {
       document.querySelector<HTMLInputElement>("#bugReportProjectDir")?.reportValidity();
       return;
     }
+    const selection = validatedAccountModelSelection(
+      account,
+      accountModel(account),
+      accountReasoningEffort(account),
+    );
+    if (selection.error) {
+      bugReportFeedback = { tone: "error", message: selection.error };
+      statusText = selection.error;
+      syncBugReportPanelUi();
+      return;
+    }
 
     bugReportBusy = true;
     bugReportFeedback = null;
@@ -17576,8 +20013,8 @@ const bindBugReportPanelUi = (): void => {
             mode: "build",
             requireUserReview: bugReportDraft.requireUserReview,
             connectors: [],
-            model: accountModel(account),
-            reasoningEffort: accountProvider(account) === "codex" ? accountReasoningEffort(account) : null,
+            model: selection.model,
+            reasoningEffort: selection.reasoningEffort,
             intervalSeconds: 15 * 60,
             triggerKind: "schedule",
             watchPaths: [],
@@ -17663,6 +20100,16 @@ const saveAutonomousAgentEdit = async (id: string): Promise<void> => {
     render();
     return;
   }
+  const selection = validatedAccountModelSelection(
+    account,
+    draft.model.trim() || accountModel(account),
+    draft.reasoningEffort,
+  );
+  if (selection.error) {
+    statusText = selection.error;
+    render();
+    return;
+  }
 
   autonomousBusyId = id;
   statusText = "Enregistrement de toute la configuration de l’agent";
@@ -17685,10 +20132,6 @@ const saveAutonomousAgentEdit = async (id: string): Promise<void> => {
       automaticallyPaused = true;
     }
 
-    const model = draft.model.trim() || accountModel(account);
-    const reasoningEffort = provider === "codex"
-      ? reasoningEffortForChatModel(account, model, draft.reasoningEffort)
-      : null;
     const updated = await invoke<AutonomousAgentSnapshot>("update_autonomous_agent", {
       id,
       request: {
@@ -17699,8 +20142,8 @@ const saveAutonomousAgentEdit = async (id: string): Promise<void> => {
         projectDir: projectDir || null,
         mode: draft.mode,
         requireUserReview: draft.requireUserReview,
-        model,
-        reasoningEffort,
+        model: selection.model,
+        reasoningEffort: selection.reasoningEffort,
         connectors: provider === "codex" ? draft.connectors : [],
         mobileNotificationsEnabled: draft.mobileNotificationsEnabled,
         telegramNotificationChannelId:
@@ -17846,7 +20289,7 @@ const bindAutonomousAgentEditUi = (): void => {
         draft.accountId = account.id;
         draft.model = accountModel(account);
         draft.reasoningEffort = accountProvider(account) === "codex"
-          ? reasoningEffortForChatModel(account, draft.model, accountReasoningEffort(account))
+          ? reasoningEffortForChatModel(account, draft.model, accountReasoningEffort(account)) ?? ""
           : "";
         if (accountProvider(account) !== "codex") draft.connectors = [];
         void loadChatModelCatalog(account.id);
@@ -18306,6 +20749,26 @@ const bindAutonomousPanelUi = () => {
       render();
       return;
     }
+    const selection = validatedAccountModelSelection(
+      account,
+      accountModel(account),
+      accountReasoningEffort(account),
+    );
+    const workerSelectionError = workerAccountIds
+      .map((workerAccountId) => {
+        const workerAccount = accountById(workerAccountId);
+        return validatedAccountModelSelection(
+          workerAccount,
+          accountModel(workerAccount),
+          accountReasoningEffort(workerAccount),
+        ).error;
+      })
+      .find(Boolean) ?? null;
+    if (selection.error || workerSelectionError) {
+      statusText = selection.error ?? workerSelectionError ?? "Sélection de modèle invalide";
+      render();
+      return;
+    }
     autonomousBusyId = "create";
     statusText = launchOrchestration
       ? "Préparation de l'agent puis lancement de son orchestration"
@@ -18335,8 +20798,8 @@ const bindAutonomousPanelUi = () => {
           whatsappNotificationChannelId: autonomousWhatsAppNotifications
             ? connectedWhatsAppChannelId()
             : null,
-          model: accountModel(account),
-          reasoningEffort: accountProvider(account) === "codex" ? accountReasoningEffort(account) : null,
+          model: selection.model,
+          reasoningEffort: selection.reasoningEffort,
           intervalSeconds: autonomousIntervalSeconds,
           triggerKind: eventTriggered ? "workspace_change" : "schedule",
           watchPaths: eventTriggered ? watchPaths : [],
@@ -18433,6 +20896,17 @@ const bindAutonomousPanelUi = () => {
       const id = select.dataset.autonomousAccount;
       const account = accountById(select.value);
       if (!id || !account || autonomousBusyId) return;
+      const agent = autonomousAgents.find((candidate) => candidate.id === id);
+      const selection = validatedAccountModelSelection(
+        account,
+        agent?.model?.trim() || accountModel(account),
+        agent?.reasoningEffort ?? accountReasoningEffort(account),
+      );
+      if (selection.error) {
+        statusText = selection.error;
+        render();
+        return;
+      }
       autonomousBusyId = id;
       statusText = `Réaffectation de l'agent à ${account.label}`;
       render();
@@ -18856,7 +21330,7 @@ const renderOrchestrationPanel = (): string => {
             <div class="orchestration-form-grid">
               <label><span>Nom <small>optionnel</small></span><input id="orchestrationName" maxlength="120" value="${escapeAttr(orchestrationNameDraft)}" placeholder="Ex. Nouveau système de permissions" /></label>
               <label><span>Compte orchestrateur</span><select id="orchestrationAccount" required ${accountOptions ? "" : "disabled"}>${accountOptions || '<option value="">Aucun compte</option>'}</select></label>
-              <label><span>Workers <small>hors orchestrateur</small></span><span class="orchestration-worker-count"><input id="orchestrationWorkerCount" type="number" min="1" max="12" step="1" required value="${orchestrationWorkerCount}" /><small id="orchestrationTeamTotal">${orchestrationWorkerCount + 1} agents au total</small></span></label>
+              <label><span>Workers <small>hors orchestrateur</small></span><span class="orchestration-worker-count"><input id="orchestrationWorkerCount" type="number" min="1" max="${MAX_ORCHESTRATION_WORKER_COUNT}" step="1" required value="${orchestrationWorkerCount}" /><small id="orchestrationTeamTotal">${orchestrationWorkerCount + 1} agents au total</small></span></label>
               <label><span>Délai de validation</span><span class="orchestration-timeout"><input id="orchestrationTestTimeout" type="number" min="5" max="1800" value="${orchestrationTestTimeoutSeconds}" /><small>secondes</small></span></label>
             </div>
             <section class="orchestration-create-team">
@@ -18951,13 +21425,13 @@ const bindOrchestrationPanelUi = () => {
     if (Number.isInteger(value)) orchestrationWorkerCount = value;
     workerCountInput.setCustomValidity("");
     const total = document.querySelector<HTMLElement>("#orchestrationTeamTotal");
-    if (total && Number.isInteger(value) && value >= 1 && value <= 12) {
+    if (total && Number.isInteger(value) && value >= 1 && value <= MAX_ORCHESTRATION_WORKER_COUNT) {
       total.textContent = `${value + 1} agents au total`;
     }
   });
   workerCountInput?.addEventListener("change", () => {
     const value = Number(workerCountInput.value);
-    if (!Number.isInteger(value) || value < 1 || value > 12) return;
+    if (!Number.isInteger(value) || value < 1 || value > MAX_ORCHESTRATION_WORKER_COUNT) return;
     orchestrationWorkerCount = value;
     normalizeOrchestrationWorkerDrafts(
       value,
@@ -19000,6 +21474,26 @@ const bindOrchestrationPanelUi = () => {
       render();
       return;
     }
+    const selection = validatedAccountModelSelection(
+      account,
+      accountModel(account),
+      accountReasoningEffort(account),
+    );
+    const workerSelectionError = workerAccountIds
+      .map((workerAccountId) => {
+        const workerAccount = accountById(workerAccountId);
+        return validatedAccountModelSelection(
+          workerAccount,
+          accountModel(workerAccount),
+          accountReasoningEffort(workerAccount),
+        ).error;
+      })
+      .find(Boolean) ?? null;
+    if (selection.error || workerSelectionError) {
+      statusText = selection.error ?? workerSelectionError ?? "Sélection de modèle invalide";
+      render();
+      return;
+    }
     orchestrationBusyId = "create";
     statusText = "Création du sandbox orchestrateur";
     render();
@@ -19013,8 +21507,8 @@ const bindOrchestrationPanelUi = () => {
           orchestratorAccountId: account.id,
           workerAccountIds,
           projectDir: orchestrationProjectDir.trim(),
-          model: accountModel(account),
-          reasoningEffort: accountProvider(account) === "codex" ? accountReasoningEffort(account) : null,
+          model: selection.model,
+          reasoningEffort: selection.reasoningEffort,
           testCommand: orchestrationTestCommandDraft.trim(),
           testTimeoutSeconds: Math.max(5, Math.min(1800, Math.round(orchestrationTestTimeoutSeconds))),
         },
@@ -19055,12 +21549,24 @@ const bindOrchestrationPanelUi = () => {
         ? Number(select.dataset.orchestrationWorkerIndex)
         : undefined;
       const accountId = select.value;
+      const account = accountById(accountId);
       if (
         !id
         || (role !== "orchestrator" && role !== "worker")
         || (role === "worker" && (!Number.isInteger(workerIndex) || !workerIndex))
-        || !accountById(accountId)
+        || !account
       ) return;
+      const run = orchestrations.find((candidate) => candidate.id === id);
+      const selection = validatedAccountModelSelection(
+        account,
+        run?.model?.trim() || accountModel(account),
+        run?.reasoningEffort ?? accountReasoningEffort(account),
+      );
+      if (selection.error) {
+        statusText = selection.error;
+        render();
+        return;
+      }
       const key = orchestrationAssignmentKey(id, role, workerIndex);
       orchestrationAssignmentBusy = key;
       const memberLabel = role === "orchestrator" ? "l’orchestrateur" : `le worker ${workerIndex}`;
@@ -19630,6 +22136,12 @@ const appViewTitle = (view: AppView): string => {
       return "Limites";
     case "dashboard":
       return "Statistiques";
+    case "tracking":
+      return "Tracking Duello";
+    case "duello-bank":
+      return "Banque Duello";
+    case "freebuff-cloud":
+      return "Freebuff Cloud";
     case "video":
       return "Studio IA";
     case "transcription":
@@ -19652,6 +22164,10 @@ const appViewTitle = (view: AppView): string => {
       return "Messagerie";
     case "tiktok":
       return "Comptes TikTok";
+    case "devices":
+      return "Appareils";
+    case "android":
+      return "Android USB";
     case "discussions":
       return "Historique";
     case "history":
@@ -19770,6 +22286,10 @@ const resetAllKeyboardShortcuts = (): void => {
 };
 
 const captureKeyboardShortcut = (event: KeyboardEvent): boolean => {
+  if (activeView !== "settings") {
+    keyboardShortcutCaptureId = null;
+    return false;
+  }
   const id = keyboardShortcutCaptureId;
   if (!id) return false;
   event.preventDefault();
@@ -20681,6 +23201,7 @@ const bindWhatsAppConnectionUi = (): void => {
 
 const renderSettingsPanel = (): string => {
   const accountCount = settings?.accounts.length ?? 0;
+  const proxyCount = settings?.proxies.length ?? 0;
   return `
     <div class="panel settings-panel">
       <div class="panel-head">
@@ -20689,6 +23210,7 @@ const renderSettingsPanel = (): string => {
           <p class="panel-sub">Apparence, raccourcis, comptes et configuration de l'application</p>
         </div>
       </div>
+      ${maintenance.renderMaintenanceCard()}
       <section class="appearance-settings" aria-labelledby="appearanceSettingsTitle">
         <div class="appearance-settings-copy">
           <span class="settings-card-icon"><i data-lucide="sun"></i></span>
@@ -20899,6 +23421,13 @@ const renderSettingsPanel = (): string => {
             <small>${accountCount} compte(s)</small>
           </span>
         </button>
+        <button type="button" id="settingsProxies" class="settings-card">
+          <span class="settings-card-icon"><i data-lucide="network"></i></span>
+          <span class="settings-card-copy">
+            <strong>Proxys</strong>
+            <small>${proxyCount} configuré(s) · ${settings?.proxyControlsEnabled === false ? "désactivés" : "actifs"}</small>
+          </span>
+        </button>
         <button type="button" id="settingsAgents" class="settings-card">
           <span class="settings-card-icon"><i data-lucide="bot"></i></span>
           <span class="settings-card-copy">
@@ -20964,6 +23493,12 @@ const renderActiveAppPanel = (): string => {
       return renderLimitsPanel();
     case "dashboard":
       return renderDashboardPanel();
+    case "tracking":
+      return trackingViewModule?.renderTrackingPanel() ?? "";
+    case "duello-bank":
+      return duelloBankModule?.renderDuelloBankPanel() ?? "";
+    case "freebuff-cloud":
+      return freebuffCloudModule?.renderFreebuffCloudPanel() ?? "";
     case "video":
       return videoModule?.renderVideoPanel() ?? "";
     case "transcription":
@@ -20992,6 +23527,12 @@ const renderActiveAppPanel = (): string => {
       return messagingModule?.renderMessagingPanel() ?? "";
     case "tiktok":
       return tiktokAccountsModule?.renderTikTokAccountsPanel({
+        remoteMode: isRemoteMode(),
+      }) ?? "";
+    case "devices":
+      return deviceFleetModule?.renderDeviceFleetPanel({ remoteMode: isRemoteMode() }) ?? "";
+    case "android":
+      return androidControlModule?.renderAndroidControlPanel({
         remoteMode: isRemoteMode(),
       }) ?? "";
     case "discussions":
@@ -21224,6 +23765,32 @@ const renderTerminalEnvironmentMenu = (): string => {
 // Tuile de terminal du mur expert. Extraite de la grille de terminaux pour
 // pouvoir etre posee telle quelle dans le mur de chats : une tuile de chat et
 // une tuile de terminal partagent alors la meme grille, cote a cote.
+const renderFreebuffTerminalAccountSwitch = (session: TerminalSession): string => {
+  const current = accountById(session.accountId);
+  if (accountProvider(current) !== "freebuff") return "";
+  const accounts = (settings?.accounts ?? []).filter(
+    (account) => accountProvider(account) === "freebuff",
+  );
+  const switching = freebuffTerminalAccountSwitches.has(session.key);
+  const hasAvailableTarget = accounts.some(
+    (account) => account.id !== session.accountId && !accountSessionBusy(account),
+  );
+  const options = accounts.map((account) => {
+    const selected = account.id === session.accountId;
+    const unavailable = !selected && accountSessionBusy(account);
+    return `<option value="${escapeAttr(account.id)}"${selected ? " selected" : ""}${unavailable ? " disabled" : ""}>${escapeHtml(account.label)}${unavailable ? " · occupé" : ""}</option>`;
+  }).join("");
+  const title = switching
+    ? "Transfert Freebuff en cours"
+    : hasAvailableTarget
+      ? "Changer de compte en transférant cette conversation"
+      : "Aucun autre compte Freebuff disponible";
+  return `<label class="freebuff-terminal-account-switch" title="${escapeAttr(title)}">
+    <i data-lucide="repeat-2"></i>
+    <select data-freebuff-terminal-account="${escapeAttr(session.key)}" aria-label="Changer le compte Freebuff de ce terminal" ${switching || !hasAvailableTarget ? "disabled" : ""}>${options}</select>
+  </label>`;
+};
+
 const renderExpertTerminalPane = (session: TerminalSession, index: number): string => {
   const chatSidebarHidden = displayedChatSidebarWidth() === 0;
   const sessionAgentLabel = agentById(session.agentId)?.label ?? session.agentId;
@@ -21231,9 +23798,14 @@ const renderExpertTerminalPane = (session: TerminalSession, index: number): stri
     ? "Authentification isolee du compte"
     : session.workspacePath ?? session.folderPath ?? "Dossier en preparation";
   const workspaceLabel = workspaceBaseName(workspaceDetail);
+  const accountSwitch = renderFreebuffTerminalAccountSwitch(session);
+  const newChatButton = session.loginOnly ? "" : `<button type="button" class="expert-pane-new-chat" data-new-chat-terminal="${escapeAttr(session.key)}" title="Ouvrir un autre chat dans cet environnement" aria-label="Ouvrir un autre chat dans cet environnement"><i data-lucide="message-square-plus"></i></button>`;
   return `
     <article class="expert-terminal-pane ${session.key === activeTerminalKey ? "active" : ""} ${session.running ? "running" : ""} ${session.key === expertTerminalFullscreenKey ? "is-fullscreen" : ""}" data-expert-terminal-pane="${escapeAttr(session.key)}">
-      <header class="expert-terminal-pane-head">
+      <header class="expert-terminal-pane-head ${accountSwitch ? "has-freebuff-account-switch" : ""} ${newChatButton ? "has-new-chat" : ""}">
+        <button type="button" class="expert-pane-mobile-menu" data-toggle-chat-sidebar title="Afficher le menu de gauche" aria-label="Afficher le menu de gauche" aria-controls="chatAppSidebar">
+          <span class="expert-pane-mobile-menu-arrow" aria-hidden="true"></span>
+        </button>
         <button type="button" class="expert-pane-identity" data-focus-terminal="${escapeAttr(session.key)}" title="${escapeAttr(`${workspaceDetail} · Survolez puis appuyez sur la barre d'espace pour agrandir`)}">
           <span class="expert-pane-index">${index + 1}</span>
           <span class="live-dot ${session.running ? "on" : ""} ${terminalActivityStatus(session) === "running" ? "thinking" : ""}" data-terminal-dot="${escapeAttr(session.key)}"></span>
@@ -21242,18 +23814,24 @@ const renderExpertTerminalPane = (session: TerminalSession, index: number): stri
             <small>${escapeHtml(`${sessionAgentLabel} · ${workspaceLabel}`)}</small>
           </span>
         </button>
-        <span class="expert-pane-status">${escapeHtml(session.ptyId ? `PTY ${session.ptyId}` : session.status)}</span>
+        ${accountSwitch}
+        ${newChatButton}
+        <span class="expert-pane-status" data-terminal-status="${escapeAttr(session.key)}">
+          <button type="button" class="expert-terminal-keyboard-badge" data-terminal-keyboard="${escapeAttr(session.key)}" data-terminal-keyboard-tone="off" title="État du clavier de ce terminal"><span class="expert-terminal-keyboard-dot" aria-hidden="true"></span><span data-terminal-keyboard-label>Clavier</span></button>
+          <span class="expert-pane-status-text">${escapeHtml(session.ptyId ? `PTY ${session.ptyId}` : session.status)}</span>
+        </span>
         <button type="button" class="expert-pane-toggle-chat" data-toggle-chat-sidebar title="${chatSidebarHidden ? "Afficher la fenêtre de chat" : "Masquer la fenêtre de chat"}" aria-label="${chatSidebarHidden ? "Afficher la fenêtre de chat" : "Masquer la fenêtre de chat"}" aria-pressed="${!chatSidebarHidden}">
           <i data-lucide="${chatSidebarHidden ? "panel-left-open" : "panel-left-close"}"></i>
         </button>
         <button type="button" class="expert-pane-fullscreen" data-toggle-terminal-fullscreen="${escapeAttr(session.key)}" title="${session.key === expertTerminalFullscreenKey ? "Quitter le plein ecran" : "Afficher ce terminal en plein ecran"}" aria-label="${session.key === expertTerminalFullscreenKey ? "Quitter le plein ecran" : "Afficher ce terminal en plein ecran"}" aria-pressed="${session.key === expertTerminalFullscreenKey}">
           <i data-lucide="${session.key === expertTerminalFullscreenKey ? "minimize-2" : "maximize-2"}"></i>
         </button>
-        <button type="button" class="expert-pane-close" data-close-terminal="${escapeAttr(session.key)}" title="Fermer ce terminal" aria-label="Fermer ${escapeAttr(terminalTitle(session))}">
+        <button type="button" class="expert-pane-close" data-close-terminal="${escapeAttr(session.key)}" title="Masquer ce terminal" aria-label="Masquer ${escapeAttr(terminalTitle(session))} sans supprimer son chat">
           <i data-lucide="x"></i>
         </button>
       </header>
       <div class="expert-terminal-host" data-terminal-host="${escapeAttr(session.key)}"></div>
+      ${termInputProbeActive() ? `<div class="probe-term-status" data-probe-status="${escapeAttr(session.key)}">…</div>` : ""}
     </article>
   `;
 };
@@ -21309,7 +23887,7 @@ const renderExpertTerminalGrid = () => {
   const rows = Math.ceil(slotCount / columns);
   const panes = sessions.map(renderExpertTerminalPane).join("");
   const emptySlots = loginSession ? "" : Array.from({ length: Math.max(0, columns * rows - sessions.length) }, (_, index) => `
-    <button type="button" class="expert-terminal-empty" data-add-expert-terminal ${terminalSessions.length >= EXPERT_MAX_TERMINALS ? "disabled" : ""}>
+    <button type="button" class="expert-terminal-empty" data-add-expert-terminal>
       <span class="expert-empty-icon"><i data-lucide="plus"></i></span>
       <strong>${sessions.length === 0 && index === 0 ? "Ouvrir le premier terminal" : "Ajouter un terminal"}</strong>
       <small>Agent au choix dans cet environnement</small>
@@ -21331,7 +23909,7 @@ const renderExpertTerminalGrid = () => {
           ${loginSession
             ? `<span class="folder-isolation-chip"><i data-lucide="shield-check"></i>Terminal temporaire</span>`
             : `<button type="button" id="folderNewChat" class="tool-button" title="Nouvelle conversation dans cet environnement"><i data-lucide="messages-square"></i><span>Chat</span></button>
-              <button type="button" id="folderNewTerminal" class="tool-button primary" title="Nouveau terminal dans ${escapeAttr(folderLabel)}" ${terminalSessions.length >= EXPERT_MAX_TERMINALS ? "disabled" : ""}><i data-lucide="square-terminal"></i><span>Terminal</span></button>`}
+              <button type="button" id="folderNewTerminal" class="tool-button primary" title="Nouveau terminal dans ${escapeAttr(folderLabel)}"><i data-lucide="square-terminal"></i><span>Terminal</span></button>`}
         </span>
       </header>
       <div class="folder-agent-summary">
@@ -21463,10 +24041,9 @@ const renderExpertChatGrid = () => {
   expertChatPage = clampExpertChatPage(expertChatPage, count, effectivePageSizeMode);
   const totalPages = expertChatPageTotal();
   const pagePanes = visibleExpertChatPanes();
-  const wallTerminals = expertChatWallTerminals();
   const pageSize = resolveExpertChatPageSize(effectivePageSizeMode);
-  const { columns, rows } = responsiveExpertChatGridDimensions(pagePanes.length + wallTerminals.length);
-  renderedExpertChatLayoutSignature = expertChatLayoutSignature(pagePanes.length + wallTerminals.length);
+  const { columns, rows } = responsiveExpertChatGridDimensions(pagePanes.length);
+  renderedExpertChatLayoutSignature = expertChatLayoutSignature(pagePanes.length);
   const firstVisible = count ? expertChatPage * pageSize + 1 : 0;
   const lastVisible = expertChatPage * pageSize + pagePanes.length;
   const environment = knownWorkspaces().find(
@@ -21482,7 +24059,9 @@ const renderExpertChatGrid = () => {
     })
     .sort((left, right) => right.lastActivity - left.lastActivity);
   const latestDiscussion = environmentDiscussions[0] ?? null;
-  const latestTitle = latestDiscussion?.title?.trim() || "Conversation sans titre";
+  const latestTitle = latestDiscussion?.title?.trim()
+    || latestDiscussion?.preview?.trim()
+    || "Conversation sans titre";
   const emptyState = `
     <div class="expert-chat-environment-empty">
       <span class="expert-chat-empty-mark"><i data-lucide="messages-square"></i></span>
@@ -21495,7 +24074,7 @@ const renderExpertChatGrid = () => {
           ? `Travaillez dans <strong>${escapeHtml(environmentLabel)}</strong> avec le compte et le modèle de votre choix.`
           : "Ajoutez un compte agent pour commencer à travailler dans cet environnement."}</p>
       </div>
-      ${latestDiscussion ? `<button type="button" class="expert-chat-empty-recent" data-open-chat="${escapeAttr(latestDiscussion.sessionId)}" title="Reprendre ${escapeAttr(latestTitle)}">
+      ${latestDiscussion ? `<button type="button" class="expert-chat-empty-recent" data-open-chat="${escapeAttr(latestDiscussion.sessionId)}" data-open-account="${escapeAttr(latestDiscussion.accountId)}" title="Reprendre ${escapeAttr(latestTitle)}">
         <span><i data-lucide="history"></i></span>
         <span><small>Dernière discussion</small><strong>${escapeHtml(latestTitle)}</strong><em>${escapeHtml(latestDiscussion.accountLabel)}</em></span>
         <i data-lucide="arrow-right"></i>
@@ -21570,10 +24149,7 @@ const renderExpertChatGrid = () => {
         <i data-lucide="chevron-down"></i>
       </button>
       <div class="expert-chat-wall" style="--expert-chat-columns: ${columns}; --expert-chat-rows: ${rows}" data-responsive-page-size="${pageSize}" aria-label="Chats ${firstVisible} a ${lastVisible}">
-        ${[
-          ...pagePanes.map(renderExpertChatPane),
-          ...wallTerminals.map(renderExpertTerminalPane),
-        ].join("") || wallEmptyState}
+        ${pagePanes.map(renderExpertChatPane).join("") || wallEmptyState}
       </div>
     </section>`;
 };
@@ -21606,7 +24182,6 @@ const renderChatContextTasks = (tasks: readonly TaskItem[]): string => {
 
 const renderChatFirstShell = () => {
   const isChat = activeView === "chat";
-  const tutorialNeedsAttention = !tutorialHasStarted();
   const contextTasks = taskItemsForEnvironment(
     loadTaskItems(accountScopedStorage, currentTaskAccountId()),
     currentWorkspace(),
@@ -21646,12 +24221,13 @@ const renderChatFirstShell = () => {
   document.body.classList.remove(
     "m-drawer-open",
     "m-sheet-open",
+    "chat-context-sidebar-open",
     "chat-sidebar-resizing",
     "chat-context-sidebar-resizing",
   );
 
   app.innerHTML = `
-    <div class="layout chat-app-layout ${isChat ? "is-chat" : "is-admin"} ${activeView === "tutorial" ? "is-tutorial" : ""} ${activeView === "autonomous" ? "is-autonomous" : ""} ${activeView === "bug-report" ? "is-bug-report" : ""} ${activeView === "orchestration" ? "is-orchestration" : ""} ${visibleSidebarWidth === 0 ? "is-sidebar-collapsed" : ""} ${visibleContextSidebarWidth === CHAT_CONTEXT_SIDEBAR_COLLAPSED_WIDTH ? "is-context-sidebar-collapsed" : ""} ${contextSidebarCompact ? "is-context-sidebar-compact" : ""}" style="--chat-sidebar-width: ${visibleSidebarWidth}px; --chat-context-sidebar-width: ${visibleContextSidebarWidth}px">
+    <div class="layout chat-app-layout ${isChat ? "is-chat" : "is-admin"} ${activeView === "terminal" ? "is-terminal" : ""} ${activeView === "tutorial" ? "is-tutorial" : ""} ${activeView === "autonomous" ? "is-autonomous" : ""} ${activeView === "bug-report" ? "is-bug-report" : ""} ${activeView === "orchestration" ? "is-orchestration" : ""} ${visibleSidebarWidth === 0 ? "is-sidebar-collapsed" : ""} ${visibleContextSidebarWidth === CHAT_CONTEXT_SIDEBAR_COLLAPSED_WIDTH ? "is-context-sidebar-collapsed" : ""} ${contextSidebarCompact ? "is-context-sidebar-compact" : ""}" style="--chat-sidebar-width: ${visibleSidebarWidth}px; --chat-context-sidebar-width: ${visibleContextSidebarWidth}px">
       <aside class="sidebar chat-app-sidebar" id="chatAppSidebar">
         <header class="chat-side-brand">
           <button type="button" id="chatHome" class="chat-brand-button" title="Accueil des conversations">
@@ -21761,6 +24337,12 @@ const renderChatFirstShell = () => {
           <button type="button" id="tiktokToggle" class="${activeView === "tiktok" ? "active" : ""}" title="Connecter et sélectionner les comptes émetteurs TikTok" ${activeView === "tiktok" ? 'aria-current="page"' : ""}>
             <span class="chat-context-icon"><i data-lucide="music-2"></i></span><span class="chat-context-copy"><strong>TikTok</strong><small>Comptes émetteurs</small></span>
           </button>
+          <button type="button" id="devicesToggle" class="${activeView === "devices" ? "active" : ""}" title="Contrôler les appareils Android et iOS reliés en USB" ${activeView === "devices" ? 'aria-current="page"' : ""}>
+            <span class="chat-context-icon"><i data-lucide="usb"></i></span><span class="chat-context-copy"><strong>Appareils</strong><small>Android et iOS · USB</small></span>
+          </button>
+          <button type="button" id="androidToggle" class="${activeView === "android" ? "active" : ""}" title="Afficher et contrôler un appareil Android connecté en USB" ${activeView === "android" ? 'aria-current="page"' : ""}>
+            <span class="chat-context-icon"><i data-lucide="smartphone"></i></span><span class="chat-context-copy"><strong>Android</strong><small>Écran et contrôle USB</small></span>
+          </button>
           <button type="button" id="tasksToggle" class="${activeView === "tasks" ? "active" : ""}" title="Gérer les tâches" ${activeView === "tasks" ? 'aria-current="page"' : ""}>
             <span class="chat-context-icon"><i data-lucide="list-checks"></i></span><span class="chat-context-copy"><strong>Tâches</strong><small>À faire et priorités</small></span><b class="chat-side-task-count" data-task-nav-count ${activeTaskCount ? "" : "hidden"} aria-label="${activeTaskCount} tâche${activeTaskCount > 1 ? "s" : ""} à faire">${activeTaskCount > 99 ? "99+" : activeTaskCount}</b>
           </button>
@@ -21769,9 +24351,8 @@ const renderChatFirstShell = () => {
           </button>
 
           <span class="chat-context-section-label">Ressources</span>
-          <button type="button" id="tutorialToggle" class="${activeView === "tutorial" ? "active" : ""}" title="Découvrir le fonctionnement de Switch" ${activeView === "tutorial" ? 'aria-current="page"' : ""}>
-            <span class="chat-context-icon"><i data-lucide="compass"></i></span><span class="chat-context-copy"><strong>Tuto</strong><small>Parcours guidé</small></span>
-            ${tutorialNeedsAttention ? '<b class="tutorial-nav-badge" aria-label="Nouveau parcours">Nouveau</b>' : ""}
+          <button type="button" id="proxyToggle" title="Gérer les proxys des comptes">
+            <span class="chat-context-icon"><i data-lucide="network"></i></span><span class="chat-context-copy"><strong>Proxy</strong><small>Adresses par compte</small></span>
           </button>
           <button type="button" id="promptsToggle" class="${activeView === "prompts" ? "active" : ""}" title="Bibliothèque de prompts" ${activeView === "prompts" ? 'aria-current="page"' : ""}>
             <span class="chat-context-icon"><i data-lucide="message-square-text"></i></span><span class="chat-context-copy"><strong>Prompts</strong><small>Bibliothèque personnelle</small></span>
@@ -21787,6 +24368,15 @@ const renderChatFirstShell = () => {
           <button type="button" id="dashboardToggle" class="${activeView === "dashboard" ? "active" : ""}" title="Statistiques d'utilisation" ${activeView === "dashboard" ? 'aria-current="page"' : ""}>
             <span class="chat-context-icon"><i data-lucide="bar-chart-3"></i></span><span class="chat-context-copy"><strong>Stats</strong><small>Usage et activité</small></span>
           </button>
+          ${isRemoteMode() ? `<button type="button" id="trackingToggle" class="${activeView === "tracking" ? "active" : ""}" title="Liens de tracking Duello" ${activeView === "tracking" ? 'aria-current="page"' : ""}>
+            <span class="chat-context-icon"><i data-lucide="route"></i></span><span class="chat-context-copy"><strong>Tracking</strong><small>5 clics · 1 jour</small></span>
+          </button>` : ""}
+          ${isRemoteMode() ? `<button type="button" id="duelloBankToggle" class="${activeView === "duello-bank" ? "active" : ""}" title="Créditer et suivre les portefeuilles Duello" ${activeView === "duello-bank" ? 'aria-current="page"' : ""}>
+            <span class="chat-context-icon"><i data-lucide="landmark"></i></span><span class="chat-context-copy"><strong>Banque Duello</strong><small>Crédits · Stripe Connect</small></span>
+          </button>` : ""}
+          ${isRemoteMode() ? `<button type="button" id="freebuffCloudToggle" class="${activeView === "freebuff-cloud" ? "active" : ""}" title="Connecter et piloter tes projets Freebuff Cloud" ${activeView === "freebuff-cloud" ? 'aria-current="page"' : ""}>
+            <span class="chat-context-icon"><i data-lucide="cloud"></i></span><span class="chat-context-copy"><strong>Freebuff Cloud</strong><small>Projets, previews et sessions</small></span>
+          </button>` : ""}
           <button type="button" id="limitsToggle" class="${activeView === "limits" ? "active" : ""}" title="Limites des comptes" ${activeView === "limits" ? 'aria-current="page"' : ""}>
             <span class="chat-context-icon"><i data-lucide="calendar-clock"></i></span><span class="chat-context-copy"><strong>Limites</strong><small>Quotas et réinitialisations</small></span>
           </button>
@@ -21827,11 +24417,13 @@ const renderChatFirstShell = () => {
     </div>
     ${renderAutonomousMonitor()}
     ${renderDiscussionArchiveModal()}
+    ${renderTerminalDeleteModal()}
     ${renderNewChatModal()}
     ${renderAutonomousOrchestrationPromotionModal()}
     ${renderAutonomousChatEditor()}
     ${renderOrchestrationConversionModal()}
     ${renderNewTerminalModal()}
+    ${renderProxyManagerModal()}
     ${renderAgentsModal()}
     ${renderWorkspaceModal()}
     ${renderTerminalEnvironmentMenu()}
@@ -21852,6 +24444,7 @@ const renderChatFirstShell = () => {
 const render = () => {
   if (activeView !== "forum") forumModule?.stopForumPolling();
   messagingModule?.setMessagingVisible(activeView === "messaging");
+  if (activeView !== "android") androidControlModule?.deactivateAndroidControlPanel();
   if (draggedChatSessionId) clearChatDragUi();
   if (!settings) {
     app.innerHTML = `<main class="boot">Chargement</main>`;
@@ -21880,6 +24473,19 @@ const render = () => {
     document.querySelector<HTMLElement>(".chat-admin-panel")?.scrollTop ?? 0;
   const adminContentScrollTop =
     document.querySelector<HTMLElement>(".chat-admin-panel > :first-child")?.scrollTop ?? 0;
+  // La vue Historique possede son propre scroller interne : la grille garde
+  // l'en-tete fixe pendant que #discussionGroups defile. La reprise Freebuff
+  // rend immediatement la ligne occupee, donc ce scroll doit survivre au rendu
+  // comme ceux des autres vues admin.
+  const discussionGroupsScroller =
+    document.querySelector<HTMLElement>("#discussionGroups");
+  const discussionGroupsScrollTop = discussionGroupsScroller?.scrollTop ?? 0;
+  const discussionGroupsPinnedToEnd =
+    !!discussionGroupsScroller &&
+    discussionGroupsScroller.scrollHeight -
+      discussionGroupsScroller.scrollTop -
+      discussionGroupsScroller.clientHeight <=
+      2;
 
   terminalSessions.forEach((session) => {
     const element = session.terminal.element;
@@ -21887,6 +24493,7 @@ const render = () => {
   });
 
   renderChatFirstShell();
+  pruneCurrentDeferredChatActionGroups();
   restoreFocusedExpertChatPrompt(expertChatPromptFocus);
 
   if (activeView === "design" && activeDesignTool === "claude") {
@@ -21902,6 +24509,15 @@ const render = () => {
       ".chat-admin-panel > :first-child",
     );
     if (restoredAdminContent) restoredAdminContent.scrollTop = adminContentScrollTop;
+  }
+  if (discussionGroupsPinnedToEnd || discussionGroupsScrollTop > 0) {
+    const restoredDiscussionGroups = document.querySelector<HTMLElement>("#discussionGroups");
+    if (restoredDiscussionGroups) {
+      // Si l'historique etait colle en bas, suivre sa nouvelle hauteur apres le rendu.
+      restoredDiscussionGroups.scrollTop = discussionGroupsPinnedToEnd
+        ? restoredDiscussionGroups.scrollHeight
+        : discussionGroupsScrollTop;
+    }
   }
 };
 
@@ -21974,7 +24590,7 @@ const renderLegacyTerminalShell = () => {
               <span class="workspace-terminal-count">${group.sessions.length}</span>
             </button>
             ${group.selectable
-              ? `<button class="workspace-side-new" data-new-terminal-workspace="${escapeAttr(group.key)}" title="${terminalSessions.length >= EXPERT_MAX_TERMINALS ? "Limite de 16 terminaux atteinte" : `Nouveau terminal dans ${escapeAttr(group.label)}`}" ${terminalSessions.length >= EXPERT_MAX_TERMINALS ? "disabled" : ""}>
+              ? `<button class="workspace-side-new" data-new-terminal-workspace="${escapeAttr(group.key)}" title="Nouveau terminal dans ${escapeAttr(group.label)}">
                 <i data-lucide="plus"></i>
               </button>`
               : ""}
@@ -21998,7 +24614,7 @@ const renderLegacyTerminalShell = () => {
             <i data-lucide="square-terminal"></i>
             <span>
               <strong>Switch Terminals</strong>
-              <small>${escapeHtml(terminalCountLabel)} · 16 maximum</small>
+              <small>${escapeHtml(terminalCountLabel)} · selon la mémoire disponible</small>
             </span>
           </div>
         </header>
@@ -22010,7 +24626,7 @@ const renderLegacyTerminalShell = () => {
               <button class="icon-button" id="workspaceAddSide" title="Créer un environnement personnel">
                 <i data-lucide="folder-plus"></i>
               </button>
-              <button class="icon-button" id="newTerminalSide" title="${terminalSessions.length >= EXPERT_MAX_TERMINALS ? "Limite de 16 terminaux atteinte" : "Nouveau terminal dans l'environnement actif"}" ${terminalSessions.length >= EXPERT_MAX_TERMINALS ? "disabled" : ""}>
+              <button class="icon-button" id="newTerminalSide" title="Nouveau terminal dans l'environnement actif">
                 <i data-lucide="plus"></i>
               </button>
             </span>
@@ -22031,7 +24647,7 @@ const renderLegacyTerminalShell = () => {
           <div class="actions">
             ${activeView === "terminal"
               ? `<label class="expert-grid-control" title="Disposition du mur de terminaux">
-                  <span><i data-lucide="square-terminal"></i><strong>${terminalSessions.length}</strong><small>/ ${EXPERT_MAX_TERMINALS}</small></span>
+                  <span><i data-lucide="square-terminal"></i><strong>${terminalSessions.length}</strong></span>
                   <select id="expertGridLayout" aria-label="Nombre de colonnes">
                     <option value="auto" ${expertGridLayout === "auto" ? "selected" : ""}>Auto</option>
                     <option value="2" ${expertGridLayout === "2" ? "selected" : ""}>2 col.</option>
@@ -22066,9 +24682,21 @@ const renderLegacyTerminalShell = () => {
               <i data-lucide="bar-chart-3"></i>
               <span>Stats</span>
             </button>
+            ${isRemoteMode() ? `<button id="trackingToggle" class="tool-button ${activeView === "tracking" ? "primary" : ""}" title="Liens de tracking Duello">
+              <i data-lucide="route"></i>
+              <span>Tracking</span>
+            </button>` : ""}
+            ${isRemoteMode() ? `<button id="duelloBankToggle" class="tool-button ${activeView === "duello-bank" ? "primary" : ""}" title="Banque Duello">
+              <i data-lucide="landmark"></i>
+              <span>Banque Duello</span>
+            </button>` : ""}
             ${isRemoteMode() ? `<button id="vpsToggle" class="tool-button ${activeView === "vps" ? "primary" : ""}" title="Déployer les chats sur un VPS via SSH">
               <i data-lucide="server"></i>
               <span>VPS</span>
+            </button>` : ""}
+            ${isRemoteMode() ? `<button id="freebuffCloudToggle" class="tool-button ${activeView === "freebuff-cloud" ? "primary" : ""}" title="Freebuff Cloud">
+              <i data-lucide="cloud"></i>
+              <span>Freebuff Cloud</span>
             </button>` : ""}
             <button id="designToggle" data-open-design class="tool-button ${activeView === "design" ? "primary" : ""}" title="Design · Claude ou Kombai">
               <i data-lucide="layout-template"></i>
@@ -22098,7 +24726,7 @@ const renderLegacyTerminalShell = () => {
               <i data-lucide="library"></i>
               <span>Skills</span>
             </button>
-            <button id="expertTerminalAction" class="tool-button primary" title="${terminalActionReturnsToGrid ? "Revenir au mur de terminaux" : terminalSessions.length >= EXPERT_MAX_TERMINALS ? "Limite de 16 terminaux atteinte" : "Nouveau terminal"}" ${!terminalActionReturnsToGrid && terminalSessions.length >= EXPERT_MAX_TERMINALS ? "disabled" : ""}>
+            <button id="expertTerminalAction" class="tool-button primary" title="${terminalActionReturnsToGrid ? "Revenir au mur de terminaux" : "Nouveau terminal"}">
               <i data-lucide="${terminalActionReturnsToGrid ? "square-terminal" : "plus"}"></i>
               <span>${terminalActionReturnsToGrid ? "Terminaux" : "Nouveau"}</span>
             </button>
@@ -22140,6 +24768,12 @@ const renderLegacyTerminalShell = () => {
                 ? renderLimitsPanel()
                 : activeView === "dashboard"
                    ? renderDashboardPanel()
+                   : activeView === "tracking"
+                     ? trackingViewModule?.renderTrackingPanel() ?? ""
+                   : activeView === "duello-bank"
+                     ? duelloBankModule?.renderDuelloBankPanel() ?? ""
+                   : activeView === "freebuff-cloud"
+                     ? freebuffCloudModule?.renderFreebuffCloudPanel() ?? ""
                    : activeView === "video"
                      ? videoModule?.renderVideoPanel() ?? ""
                     : activeView === "transcription"
@@ -22176,11 +24810,13 @@ const renderLegacyTerminalShell = () => {
       </main>
     </div>
     ${renderDiscussionArchiveModal()}
+    ${renderTerminalDeleteModal()}
     ${renderNewChatModal()}
     ${renderAutonomousOrchestrationPromotionModal()}
     ${renderAutonomousChatEditor()}
     ${renderOrchestrationConversionModal()}
     ${renderNewTerminalModal()}
+    ${renderProxyManagerModal()}
     ${renderAgentsModal()}
     ${renderWorkspaceModal()}
     ${renderTerminalEnvironmentMenu()}
@@ -22223,6 +24859,118 @@ const renderCodexLoginCodePanel = (accountId: string): string => {
         </div>`;
 };
 
+let accountCompletionResetTimer: number | null = null;
+
+const scheduleAccountCompletionMidnightReset = () => {
+  if (accountCompletionResetTimer !== null) {
+    window.clearTimeout(accountCompletionResetTimer);
+  }
+  accountCompletionResetTimer = window.setTimeout(() => {
+    accountCompletionResetTimer = null;
+    // completedOn conserve la date precedente pour la synchronisation, mais
+    // l'etoile devient vide des le premier rendu du nouveau jour.
+    if (activeView === "pool") render();
+    scheduleAccountCompletionMidnightReset();
+  }, millisecondsUntilNextLocalMidnight() + 100);
+};
+
+const renderOpenRouterAccountCatalog = (account: AccountProfile): string => {
+  if (!accountIsOpenRouter(account)) return "";
+  const snapshot = chatModelCatalogs.get(account.id) ?? [];
+  const loading = chatModelCatalogLoads.has(account.id);
+  const error = chatModelCatalogErrors.get(account.id) ?? "";
+  const updatedAt = chatModelCatalogUpdatedAt.get(account.id) ?? null;
+  const selectedModelId = accountModel(account);
+  const selectedModel = snapshot.find(
+    (model) => model.id.toLocaleLowerCase() === selectedModelId.toLocaleLowerCase(),
+  ) ?? null;
+  const selectionError = snapshot.length
+    ? validatedAccountModelSelection(
+        account,
+        selectedModelId,
+        accountReasoningEffort(account),
+      ).error
+    : null;
+  const selectedEffort = supportedReasoningEffortForModel(
+    account,
+    selectedModelId,
+    accountReasoningEffort(account),
+  );
+  const effortOptions = selectedModel?.supportedReasoningEfforts
+    .map((item) => item.reasoningEffort)
+    .filter(isCodexReasoningEffort) ?? [];
+  const uniqueEfforts = Array.from(new Set(effortOptions));
+  const datalistId = `openrouterModels-${account.id}`;
+  const scanLabel = snapshot.length ? "Actualiser" : "Scanner les modèles";
+  const scanIcon = loading ? "loader-circle" : snapshot.length ? "refresh-cw" : "scan-line";
+  const statusClass = error
+    ? "is-error"
+    : loading
+      ? "is-loading"
+      : selectionError
+        ? "is-error"
+        : snapshot.length
+          ? "is-ready"
+          : "is-idle";
+  const statusIcon = error
+    ? "circle-alert"
+    : loading
+      ? "loader-circle"
+      : selectionError
+        ? "circle-alert"
+        : snapshot.length
+          ? "circle-check"
+          : "library";
+  const statusMessage = loading
+    ? snapshot.length
+      ? `Actualisation en cours · le dernier snapshot de ${snapshot.length} modèles reste disponible.`
+      : "Connexion à OpenRouter et lecture de tous les modèles autorisés par cette clé…"
+    : error
+      ? snapshot.length
+        ? `${error} · Dernier snapshot sain conservé (${snapshot.length} modèles).`
+        : error
+      : selectionError
+        ? `${snapshot.length} modèles scannés · ${selectionError}`
+        : snapshot.length
+          ? `${snapshot.length} modèles disponibles${updatedAt ? ` · scannés ${formatTimestamp(Math.floor(updatedAt / 1_000))}` : ""}.`
+          : "Lance un scan pour charger tous les modèles accessibles avec la clé de ce compte.";
+  const automaticDetail = selectionError
+    ? "Le modèle enregistré n'est plus disponible : choisis explicitement un modèle du snapshot sain."
+    : selectedModel?.defaultReasoningEffort
+      ? `Sans niveau forcé · défaut annoncé : ${reasoningEffortLabel(selectedModel.defaultReasoningEffort)}`
+      : "Sans niveau forcé · OpenRouter utilise le comportement natif du modèle";
+
+  return `<section class="openrouter-account-catalog ${statusClass}" data-openrouter-catalog="${escapeAttr(account.id)}">
+    <header class="openrouter-account-catalog-head">
+      <span class="openrouter-account-catalog-mark" aria-hidden="true"><i data-lucide="scan-line"></i></span>
+      <span><strong>Catalogue OpenRouter</strong><small>Modèles et intensités propres à cette clé API</small></span>
+      <button type="button" class="tool-button openrouter-scan-button" data-openrouter-scan="${escapeAttr(account.id)}" ${loading ? 'disabled aria-busy="true"' : ""}>
+        <i data-lucide="${scanIcon}" class="${loading ? "is-spinning" : ""}"></i><span>${loading ? "Scan en cours…" : scanLabel}</span>
+      </button>
+    </header>
+    <div class="openrouter-account-catalog-status ${statusClass}" role="status" aria-live="polite">
+      <i data-lucide="${statusIcon}" class="${loading ? "is-spinning" : ""}"></i><span>${escapeHtml(statusMessage)}</span>
+    </div>
+    <div class="openrouter-account-catalog-fields">
+      <label>
+        <span>Rechercher ou choisir un modèle</span>
+        <input data-openrouter-model="${escapeAttr(account.id)}" list="${escapeAttr(datalistId)}" value="${escapeAttr(selectedModelId)}" autocomplete="off" spellcheck="false" maxlength="160" ${snapshot.length ? "" : "disabled"} />
+        <datalist id="${escapeAttr(datalistId)}">
+          ${snapshot.map((model) => `<option value="${escapeAttr(model.id)}">${escapeHtml(model.displayName)}</option>`).join("")}
+        </datalist>
+      </label>
+      <label>
+        <span>Intensité</span>
+        <select data-openrouter-effort="${escapeAttr(account.id)}" ${selectedModel ? "" : "disabled"}>
+          <option value="" ${selectedEffort ? "" : "selected"}>Automatique · OpenRouter</option>
+          ${uniqueEfforts.map((effort) => `<option value="${escapeAttr(effort)}" ${effort === selectedEffort ? "selected" : ""}>${escapeHtml(reasoningEffortLabel(effort))} · ${escapeHtml(effort)}</option>`).join("")}
+        </select>
+      </label>
+    </div>
+    <p class="openrouter-account-catalog-detail"><i data-lucide="gauge"></i><span>${escapeHtml(automaticDetail)}</span></p>
+  </section>`;
+};
+
 const renderAccountsPanel = () => {
   if (!settings) return "";
 
@@ -22234,12 +24982,14 @@ const renderAccountsPanel = () => {
       const fastSupported = accountSupportsFastMode(item, model);
       const fastEnabled = accountFastModeEnabled(item);
       const fastHelp = fastModeAvailabilityLabel(provider, model, fastSupported);
+      const completedToday = accountCompletedToday(item);
+      const completionSaving = accountDailyCompletionSaves.has(item.id);
       const codexPanel =
         provider === "codex" && isRemoteMode()
           ? renderCodexLoginCodePanel(item.id)
           : "";
       return `
-        <article class="simple-account-card ${item.id === selectedAccountId ? "active" : ""} ${codexPanel ? "has-login-code" : ""}">
+        <article class="simple-account-card ${item.id === selectedAccountId ? "active" : ""} ${completedToday ? "daily-completed" : ""} ${codexPanel ? "has-login-code" : ""}">
           <div class="simple-account-row">
             <div class="simple-account-identity">
               <span class="simple-account-provider-icon ${provider}" aria-hidden="true">
@@ -22248,9 +24998,21 @@ const renderAccountsPanel = () => {
               <span class="simple-account-copy">
                 <strong>${escapeHtml(item.label)}</strong>
                 <small>${escapeHtml(providerName)} · ${escapeHtml(model)}</small>
+                ${isBaiAccount(item) ? `<span class="bai-special-chip" title="Compte spécial b.ai — DeepSeek V4 Flash, intensité max, clé API déjà configurée (CST_BAI_API_KEY)."><i data-lucide="check"></i>Clé API configurée</span>` : ""}
               </span>
             </div>
             <div class="simple-account-actions">
+              <button
+                type="button"
+                class="icon-button account-daily-completion-toggle ${completedToday ? "active" : ""}"
+                data-account-daily-completion="${escapeAttr(item.id)}"
+                aria-label="${completedToday ? "Marquer" : "Indiquer"} le compte ${escapeAttr(item.label)} ${completedToday ? "comme non terminé aujourd’hui" : "comme terminé aujourd’hui"}"
+                aria-pressed="${completedToday}"
+                title="${completedToday ? "Terminé aujourd’hui — cliquer pour annuler" : "Marquer comme terminé aujourd’hui"}"
+                ${completionSaving ? 'disabled aria-busy="true"' : ""}
+              >
+                <i data-lucide="star"></i>
+              </button>
               <button
                 type="button"
                 class="tool-button account-fast-mode-toggle ${fastEnabled ? "active" : ""}"
@@ -22275,6 +25037,7 @@ const renderAccountsPanel = () => {
             </div>
           </div>
           ${codexPanel}
+          ${renderOpenRouterAccountCatalog(item)}
         </article>`;
     })
     .join("");
@@ -22284,7 +25047,7 @@ const renderAccountsPanel = () => {
       <div class="accounts-head">
         <div>
           <strong>Comptes</strong>
-          <span>Ajoute un compte, connecte-le, ou supprime-le.</span>
+          <span>Ajoute un compte, connecte-le, ou marque-le terminé pour aujourd’hui avec l’étoile.</span>
         </div>
       </div>
 
@@ -22307,6 +25070,14 @@ const renderAccountsPanel = () => {
             <label>
               <input type="radio" name="newAccountProvider" value="freebuff" />
               <span><i data-lucide="zap"></i>Freebuff</span>
+            </label>
+            <label title="Compte AIHubMix — la clé API est demandée uniquement dans le terminal sécurisé.">
+              <input type="radio" name="newAccountProvider" value="aihubmix" />
+              <span><i data-lucide="key"></i>AIHubMix</span>
+            </label>
+            <label title="Compte spécial b.ai — DeepSeek V4 Flash, intensité max. La clé API est déjà configurée sur le serveur (CST_BAI_API_KEY).">
+              <input type="radio" name="newAccountProvider" value="opencode:b.ai" ${(settings?.accounts ?? []).some(isBaiAccount) ? "disabled" : ""} />
+              <span><i data-lucide="sparkles"></i>b.ai</span>
             </label>
             ${OPENCODE_PROVIDER_OPTIONS.map((option) => `
               <label>
@@ -22344,7 +25115,9 @@ const renderAccountsAndPool = (): string => {
 const renderDiscussionArchiveModal = () => {
   const discussion = discussionArchiveCandidate;
   if (!discussion) return "";
-  const title = discussion.title?.trim() || "Conversation sans titre";
+  const title = discussion.title?.trim()
+    || discussion.preview?.trim()
+    || "Conversation sans titre";
   const forkCount = Math.max(1, discussion.forkCount || 1);
   const fileSummary = forkCount > 1
     ? `${forkCount} fichiers, reprises incluses`
@@ -22352,7 +25125,7 @@ const renderDiscussionArchiveModal = () => {
 
   return `
     <div class="modal-backdrop discussion-archive-backdrop" id="discussionArchiveBackdrop">
-      <section class="modal discussion-archive-modal" role="dialog" aria-modal="true" aria-labelledby="discussionArchiveTitle" aria-describedby="discussionArchiveDescription discussionArchiveRecovery" tabindex="-1">
+      <section class="modal discussion-archive-modal" role="dialog" aria-modal="true" aria-labelledby="discussionArchiveTitle" aria-describedby="discussionArchiveDescription discussionArchiveRecovery discussionArchiveErase" tabindex="-1">
         <header class="modal-head discussion-archive-head">
           <div class="discussion-archive-heading">
             <span class="discussion-archive-mark" aria-hidden="true"><i data-lucide="trash-2"></i></span>
@@ -22376,15 +25149,72 @@ const renderDiscussionArchiveModal = () => {
               </span>
             </div>
             <aside class="discussion-archive-recovery" id="discussionArchiveRecovery">
-              <i data-lucide="history" aria-hidden="true"></i>
-              <span><strong>Cette action reste récupérable</strong><small>Les fichiers seront déplacés dans <code>sessions-archive</code>, sans être supprimés définitivement.</small></span>
+              <i data-lucide="archive" aria-hidden="true"></i>
+              <span><strong>Archiver conserve les fichiers sur le disque</strong><small>La discussion sera déplacée dans <code>sessions-archive</code> et restera récupérable.</small></span>
             </aside>
+            ${discussionEraseArmed ? `
+            <aside class="discussion-archive-recovery erase" id="discussionArchiveErase">
+              <i data-lucide="trash-2" aria-hidden="true"></i>
+              <span><strong>Suppression définitive</strong><small>Les fichiers seront effacés du disque, sans récupération possible.</small></span>
+            </aside>` : ""}
           </section>
         </div>
         <footer class="modal-actions discussion-archive-actions">
           <button type="button" class="tool-button" id="cancelDiscussionArchive" data-dialog-initial-focus>Annuler</button>
-          <button type="button" class="tool-button danger" id="confirmDiscussionArchive">
-            <i data-lucide="trash-2"></i><span>Retirer de l’historique</span>
+          <button type="button" class="tool-button" id="archiveDiscussion">
+            <i data-lucide="archive"></i><span>Archiver</span>
+          </button>
+          <button type="button" class="tool-button danger ${discussionEraseArmed ? "erase-armed" : ""}" id="deleteDiscussionPermanent">
+            <i data-lucide="trash-2"></i><span>${discussionEraseArmed ? "Confirmer la suppression définitive" : "Supprimer définitivement"}</span>
+          </button>
+        </footer>
+      </section>
+    </div>`;
+};
+
+const renderTerminalDeleteModal = () => {
+  const session = terminalSessions.find(
+    (candidate) => candidate.key === terminalDeleteCandidateKey,
+  );
+  if (!session) return "";
+  const label = terminalTitle(session) || "Terminal";
+  const account = accountById(session.accountId);
+
+  return `
+    <div class="modal-backdrop discussion-archive-backdrop" id="terminalDeleteBackdrop">
+      <section class="modal discussion-archive-modal" role="dialog" aria-modal="true" aria-labelledby="terminalDeleteTitle" aria-describedby="terminalDeleteDescription terminalDeleteWarning" tabindex="-1">
+        <header class="modal-head discussion-archive-head">
+          <div class="discussion-archive-heading">
+            <span class="discussion-archive-mark" aria-hidden="true"><i data-lucide="trash-2"></i></span>
+            <div>
+              <span class="discussion-archive-eyebrow">Terminal et historique</span>
+              <h2 id="terminalDeleteTitle">Supprimer ce terminal et son chat ?</h2>
+              <p id="terminalDeleteDescription">Le terminal sera fermé et retiré de cet environnement.</p>
+            </div>
+          </div>
+          <button type="button" class="icon-button" id="closeTerminalDelete" title="Fermer" aria-label="Fermer la confirmation">
+            <i data-lucide="x"></i>
+          </button>
+        </header>
+        <div class="modal-body">
+          <section class="modal-section discussion-archive-content">
+            <div class="discussion-archive-target">
+              <span aria-hidden="true"><i data-lucide="square-terminal"></i></span>
+              <span>
+                <strong title="${escapeAttr(label)}">${escapeHtml(label)}</strong>
+                <small>${escapeHtml(account?.label ?? "Compte distant")} · terminal actif</small>
+              </span>
+            </div>
+            <aside class="discussion-archive-recovery erase" id="terminalDeleteWarning">
+              <i data-lucide="trash-2" aria-hidden="true"></i>
+              <span><strong>Suppression définitive</strong><small>L'historique du terminal et les fichiers du chat associé seront effacés sans récupération possible.</small></span>
+            </aside>
+          </section>
+        </div>
+        <footer class="modal-actions discussion-archive-actions">
+          <button type="button" class="tool-button" id="cancelTerminalDelete" data-dialog-initial-focus>Annuler</button>
+          <button type="button" class="tool-button danger erase-armed" id="confirmTerminalDelete">
+            <i data-lucide="trash-2"></i><span>Supprimer définitivement</span>
           </button>
         </footer>
       </section>
@@ -22408,6 +25238,14 @@ const renderNewChatModal = () => {
       ?? workspaceBaseName(environmentPath)
     : null;
   const modelValue = newChatModel || accountModel(account);
+  const chatProxyId = newChatProxyId ?? account?.proxyId ?? null;
+  const chatProxyOptions = [
+    `<option value="">Aucun proxy</option>`,
+    ...settings.proxies.map(
+      (item) =>
+        `<option value="${escapeAttr(item.id)}" ${item.id === chatProxyId ? "selected" : ""}>${escapeHtml(item.label)}</option>`,
+    ),
+  ].join("");
   const pendingTaskTitle = newChatPendingTaskTitle;
   const executionTargets = remoteChatExecutionTargets();
   const selectedExecutionTarget = executionTargets.some(
@@ -22504,6 +25342,12 @@ const renderNewChatModal = () => {
                 <option value="ask" ${newChatMode === "ask" ? "selected" : ""}>Question</option>
               </select>
             </label>
+            <label>
+              <span>Proxy</span>
+              <select id="newChatProxy" ${account && settings.proxyControlsEnabled ? "" : "disabled"}>
+                ${chatProxyOptions}
+              </select>
+            </label>
             ${executionTargets.length
               ? `<label>
                   <span>Machine d’exécution</span>
@@ -22560,16 +25404,27 @@ const openChatAccountIdsForQuotaSelection = (): string[] => {
   const accountIds = expertChatPanes
     .map((pane) => pane.accountId ?? pane.discussion?.accountId ?? null)
     .filter((accountId): accountId is string => !!accountId);
-  const paneSessionIds = new Set(
+  const paneDiscussionKeys = new Set(
     expertChatPanes
-      .map((pane) => pane.discussion?.sessionId)
-      .filter((sessionId): sessionId is string => !!sessionId),
+      .map((pane) => pane.discussion
+        ? discussionIdentityKey({
+            accountId: pane.accountId ?? pane.discussion.accountId,
+            sessionId: pane.discussion.sessionId,
+          })
+        : null)
+      .filter((key): key is string => !!key),
   );
 
   // Le lecteur historique hors grille ne compte que si aucun pane ouvert ne
   // represente deja la meme conversation.
-  if (chatDiscussion && !paneSessionIds.has(chatDiscussion.sessionId)) {
-    accountIds.push(chatAccountId ?? chatDiscussion.accountId);
+  if (chatDiscussion) {
+    const accountId = chatAccountId ?? chatDiscussion.accountId;
+    if (!paneDiscussionKeys.has(discussionIdentityKey({
+      accountId,
+      sessionId: chatDiscussion.sessionId,
+    }))) {
+      accountIds.push(accountId);
+    }
   }
   return accountIds;
 };
@@ -22725,6 +25580,12 @@ const selectNewChatAccount = (
     modelInput.disabled = false;
     modelInput.setCustomValidity("");
   }
+  const proxySelect = document.querySelector<HTMLSelectElement>("#newChatProxy");
+  if (proxySelect) {
+    newChatProxyId = account.proxyId ?? null;
+    proxySelect.value = account.proxyId ?? "";
+    proxySelect.disabled = !settings?.proxyControlsEnabled;
+  }
   const confirm = document.querySelector<HTMLButtonElement>("#confirmNewChat");
   if (confirm) {
     confirm.disabled = !userEnvironmentPath(newChatPendingWorkspace ?? currentWorkspace());
@@ -22753,7 +25614,7 @@ const openAutonomousOrchestrationPromotion = (agentId: string): void => {
     agentId,
     orchestratorAccountId: agent.accountId,
     workerAccountIds: Array.from(
-      { length: Math.max(1, Math.min(12, orchestrationWorkerCount)) },
+      { length: Math.max(1, Math.min(MAX_ORCHESTRATION_WORKER_COUNT, orchestrationWorkerCount)) },
       () => agent.accountId,
     ),
     name: agent.name.trim(),
@@ -22764,7 +25625,7 @@ const openAutonomousOrchestrationPromotion = (agentId: string): void => {
       || account?.projectDir
       || "",
     testCommand: agent.testCommand?.trim() || orchestrationTestCommandDraft.trim(),
-    workerCount: Math.max(1, Math.min(12, orchestrationWorkerCount)),
+    workerCount: Math.max(1, Math.min(MAX_ORCHESTRATION_WORKER_COUNT, orchestrationWorkerCount)),
     testTimeoutSeconds: Math.max(
       5,
       Math.min(1800, agent.testTimeoutSeconds ?? orchestrationTestTimeoutSeconds),
@@ -23011,6 +25872,27 @@ const bindAutonomousOrchestrationPromotionUi = (): void => {
       render();
       return;
     }
+    const orchestratorSelection = validatedAccountModelSelection(
+      targetOrchestratorAccount,
+      agent.model?.trim() || accountModel(targetOrchestratorAccount),
+      agent.reasoningEffort,
+    );
+    const workerSelectionError = state.workerAccountIds
+      .slice(0, state.workerCount)
+      .map((accountId) => {
+        const workerAccount = accountById(accountId);
+        return validatedAccountModelSelection(
+          workerAccount,
+          accountModel(workerAccount),
+          accountReasoningEffort(workerAccount),
+        ).error;
+      })
+      .find(Boolean) ?? null;
+    if (orchestratorSelection.error || workerSelectionError) {
+      statusText = orchestratorSelection.error ?? workerSelectionError ?? "Sélection de modèle invalide";
+      render();
+      return;
+    }
 
     state.orchestratorAccountId = targetOrchestratorAccount.id;
     state.name = name?.value.trim() ?? "";
@@ -23128,7 +26010,7 @@ const openAutonomousChatEditor = (pane: ExpertChatPane): void => {
         account,
         model,
         linkedAgent?.reasoningEffort ?? accountReasoningEffort(account),
-      )
+      ) ?? ""
     : "";
   rememberDialogTrigger("autonomous-chat", null);
   autonomousChatEditor = {
@@ -23315,7 +26197,7 @@ const bindAutonomousChatEditorUi = (): void => {
     state.accountId = account.id;
     state.model = accountModel(account);
     state.reasoningEffort = accountProvider(account) === "codex"
-      ? reasoningEffortForChatModel(account, state.model, accountReasoningEffort(account))
+      ? reasoningEffortForChatModel(account, state.model, accountReasoningEffort(account)) ?? ""
       : "";
     if (accountProvider(account) !== "codex") state.connectors = [];
     void loadChatModelCatalog(account.id).then(() => {
@@ -23334,7 +26216,7 @@ const bindAutonomousChatEditorUi = (): void => {
       account,
       state.model.trim(),
       state.reasoningEffort,
-    );
+    ) ?? "";
     render();
   });
   reasoningEffort?.addEventListener("change", () => {
@@ -23452,19 +26334,24 @@ const bindAutonomousChatEditorUi = (): void => {
       closeAutonomousChatEditor();
       return;
     }
+    const selection = validatedAccountModelSelection(
+      account,
+      selectedModel,
+      reasoningEffort?.value ?? state.reasoningEffort,
+    );
+    if (selection.error) {
+      modelInput?.setCustomValidity(selection.error);
+      modelInput?.reportValidity();
+      statusText = selection.error;
+      return;
+    }
 
     state.name = name?.value.trim() ?? "";
     state.role = role?.value.trim() ?? "";
     state.objective = objective.value.trim();
     state.projectDir = project?.value.trim() ?? "";
-    state.model = selectedModel;
-    state.reasoningEffort = accountProvider(account) === "codex"
-      ? reasoningEffortForChatModel(
-          account,
-          selectedModel,
-          reasoningEffort?.value ?? state.reasoningEffort,
-        )
-      : "";
+    state.model = selection.model;
+    state.reasoningEffort = selection.reasoningEffort ?? "";
     state.intervalSeconds = intervalSeconds;
     state.testCommand = testCommand?.value.trim() ?? "";
     state.testTimeoutSeconds = timeout;
@@ -23487,10 +26374,8 @@ const bindAutonomousChatEditorUi = (): void => {
               projectDir: state.projectDir || null,
               mode: state.mode,
               requireUserReview: state.requireUserReview,
-              model: state.model,
-              reasoningEffort: accountProvider(account) === "codex"
-                ? state.reasoningEffort
-                : null,
+              model: selection.model,
+              reasoningEffort: selection.reasoningEffort,
               connectors: accountProvider(account) === "codex" ? state.connectors : [],
               intervalSeconds: state.intervalSeconds,
               testCommand: state.testCommand || null,
@@ -23508,10 +26393,8 @@ const bindAutonomousChatEditorUi = (): void => {
               projectDir: state.projectDir || null,
               mode: state.mode,
               requireUserReview: state.requireUserReview,
-              model: state.model,
-              reasoningEffort: accountProvider(account) === "codex"
-                ? state.reasoningEffort
-                : null,
+              model: selection.model,
+              reasoningEffort: selection.reasoningEffort,
               connectors: accountProvider(account) === "codex" ? state.connectors : [],
               intervalSeconds: state.intervalSeconds,
               initialMemory: state.initialMemory || null,
@@ -23625,7 +26508,7 @@ const renderOrchestrationConversionModal = () => {
               <div class="orchestration-convert-grid">
                 <label><span>Dépôt Git</span><input id="orchestrationConvertProject" required value="${escapeAttr(state.projectDir)}" spellcheck="false" ${state.busy ? "disabled" : ""} /></label>
                 <label><span>Commande de validation</span><input id="orchestrationConvertTestCommand" required maxlength="8000" value="${escapeAttr(state.testCommand)}" placeholder="npm test && npm run build" spellcheck="false" ${state.busy ? "disabled" : ""} /></label>
-                <label><span>Workers <small>hors orchestrateur</small></span><span class="orchestration-worker-count"><input id="orchestrationConvertWorkerCount" type="number" min="1" max="12" step="1" required value="${state.workerCount}" ${state.busy ? "disabled" : ""} /><small id="orchestrationConvertTeamTotal">${state.workerCount + 1} agents au total</small></span></label>
+                <label><span>Workers <small>hors orchestrateur</small></span><span class="orchestration-worker-count"><input id="orchestrationConvertWorkerCount" type="number" min="1" max="${MAX_ORCHESTRATION_WORKER_COUNT}" step="1" required value="${state.workerCount}" ${state.busy ? "disabled" : ""} /><small id="orchestrationConvertTeamTotal">${state.workerCount + 1} agents au total</small></span></label>
                 <label><span>Timeout des tests</span><span class="orchestration-timeout"><input id="orchestrationConvertTimeout" type="number" min="5" max="1800" required value="${state.testTimeoutSeconds}" ${state.busy ? "disabled" : ""} /><small>secondes</small></span></label>
               </div>
               <aside class="orchestration-convert-note"><i data-lucide="users"></i><span><strong>${sourceTurnBusy ? "L’équipe peut être lancée sans interrompre la réponse" : "Les fenêtres workers s’ouvriront ici"}</strong><small>${sourceTurnBusy ? "La planification démarrera automatiquement dès que la session actuelle sera libre. Le verrou de session évite deux commandes concurrentes." : "Le chat actuel sera piloté par le moteur d’orchestration pendant le plan, les revues et la validation. Son compositeur sera verrouillé pour éviter deux commandes concurrentes."}</small></span></aside>
@@ -23740,6 +26623,16 @@ const bindOrchestrationConversionUi = (): void => {
       closeOrchestrationConversion();
       return;
     }
+    const selection = validatedAccountModelSelection(
+      account,
+      accountModel(account),
+      accountReasoningEffort(account),
+    );
+    if (selection.error) {
+      statusText = selection.error;
+      render();
+      return;
+    }
 
     state.name = name?.value.trim() ?? "";
     state.objective = objective.value.trim();
@@ -23761,8 +26654,8 @@ const bindOrchestrationConversionUi = (): void => {
           workerAccountIds: Array.from({ length: state.workerCount }, () => account.id),
           accountId: account.id,
           projectDir: state.projectDir,
-          model: accountModel(account),
-          reasoningEffort: accountProvider(account) === "codex" ? accountReasoningEffort(account) : null,
+          model: selection.model,
+          reasoningEffort: selection.reasoningEffort,
           testCommand: state.testCommand,
           testTimeoutSeconds: state.testTimeoutSeconds,
         },
@@ -24152,6 +27045,117 @@ const renderAgentsModal = () => {
       </section>
     </div>
   `;
+};
+
+const renderProxyManagerModal = (): string => {
+  if (!settings || !proxyManagerModalOpen) return "";
+
+  const disabled = proxyManagerSaving ? "disabled" : "";
+  const proxyOptions = (selectedId: string | null) => [
+    `<option value="" ${selectedId ? "" : "selected"}>Aucun proxy</option>`,
+    ...proxyManagerDrafts.map((proxy) =>
+      `<option value="${escapeAttr(proxy.id)}" ${proxy.id === selectedId ? "selected" : ""}>${escapeHtml(proxy.label.trim() || "Proxy sans nom")}</option>`,
+    ),
+  ].join("");
+
+  const proxyRows = proxyManagerDrafts.map((proxy, index) => {
+    const assignedCount = [...proxyManagerAssignmentDrafts.values()].filter(
+      (proxyId) => proxyId === proxy.id,
+    ).length;
+    const summary = proxy.proxyUrl.trim() ? maskProxy(proxy.proxyUrl.trim()) : "URL à renseigner";
+    return `<article class="proxy-manager-row" data-proxy-draft-row="${escapeAttr(proxy.id)}">
+      <header>
+        <span class="proxy-manager-row-icon"><i data-lucide="route"></i></span>
+        <span class="proxy-manager-row-title">
+          <strong>${escapeHtml(proxy.label.trim() || `Proxy ${index + 1}`)}</strong>
+          <small>${escapeHtml(summary)}</small>
+        </span>
+        <span class="proxy-manager-usage">${assignedCount} compte${assignedCount > 1 ? "s" : ""}</span>
+        <button type="button" class="icon-button danger" data-remove-proxy-draft="${escapeAttr(proxy.id)}" title="Retirer ce proxy du brouillon" aria-label="Retirer ${escapeAttr(proxy.label.trim() || `Proxy ${index + 1}`)}" ${disabled}>
+          <i data-lucide="trash-2"></i>
+        </button>
+      </header>
+      <div class="proxy-manager-fields">
+        <label>
+          <span>Nom</span>
+          <input data-proxy-draft-id="${escapeAttr(proxy.id)}" data-proxy-draft-field="label" value="${escapeAttr(proxy.label)}" maxlength="80" autocomplete="off" ${disabled} />
+        </label>
+        <label class="proxy-manager-url-field">
+          <span>URL du proxy</span>
+          <span class="proxy-manager-secret-input">
+            <input type="password" data-proxy-secret data-proxy-draft-id="${escapeAttr(proxy.id)}" data-proxy-draft-field="proxyUrl" value="${escapeAttr(proxy.proxyUrl)}" placeholder="http://utilisateur:motdepasse@serveur:port" autocomplete="off" spellcheck="false" ${disabled} />
+            <button type="button" class="icon-button" data-toggle-proxy-secret="${escapeAttr(proxy.id)}" title="Afficher ou masquer l’URL" aria-label="Afficher ou masquer l’URL de ${escapeAttr(proxy.label.trim() || `Proxy ${index + 1}`)}" ${disabled}><i data-lucide="eye"></i></button>
+          </span>
+        </label>
+        <label>
+          <span>Note <small>optionnelle</small></span>
+          <input data-proxy-draft-id="${escapeAttr(proxy.id)}" data-proxy-draft-field="note" value="${escapeAttr(proxy.note ?? "")}" maxlength="160" placeholder="France, secours, équipe…" autocomplete="off" ${disabled} />
+        </label>
+      </div>
+    </article>`;
+  }).join("");
+
+  const accountRows = settings.accounts.map((account) => {
+    const assignedProxyId = proxyManagerAssignmentDrafts.get(account.id) ?? null;
+    return `<label class="proxy-account-row">
+      <span class="proxy-account-identity">
+        <i data-lucide="user-round"></i>
+        <span><strong>${escapeHtml(account.label)}</strong><small>${escapeHtml(accountProviderLabel(account))}</small></span>
+      </span>
+      <select data-proxy-account-id="${escapeAttr(account.id)}" aria-label="Proxy par défaut de ${escapeAttr(account.label)}" ${disabled}>
+        ${proxyOptions(assignedProxyId)}
+      </select>
+    </label>`;
+  }).join("");
+
+  return `<div class="modal-backdrop proxy-manager-backdrop" id="proxyManagerBackdrop">
+    <section class="modal proxy-manager-modal" role="dialog" aria-modal="true" aria-labelledby="proxyManagerTitle" aria-describedby="proxyManagerDescription" tabindex="-1">
+      <header class="modal-head">
+        <div>
+          <h2 id="proxyManagerTitle">Proxys</h2>
+          <p id="proxyManagerDescription">Gère les adresses proposées lors de la création d’un chat ou d’un terminal.</p>
+        </div>
+        <button class="icon-button" id="closeProxyManager" title="Fermer" aria-label="Fermer" ${disabled}><i data-lucide="x"></i></button>
+      </header>
+
+      <div class="modal-body proxy-manager-body">
+        <label class="proxy-manager-toggle">
+          <span class="proxy-manager-toggle-icon"><i data-lucide="shield-check"></i></span>
+          <span><strong>Utiliser les proxys dans Switch</strong><small>La liste reste enregistrée si tu désactives temporairement cette option.</small></span>
+          <input id="proxyManagerControls" type="checkbox" ${proxyManagerControlsEnabled ? "checked" : ""} ${disabled} />
+        </label>
+
+        <section class="proxy-manager-section" aria-labelledby="proxyListTitle">
+          <header class="proxy-manager-section-head">
+            <span><strong id="proxyListTitle">Adresses disponibles</strong><small>${proxyManagerDrafts.length} proxy${proxyManagerDrafts.length > 1 ? "s" : ""}</small></span>
+            <button type="button" class="tool-button" id="addProxyDraft" ${disabled}><i data-lucide="plus"></i><span>Ajouter</span></button>
+          </header>
+          <div class="proxy-manager-list">
+            ${proxyRows || `<div class="proxy-manager-empty"><i data-lucide="network"></i><strong>Aucun proxy configuré</strong><small>Ajoute une adresse pour la rendre disponible dans les nouveaux chats.</small></div>`}
+          </div>
+        </section>
+
+        <section class="proxy-manager-section" aria-labelledby="proxyAccountsTitle">
+          <header class="proxy-manager-section-head">
+            <span><strong id="proxyAccountsTitle">Proxy par défaut des comptes</strong><small>Le choix reste modifiable au lancement d’un chat.</small></span>
+          </header>
+          <div class="proxy-account-list">
+            ${accountRows || `<div class="proxy-manager-empty compact"><i data-lucide="users"></i><strong>Aucun compte</strong><small>Tu pourras associer les proxys après avoir ajouté un compte.</small></div>`}
+          </div>
+        </section>
+
+        ${proxyManagerFeedback ? `<p class="proxy-manager-feedback" role="status" aria-live="polite">${escapeHtml(proxyManagerFeedback)}</p>` : ""}
+      </div>
+
+      <footer class="modal-actions">
+        <button class="tool-button" id="cancelProxyManager" ${disabled}>Annuler</button>
+        <button class="tool-button primary" id="saveProxyManager" ${disabled}>
+          <i data-lucide="${proxyManagerSaving ? "loader-circle" : "save"}"></i>
+          <span>${proxyManagerSaving ? "Enregistrement…" : "Enregistrer"}</span>
+        </button>
+      </footer>
+    </section>
+  </div>`;
 };
 
 const renderWorkspaceModal = () => {
@@ -24654,7 +27658,7 @@ const limitBadgeClass = (account: AccountLimitView) => {
   if (account.refreshing) {
     return account.buckets.length > 0 ? "connected" : "empty";
   }
-  if (account.error && AUTH_LIMIT_ERROR.test(account.error)) return "error";
+  if (isQuotaAuthenticationError(account.error)) return "error";
   if (
     account.source === "server" ||
     account.source === "session" ||
@@ -24664,11 +27668,6 @@ const limitBadgeClass = (account: AccountLimitView) => {
   if (account.source === "server-empty") return "empty";
   return "error";
 };
-
-// Un token revoque/invalide (`token_invalidated`, `refresh_token_invalidated`,
-// 401...) laisse un compte « connecte » cote fichier mais illisible cote serveur.
-const AUTH_LIMIT_ERROR =
-  /token[_ ]?invalidat|refresh[_ ]?token|revoked|revoqu|\b401\b|unauthor|authentication|session (?:has )?ended|sign(?:ing)? ?in again|log ?in again|not logged in|connexion requise|authentication required/i;
 
 const formatPercent = (value?: number | null) => {
   if (value === null || value === undefined || !Number.isFinite(value)) return "n/a";
@@ -24770,6 +27769,7 @@ const OPENCODE_PROVIDER_OPTIONS: ReadonlyArray<{
     label: "OpenRouter",
     defaultModel: "openrouter/deepseek/deepseek-v4-pro",
     models: [
+      "openrouter/stealth/ox-alpha",
       "openrouter/deepseek/deepseek-v4-pro",
       "openrouter/z-ai/glm-5.2",
       "openrouter/minimax/minimax-m3",
@@ -24811,6 +27811,13 @@ const renderStatsTabs = () => `
       data-stats-tab="work-time"
       aria-selected="${statsActiveTab === "work-time" ? "true" : "false"}"
     ><i data-lucide="clock-3"></i><span>Temps de travail</span></button>
+    ${isRemoteMode() ? `
+    <button
+      class="${statsActiveTab === "referral" ? "active" : ""}"
+      data-stats-tab="referral"
+      aria-selected="${statsActiveTab === "referral" ? "true" : "false"}"
+    ><i data-lucide="gift"></i><span>Parrainage</span></button>
+    ` : ""}
   </nav>
 `;
 
@@ -24862,6 +27869,9 @@ const renderStatsAutonomousTokenUsage = () => {
 const renderDashboardPanel = () => {
   if (statsActiveTab === "work-time") {
     return renderWorkTimeDashboardPanel();
+  }
+  if (statsActiveTab === "referral") {
+    return renderReferralDashboardPanel();
   }
   if (!accountUsageLoaded) {
     return `
@@ -24931,7 +27941,10 @@ const renderDashboardPanel = () => {
         </div>
         <div class="stats-hero-actions">
           <span class="stats-freshness"><i data-lucide="server"></i> ${profileCount} profil(s) · mis à jour ${escapeHtml(formatTimestamp(data.generatedAt))}</span>
-          <button id="dashboardRefresh" class="tool-button stats-refresh"><i data-lucide="refresh-ccw"></i><span>Actualiser</span></button>
+          <div class="stats-action-row">
+            <button id="dashboardRefresh" class="tool-button stats-refresh"><i data-lucide="refresh-ccw"></i><span>Actualiser</span></button>
+            <button id="tokscaleSubmit" class="tool-button stats-tokscale-submit"><i data-lucide="cloud-upload"></i><span>Envoyer à Tokscale</span></button>
+          </div>
         </div>
       </header>
 
@@ -24972,6 +27985,225 @@ const renderDashboardPanel = () => {
       ${renderStatsDayDetail(selectedDay, dayAccounts)}
       ${renderStatsAccountOverview(data.accounts)}
       ${renderStatsAutonomousTokenUsage()}
+    </section>
+  `;
+};
+
+const referralLinkFor = (code: string) => {
+  const base = (referralSnapshot?.appUrl || "https://app.duello.fr/").replace(/\/+$/, "");
+  return `${base}/?ref=${encodeURIComponent(code)}`;
+};
+
+const formatReferralDate = (value: number) =>
+  new Intl.DateTimeFormat("fr-FR", {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+  }).format(new Date(value * 1000));
+
+const showReferralToast = (message: string) => {
+  referralToast = message;
+  if (referralToastTimer !== null) window.clearTimeout(referralToastTimer);
+  referralToastTimer = window.setTimeout(() => {
+    referralToast = "";
+    referralToastTimer = null;
+    if (activeView === "dashboard") render();
+  }, 2_200);
+};
+
+const refreshReferralDashboard = async (force = false, silent = false) => {
+  if (referralInFlight) return;
+  referralInFlight = true;
+  if (!silent) referralError = "";
+  if (!silent && activeView === "dashboard") render();
+  try {
+    const next = await invoke<ReferralSnapshot>("referral_snapshot", { refresh: force });
+    const changed = !referralSnapshot || JSON.stringify(next) !== JSON.stringify(referralSnapshot);
+    referralSnapshot = next;
+    referralLoaded = true;
+    referralError = "";
+    if ((!silent || changed) && activeView === "dashboard") render();
+  } catch (refreshError) {
+    referralError = String(refreshError instanceof Error ? refreshError.message : refreshError);
+    if (activeView === "dashboard") render();
+  } finally {
+    referralInFlight = false;
+  }
+};
+
+const createReferralCode = async (label: string) => {
+  if (referralSaving) return;
+  referralSaving = true;
+  referralError = "";
+  if (activeView === "dashboard") render();
+  try {
+    const created = await invoke<ReferralCodeView>("create_referral_code", {
+      request: { label },
+    });
+    referralSnapshot = referralSnapshot
+      ? { ...referralSnapshot, codes: [created, ...referralSnapshot.codes] }
+      : {
+          codes: [created],
+          appUrl: "https://app.duello.fr/",
+          duelloConnected: false,
+          lastSyncAt: null,
+          error: null,
+        };
+    referralModalOpen = false;
+    showReferralToast("Code créé");
+  } catch (createError) {
+    referralError = String(createError instanceof Error ? createError.message : createError);
+  } finally {
+    referralSaving = false;
+    if (activeView === "dashboard") render();
+  }
+};
+
+const deleteReferralCode = async (code: string) => {
+  if (referralDeleting) return;
+  referralDeleting = code;
+  referralError = "";
+  if (activeView === "dashboard") render();
+  try {
+    await invoke<void>("delete_referral_code", { code });
+    referralSnapshot = referralSnapshot
+      ? { ...referralSnapshot, codes: referralSnapshot.codes.filter((entry) => entry.code !== code) }
+      : referralSnapshot;
+    showReferralToast("Code supprimé");
+  } catch (deleteError) {
+    referralError = String(deleteError instanceof Error ? deleteError.message : deleteError);
+  } finally {
+    referralDeleting = "";
+    if (activeView === "dashboard") render();
+  }
+};
+
+const renderReferralMetric = (label: string, value: string, detail: string, icon: string) => `
+  <article class="stats-metric referral-metric">
+    <span class="stats-metric-icon"><i data-lucide="${icon}"></i></span>
+    <div>
+      <span>${escapeHtml(label)}</span>
+      <strong>${escapeHtml(value)}</strong>
+      <small>${escapeHtml(detail)}</small>
+    </div>
+  </article>
+`;
+
+const renderReferralDashboardPanel = () => {
+  if (!referralLoaded && !referralSnapshot) {
+    return `
+      <section class="dashboard-panel stats-dashboard stats-loading" aria-busy="true">
+        ${renderStatsTabs()}
+        <div class="stats-loading-mark"><i data-lucide="gift"></i></div>
+        <strong>Chargement du parrainage</strong>
+        <span>Lecture des codes et des compteurs Duello…</span>
+      </section>
+    `;
+  }
+
+  const data = referralSnapshot;
+  const codes = data?.codes ?? [];
+  const connected = data?.duelloConnected ?? false;
+  const lastSync = data?.lastSyncAt ?? null;
+  const duelloError = data?.error ?? "";
+  const totalReferrals = codes.reduce((total, code) => total + (code.referralCount ?? 0), 0);
+  const hasCounts = codes.some((code) => code.referralCount !== null);
+
+  const rows = codes.length
+    ? codes
+        .map(
+          (entry) => `
+        <tr>
+          <td><strong class="referral-label">${escapeHtml(entry.label)}</strong></td>
+          <td><code class="referral-code">${escapeHtml(entry.code)}</code></td>
+          <td><span class="referral-link" title="${escapeHtml(referralLinkFor(entry.code))}">${escapeHtml(referralLinkFor(entry.code))}</span></td>
+          <td>${entry.referralCount === null ? `<span class="referral-pending">En attente</span>` : `<strong class="referral-count">${entry.referralCount.toLocaleString("fr-FR")}</strong>`}</td>
+          <td><span class="referral-date">${escapeHtml(formatReferralDate(entry.createdAt))}</span></td>
+          <td>
+            <span class="referral-row-actions">
+              <button type="button" data-copy-referral="${escapeHtml(entry.code)}" title="Copier le lien de parrainage"><i data-lucide="copy"></i></button>
+              <button type="button" data-delete-referral="${escapeHtml(entry.code)}" title="Supprimer ce code" ${referralDeleting === entry.code ? "disabled" : ""}><i data-lucide="trash-2"></i></button>
+            </span>
+          </td>
+        </tr>`,
+        )
+        .join("")
+    : `<tr><td colspan="6"><div class="referral-empty"><span><i data-lucide="gift"></i></span><strong>Premier code à créer</strong><small>Créez un code à partager avec vos filleuls.</small></div></td></tr>`;
+
+  return `
+    <section class="dashboard-panel stats-dashboard referral-dashboard" aria-labelledby="referralTitle">
+      ${renderStatsTabs()}
+      <header class="stats-hero">
+        <div class="stats-hero-copy">
+          <span class="stats-eyebrow"><i data-lucide="gift"></i> Duello · Parrainage</span>
+          <h1 id="referralTitle">Vos codes de parrainage.</h1>
+          <p>Chaque code donne un lien à partager avec vos filleuls. Le nombre de personnes parrainées par code est compté par l’application Duello et remonté ici dès qu’elle l’expose.</p>
+        </div>
+        <div class="stats-hero-actions">
+          <span class="stats-freshness"><i data-lucide="refresh-cw" class="${referralInFlight ? "is-spinning" : ""}"></i> ${lastSync ? `compteurs Duello · ${escapeHtml(formatTimestamp(lastSync))}` : connected ? "compteurs Duello · jamais synchronisés" : "compteurs Duello · non connectée"}</span>
+          <div class="referral-hero-actions">
+            <button id="referralRefresh" class="tool-button stats-refresh" ${referralInFlight ? "disabled" : ""}><i data-lucide="refresh-cw"></i><span>Actualiser</span></button>
+            <button type="button" class="tool-button primary" data-open-referral-modal><i data-lucide="plus"></i><span>Nouveau code</span></button>
+          </div>
+        </div>
+      </header>
+
+      ${!connected ? `
+        <div class="referral-banner is-info" role="status">
+          <i data-lucide="plug-zap"></i>
+          <div>
+            <strong>En attente de l’application Duello</strong>
+            <span>Les codes sont déjà créés et partageables. Dès que l’application Duello renverra le nombre de personnes parrainées par code, renseignez CST_DUELLO_REFERRAL_API_URL sur le VPS et les compteurs apparaîtront ici.</span>
+          </div>
+        </div>` : duelloError ? `
+        <div class="referral-banner is-warning" role="alert">
+          <i data-lucide="circle-alert"></i>
+          <div>
+            <strong>Compteurs Duello momentanément indisponibles</strong>
+            <span>${escapeHtml(duelloError)}</span>
+          </div>
+        </div>` : ""}
+
+      ${referralError ? `<div class="referral-error" role="alert"><i data-lucide="circle-alert"></i><span>${escapeHtml(referralError)}</span></div>` : ""}
+
+      <div class="stats-metric-grid referral-metrics">
+        ${renderReferralMetric("Codes actifs", codes.length.toLocaleString("fr-FR"), "Avec un lien partageable", "gift")}
+        ${renderReferralMetric("Personnes parrainées", hasCounts ? totalReferrals.toLocaleString("fr-FR") : "—", connected ? "comptées par l’application Duello" : "en attente de l’application Duello", "users")}
+        ${renderReferralMetric("Suivi Duello", connected ? "Connecté" : "En attente", connected ? "via CST_DUELLO_REFERRAL_API_URL" : "via l’API Duello future", "plug-zap")}
+      </div>
+
+      <section class="stats-timeline-card referral-table-card">
+        <div class="stats-card-head">
+          <div>
+            <span class="stats-card-kicker">Gestion des codes</span>
+            <strong>Codes et personnes parrainées</strong>
+            <small>${codes.length} code(s) · suivi par code fourni par l’application Duello</small>
+          </div>
+          <button type="button" class="referral-table-add" data-open-referral-modal><i data-lucide="plus"></i><span>Nouveau code</span></button>
+        </div>
+        <div class="referral-table-wrap">
+          <table class="referral-table">
+            <thead><tr><th>Libellé</th><th>Code</th><th>Lien de parrainage</th><th>Personnes parrainées</th><th>Créé le</th><th><span class="sr-only">Actions</span></th></tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>
+      </section>
+
+      ${referralModalOpen ? `
+      <div class="referral-modal-backdrop" data-referral-modal-backdrop>
+        <section class="referral-modal" role="dialog" aria-modal="true" aria-labelledby="referralModalTitle">
+          <button type="button" class="referral-modal-close" data-close-referral-modal aria-label="Fermer"><i data-lucide="x"></i></button>
+          <span class="stats-eyebrow"><i data-lucide="gift"></i> Nouveau code</span>
+          <h2 id="referralModalTitle">Créer un code de parrainage</h2>
+          <p>Donnez-lui un libellé pour le retrouver (campagne, plateforme…). Le lien généré pointera vers l’application Duello avec votre code.</p>
+          <form data-referral-form>
+            <label><span>Libellé</span><input name="label" maxlength="60" autocomplete="off" placeholder="Ex. Campagne YouTube" required autofocus /></label>
+            ${referralError ? `<div class="referral-form-error">${escapeHtml(referralError)}</div>` : ""}
+            <button type="submit" class="tool-button primary" ${referralSaving ? "disabled" : ""}><span>${referralSaving ? "Création…" : "Créer le code"}</span><i data-lucide="arrow-right"></i></button>
+          </form>
+        </section>
+      </div>` : ""}
+      ${referralToast ? `<div class="referral-toast" role="status"><i data-lucide="check"></i><span>${escapeHtml(referralToast)}</span></div>` : ""}
     </section>
   `;
 };
@@ -25898,9 +29130,14 @@ const newAccountProfile = (
     startupCommand: null,
     bypass: preferences.bypass ?? settings?.codexBypass ?? true,
     model: preferences.model?.trim() || providerDefaultModel(provider, inferenceProvider),
-    // L'intensite de raisonnement ne concerne que Codex ; on la laisse par
-    // defaut pour Claude (le backend l'ignore).
-    reasoningEffort: normalizeCodexReasoningEffort(preferences.reasoningEffort),
+    // OpenRouter demarre en Automatique (null) : aucun niveau n'est force
+    // avant que l'utilisateur ait scanne puis choisi une valeur publiee.
+    reasoningEffort:
+      provider === "opencode" && inferenceProvider?.toLocaleLowerCase() === "openrouter"
+        ? isCodexReasoningEffort(preferences.reasoningEffort)
+          ? preferences.reasoningEffort
+          : null
+        : normalizeCodexReasoningEffort(preferences.reasoningEffort),
     fastMode:
       preferences.fastMode === true &&
       providerModelSupportsFastMode(
@@ -26134,7 +29371,7 @@ const setNewChatBestQuotaButtonBusy = (busy: boolean) => {
   button.querySelector("svg")?.classList.toggle("is-spinning", busy);
   document
     .querySelectorAll<HTMLInputElement | HTMLSelectElement>(
-      "#newChatModel, #newChatMode, #newChatExecutionTarget",
+      "#newChatModel, #newChatMode, #newChatProxy, #newChatExecutionTarget",
     )
     .forEach((control) => {
       control.disabled = busy || !newChatAccountId;
@@ -26189,7 +29426,7 @@ const confirmNewChatWithBestQuota = async (): Promise<void> => {
       selectNewChatAccount(best.account.id, { automatic: true });
     }
     setNewChatAutoStatus("Ouverture de la conversation…");
-    confirmNewChatModal();
+    await confirmNewChatModal();
   } finally {
     if (requestId === newChatBestQuotaRequestId) {
       newChatBestQuotaInFlight = false;
@@ -26220,6 +29457,7 @@ const openNewChatModal = (
   newChatAccountId = requestedAccountId ??
     selectedAccountId ?? settings.defaultAccountId ?? settings.accounts[0]?.id ?? null;
   newChatModel = accountModel(accountById(newChatAccountId));
+  newChatProxyId = accountById(newChatAccountId)?.proxyId ?? null;
   newChatModelDrafts.clear();
   if (newChatAccountId) newChatModelDrafts.set(newChatAccountId, newChatModel);
   newChatMode = "build";
@@ -26262,11 +29500,12 @@ const closeNewChatModal = () => {
   newChatExecutionTargetId = null;
   newChatRoutingMode = "automatic";
   newChatModelDrafts.clear();
+  newChatProxyId = null;
   render();
   restoreDialogTrigger(returnFocus);
 };
 
-const confirmNewChatModal = () => {
+const confirmNewChatModal = async () => {
   if (!settings) return;
   const account = accountById(newChatAccountId) ?? settings.accounts[0] ?? null;
   if (!account) {
@@ -26295,11 +29534,29 @@ const confirmNewChatModal = () => {
     ? requestedExecutionTargetId
     : null;
   const previousModel = accountModel(account);
-  const nextModel = requestedModel || previousModel;
+  const previousReasoningEffort = accountReasoningEffort(account);
+  const selection = validatedAccountModelSelection(
+    account,
+    requestedModel || previousModel,
+    previousReasoningEffort,
+  );
+  if (selection.error) {
+    modelInput?.setCustomValidity(selection.error);
+    modelInput?.reportValidity();
+    statusText = selection.error;
+    return;
+  }
+  const nextModel = selection.model;
   cancelNewChatBestQuotaRequest();
-  if (nextModel !== previousModel) {
+  if (
+    nextModel !== previousModel
+    || ((accountSupportsReasoningEffort(account, nextModel) || accountIsOpenRouter(account))
+      && selection.reasoningEffort !== previousReasoningEffort)
+  ) {
     account.model = nextModel;
-    persistChatPreferences(account.id);
+    if (accountIsOpenRouter(account)) account.reasoningEffort = selection.reasoningEffort;
+    else if (selection.reasoningEffort) account.reasoningEffort = selection.reasoningEffort;
+    if (!await persistChatPreferences(account.id)) return;
   }
   selectedAccountId = account.id;
   const pendingWorkspace = newChatPendingWorkspace;
@@ -26313,6 +29570,13 @@ const confirmNewChatModal = () => {
   newChatExecutionTargetId = null;
   newChatRoutingMode = "automatic";
   newChatModelDrafts.clear();
+  newChatProxyId = null;
+  // Le proxy choisi dans la modale devient le proxy du compte (comme pour un
+  // terminal) : le backend le lit a chaque nouveau tour de ce chat.
+  const proxySelect = document.querySelector<HTMLSelectElement>("#newChatProxy");
+  const chosenProxyId = settings.proxyControlsEnabled
+    ? (proxySelect?.value || null)
+    : null;
   // Un compte freebuff n'ouvre pas un panneau de chat mais un onglet
   // terminal : son CLI porte lui-meme la conversation. Le prompt eventuel
   // n'est pas injecte, freebuff n'acceptant aucun prompt en argument.
@@ -26340,8 +29604,16 @@ const confirmNewChatModal = () => {
         `${account.label} etait deja occupe : freebuff demarre sur ${target.label}.`,
       );
     }
+    // Le proxy selectionne s'applique au compte freebuff effectivement lance
+    // (le compte choisi peut avoir ete redirige vers un autre home libre).
+    if (chosenProxyId !== null && target.proxyId !== chosenProxyId) {
+      target.proxyId = chosenProxyId;
+    }
     if (pendingPrompt) {
       notices.push("Saisis ta demande directement dans l’interface de freebuff.");
+    }
+    if (automaticOrchestrationEnabledByDefault({ surface: "freebuff-terminal" })) {
+      notices.push("Mode orchestrateur par défaut : Freebuff peut déléguer à ses sous-agents.");
     }
     void createNewTerminal(
       target.id,
@@ -26355,6 +29627,10 @@ const confirmNewChatModal = () => {
     return;
   }
 
+  if (chosenProxyId !== null && account.proxyId !== chosenProxyId) {
+    account.proxyId = chosenProxyId;
+    if (!await persistChatPreferences(account.id)) return;
+  }
   const pane = addExpertChatPane(account.id, {
     mode,
     pendingWorkspace,
@@ -26375,11 +29651,6 @@ const confirmNewChatModal = () => {
 
 const openNewTerminalModal = (folderPath: string | null | undefined = undefined) => {
   if (!settings) return;
-  if (terminalSessions.length >= EXPERT_MAX_TERMINALS) {
-    statusText = `Limite atteinte: ${EXPERT_MAX_TERMINALS} terminaux maximum dans une fenetre`;
-    render();
-    return;
-  }
   newTerminalAccountId = selectedAccountId || settings.defaultAccountId || settings.accounts[0]?.id || null;
   newTerminalAgentId = settings.activeAgentId || settings.agents[0]?.id || null;
   newTerminalWorkspacePath =
@@ -26402,6 +29673,155 @@ const closeNewTerminalModal = () => {
   newTerminalModalOpen = false;
   render();
   restoreDialogTrigger(returnFocus);
+};
+
+const resetProxyManagerDraft = () => {
+  proxyManagerDrafts = [];
+  proxyManagerAssignmentDrafts = new Map();
+  proxyManagerFeedback = null;
+  proxyManagerSaving = false;
+};
+
+const openProxyManagerModal = () => {
+  if (!settings) return;
+  rememberDialogTrigger("proxies", "settingsProxies");
+  proxyManagerDrafts = settings.proxies.map((proxy) => ({ ...proxy }));
+  proxyManagerAssignmentDrafts = new Map(
+    settings.accounts.map((account) => [account.id, account.proxyId ?? null]),
+  );
+  proxyManagerControlsEnabled = settings.proxyControlsEnabled;
+  proxyManagerFeedback = null;
+  proxyManagerSaving = false;
+  proxyManagerModalOpen = true;
+  statusText = "Gestion des proxys";
+  render();
+};
+
+const closeProxyManagerModal = () => {
+  if (proxyManagerSaving) return;
+  const returnFocus = takeDialogTrigger("proxies");
+  proxyManagerModalOpen = false;
+  resetProxyManagerDraft();
+  render();
+  restoreDialogTrigger(returnFocus);
+};
+
+const readProxyManagerForm = () => {
+  if (!proxyManagerModalOpen) return;
+  proxyManagerControlsEnabled =
+    document.querySelector<HTMLInputElement>("#proxyManagerControls")?.checked ??
+    proxyManagerControlsEnabled;
+
+  document
+    .querySelectorAll<HTMLInputElement>("[data-proxy-draft-id][data-proxy-draft-field]")
+    .forEach((input) => {
+      const proxy = proxyManagerDrafts.find(
+        (candidate) => candidate.id === input.dataset.proxyDraftId,
+      );
+      if (!proxy) return;
+      if (input.dataset.proxyDraftField === "label") proxy.label = input.value;
+      if (input.dataset.proxyDraftField === "proxyUrl") proxy.proxyUrl = input.value;
+      if (input.dataset.proxyDraftField === "note") proxy.note = input.value;
+    });
+
+  document.querySelectorAll<HTMLSelectElement>("[data-proxy-account-id]").forEach((select) => {
+    const accountId = select.dataset.proxyAccountId;
+    if (accountId) proxyManagerAssignmentDrafts.set(accountId, select.value || null);
+  });
+};
+
+const proxyManagerDraftInput = (
+  proxyId: string,
+  field: "label" | "proxyUrl" | "note",
+): HTMLInputElement | null =>
+  [...document.querySelectorAll<HTMLInputElement>("[data-proxy-draft-id][data-proxy-draft-field]")]
+    .find(
+      (input) =>
+        input.dataset.proxyDraftId === proxyId && input.dataset.proxyDraftField === field,
+    ) ?? null;
+
+const addProxyManagerDraft = () => {
+  if (proxyManagerSaving) return;
+  readProxyManagerForm();
+  const id = uid("proxy");
+  proxyManagerDrafts.push({
+    id,
+    label: `Proxy ${proxyManagerDrafts.length + 1}`,
+    proxyUrl: "",
+    note: null,
+  });
+  proxyManagerFeedback = "Nouvelle adresse ajoutée au brouillon";
+  render();
+  window.requestAnimationFrame(() => proxyManagerDraftInput(id, "proxyUrl")?.focus());
+};
+
+const removeProxyManagerDraft = (proxyId: string) => {
+  if (proxyManagerSaving) return;
+  readProxyManagerForm();
+  const removed = proxyManagerDrafts.find((proxy) => proxy.id === proxyId);
+  if (!removed) return;
+  proxyManagerDrafts = proxyManagerDrafts.filter((proxy) => proxy.id !== proxyId);
+  proxyManagerAssignmentDrafts.forEach((assignedProxyId, accountId) => {
+    if (assignedProxyId === proxyId) proxyManagerAssignmentDrafts.set(accountId, null);
+  });
+  proxyManagerFeedback = `${removed.label.trim() || "Proxy"} sera supprimé après enregistrement`;
+  render();
+};
+
+const proxyUrlIsValid = (value: string): boolean =>
+  /^https?:\/\/[^\s]+$/i.test(value);
+
+const saveProxyManager = async () => {
+  if (!settings || proxyManagerSaving) return;
+  readProxyManagerForm();
+
+  const normalizedProxies = proxyManagerDrafts.map((proxy, index) => ({
+    id: proxy.id,
+    label: proxy.label.trim() || `Proxy ${index + 1}`,
+    proxyUrl: proxy.proxyUrl.trim(),
+    note: proxy.note?.trim() || null,
+  }));
+  const invalid = normalizedProxies.find((proxy) => !proxyUrlIsValid(proxy.proxyUrl));
+  if (invalid) {
+    proxyManagerFeedback = `URL invalide pour ${invalid.label} : utilise http:// ou https://`;
+    render();
+    window.requestAnimationFrame(() => proxyManagerDraftInput(invalid.id, "proxyUrl")?.focus());
+    return;
+  }
+
+  const proxyIds = new Set(normalizedProxies.map((proxy) => proxy.id));
+  const candidate: AppSettings = {
+    ...settings,
+    proxyControlsEnabled: proxyManagerControlsEnabled,
+    proxies: normalizedProxies,
+    accounts: settings.accounts.map((account) => {
+      const assignedProxyId = proxyManagerAssignmentDrafts.get(account.id) ?? null;
+      return {
+        ...account,
+        proxyId: assignedProxyId && proxyIds.has(assignedProxyId) ? assignedProxyId : null,
+      };
+    }),
+  };
+
+  proxyManagerSaving = true;
+  proxyManagerFeedback = "Enregistrement des proxys…";
+  render();
+  try {
+    settings = await invoke<AppSettings>("save_settings", { settings: candidate });
+    reconcileAccountSelections();
+    settings.accounts.forEach(syncSessionsForAccount);
+    const returnFocus = takeDialogTrigger("proxies");
+    const count = settings.proxies.length;
+    proxyManagerModalOpen = false;
+    resetProxyManagerDraft();
+    statusText = `${count} proxy${count > 1 ? "s" : ""} enregistré${count > 1 ? "s" : ""}`;
+    render();
+    restoreDialogTrigger(returnFocus);
+  } catch (error) {
+    proxyManagerSaving = false;
+    proxyManagerFeedback = `Enregistrement impossible : ${String(error).replace(/^Error:\s*/i, "")}`;
+    render();
+  }
 };
 
 const openAgentsModal = () => {
@@ -26578,7 +29998,9 @@ const addAccountFromModal = () => {
   newTerminalAccountLabel = "";
   const providerNote = accountProviderLabel(account);
   const loginHint =
-    account.provider === "claude"
+    account.provider === "aihubmix"
+      ? " — saisis la clé API dans le terminal sécurisé"
+      : account.provider === "claude"
       ? " — lance-le puis tape /login pour t'authentifier"
       : account.provider === "opencode"
         ? " — connecte ensuite la clé API dans OpenCode"
@@ -26601,28 +30023,47 @@ const addAccountAndLogin = async () => {
     'input[name="newAccountProvider"]:checked',
   )?.value;
   const { provider, inferenceProvider } = parseProviderChoice(providerValue);
+  const isBai = providerValue === "opencode:b.ai";
   const requestedLabel =
     document.querySelector<HTMLInputElement>("#newAccountLabel")?.value.trim() ?? "";
-  const serviceLabel = provider === "opencode"
-    ? openCodeProviderOption(inferenceProvider)?.label ?? "OpenCode"
-    : providerLabel(provider);
+  const serviceLabel = isBai
+    ? "b.ai"      : provider === "opencode"
+        ? openCodeProviderOption(inferenceProvider)?.label ?? "OpenCode"
+        : providerLabel(provider);
   const label = requestedLabel || `Nouveau compte ${serviceLabel}`;
   const account = newAccountProfile(
     label,
     uniqueCodexHomeForLabel(label, provider),
     null,
     null,
-    { provider, inferenceProvider },
+    {
+      provider,
+      inferenceProvider,
+      // Le type b.ai est fixe sur DeepSeek V4 Flash en intensite max.
+      ...(isBai ? { model: BAI_ACCOUNT_MODEL, reasoningEffort: "max" } : {}),
+    },
   );
+  // Identite serveur du type special : le backend la reconnait (id reserve,
+  // home isole codex-homes/opencode-b-ai) et y provisionne la cle depuis
+  // CST_BAI_API_KEY.
+  if (isBai) account.id = SPECIAL_BAI_ACCOUNT_ID;
   settings.accounts.push(account);
   selectedAccountId = account.id;
   settings.defaultAccountId = account.id;
-  // Le placeholder doit etre ouvert pendant le clic utilisateur, avant la
-  // sauvegarde asynchrone, sinon les navigateurs le traitent comme un popup
-  // non sollicite et le bloquent.
+  const remoteCodexLogin = provider === "codex" && isRemoteMode();
+  const nativeMobileLogin = remoteCodexLogin && hasMobileExternalHttpsOpener();
+  const deferredMobileLogin =
+    remoteCodexLogin &&
+    (nativeMobileLogin || window.matchMedia("(max-width: 860px)").matches);
+  // Un navigateur web exige l'ouverture du nouvel onglet pendant le clic.
+  // En affichage mobile, on ne quitte jamais l'application avant la sauvegarde
+  // et le demarrage du terminal de device-auth. Android ouvrira ensuite le lien
+  // nativement ; un navigateur mobile gardera le bouton OpenAI dans le panneau.
   const popupPrepared =
-    provider === "codex" && isRemoteMode()
-      ? openRemoteCodexLoginWindow(account.id, account.label)
+    remoteCodexLogin
+      ? deferredMobileLogin
+        ? prepareRemoteCodexLoginTab(account.id, account.label)
+        : openRemoteCodexLoginWindow(account.id, account.label)
       : false;
   try {
     if (isRemoteMode()) {
@@ -26644,7 +30085,20 @@ const addAccountAndLogin = async () => {
   }
   render();
   // Ouvre directement le terminal temporaire de connexion du compte.
-  await reloginAccount(account.id);
+  await reloginAccount(account.id, deferredMobileLogin);
+  if (nativeMobileLogin && remoteCodexLoginWindowIsOpen(account.id)) {
+    try {
+      await openExternalHttpsUrl(CODEX_DEVICE_VERIFICATION_URL);
+    } catch (error) {
+      // Le terminal et le compte restent utilisables : le panneau permanent
+      // fournit encore le lien OpenAI et le code de device-auth.
+      statusText = `Compte ${account.label} créé. ${String(error)}`;
+      render();
+    }
+  } else if (deferredMobileLogin && remoteCodexLoginWindowIsOpen(account.id)) {
+    statusText = `Compte ${account.label} créé — touche « Ouvrir OpenAI » pour terminer la connexion.`;
+    render();
+  }
 };
 
 // Suppression depuis la liste simple. Avec l'auto-detection active, les fichiers
@@ -26813,8 +30267,12 @@ const bindUi = () => {
     renderIcons,
   });
   vpsModule?.bindVpsPanel(render);
+  maintenance.bindMaintenanceCard(render);
   videoModule?.bindVideoPanel(render, renderIcons);
   transcriptionModule?.bindTranscriptionPanel(render);
+  trackingViewModule?.bindTrackingPanel({ rerender: render, renderIcons });
+  duelloBankModule?.bindDuelloBankPanel({ rerender: render, renderIcons });
+  freebuffCloudModule?.bindFreebuffCloudPanel({ rerender: render, renderIcons });
   forumModule?.bindForumUi({
     rerender: render,
     setStatus: (message) => {
@@ -26828,6 +30286,18 @@ const bindUi = () => {
     },
   });
   tiktokAccountsModule?.bindTikTokAccountsUi({
+    rerender: render,
+    setStatus: (message) => {
+      statusText = message;
+    },
+  });
+  deviceFleetModule?.bindDeviceFleetUi({
+    rerender: render,
+    setStatus: (message) => {
+      statusText = message;
+    },
+  });
+  androidControlModule?.bindAndroidControlUi({
     rerender: render,
     setStatus: (message) => {
       statusText = message;
@@ -26858,6 +30328,9 @@ const bindUi = () => {
       void refreshPromptHistory();
     },
     onOpenDiscussion: openDiscussionForSession,
+    onImportToFreebuff: (sourceAccountId, sessionId, targetAccountId) => {
+      void importCodexHistoryToFreebuff(sourceAccountId, sessionId, targetAccountId);
+    },
     renderIcons,
     rerender: render,
   });
@@ -27072,6 +30545,20 @@ const bindUi = () => {
     }
     openNewChat();
   });
+  document.querySelectorAll<HTMLButtonElement>("[data-new-chat-terminal]").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const session = terminalSessions.find((candidate) => candidate.key === button.dataset.newChatTerminal);
+      const workspacePath = session?.workspacePath ?? session?.folderPath ?? session?.projectDir ?? null;
+      if (!session || !workspacePath) return;
+      activeTerminalKey = session.key;
+      selectedAccountId = session.accountId;
+      setCurrentWorkspace(workspacePath);
+      setChatWorkspaceFilter(workspaceIdForPath(workspacePath));
+      setActiveView("chat");
+      openNewChatModal({ workspacePath, accountId: session.accountId });
+    });
+  });
   const focusExpertSession = (session: TerminalSession, focus = false) => {
     activateTerminalSession(session);
     statusText = `Terminal actif: ${terminalTitle(session)}`;
@@ -27096,6 +30583,23 @@ const bindUi = () => {
     button.addEventListener("click", () => {
       const session = terminalSessions.find((candidate) => candidate.key === button.dataset.focusTerminal);
       if (session) focusExpertSession(session, true);
+    });
+  });
+
+  document.querySelectorAll<HTMLButtonElement>("[data-terminal-keyboard]").forEach((badge) => {
+    badge.addEventListener("click", () => {
+      const session = terminalSessions.find(
+        (candidate) => candidate.key === badge.dataset.terminalKeyboard,
+      );
+      if (!session) return;
+      if (session.running && session.ptyId !== null) {
+        focusExpertSession(session, true);
+        window.requestAnimationFrame(() => session.terminal.focus());
+        return;
+      }
+      // Session non rattachee : le clic relance la reconciliation serveur puis
+      // restaure le focus si le PTY repond encore.
+      void recoverActiveTerminalInput();
     });
   });
 
@@ -27181,15 +30685,26 @@ const bindUi = () => {
     });
   });
 
+  document.querySelectorAll<HTMLSelectElement>("[data-freebuff-terminal-account]").forEach((select) => {
+    select.addEventListener("change", () => {
+      const session = terminalSessions.find(
+        (candidate) => candidate.key === select.dataset.freebuffTerminalAccount,
+      );
+      if (session) void switchFreebuffTerminalAccount(session, select.value);
+    });
+  });
+
   document.querySelectorAll<HTMLElement>("[data-expert-terminal-pane]").forEach((pane) => {
     pane.addEventListener("pointerdown", (event) => {
-      if ((event.target as HTMLElement).closest("[data-close-terminal],[data-toggle-chat-sidebar],[data-toggle-terminal-fullscreen]")) return;
+      if ((event.target as HTMLElement).closest("[data-close-terminal],[data-toggle-chat-sidebar],[data-toggle-terminal-fullscreen],[data-freebuff-terminal-account]")) return;
       const session = terminalSessions.find(
         (candidate) => candidate.key === pane.dataset.expertTerminalPane,
       );
-      if (session) focusExpertSession(session, true);
+      if (session) {
+        focusExpertSession(session, true);
+        window.requestAnimationFrame(() => session.terminal.focus());
+      }
     });
-
   });
 
   document.querySelectorAll<HTMLButtonElement>("[data-toggle-terminal-fullscreen]").forEach((button) => {
@@ -27226,6 +30741,13 @@ const bindUi = () => {
       statusText = "Terminal selectionne";
       render();
       persistTerminalSessions();
+      window.requestAnimationFrame(() => {
+        window.requestAnimationFrame(() => {
+          if (activeView === "terminal" && session.running && session.terminal.element?.isConnected) {
+            session.terminal.focus();
+          }
+        });
+      });
     });
   });
 
@@ -27333,6 +30855,121 @@ const bindUi = () => {
       if (!accountId) return;
       button.disabled = true;
       void toggleAccountFastMode(accountId);
+    });
+  });
+
+  document.querySelectorAll<HTMLButtonElement>("[data-openrouter-scan]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const accountId = button.dataset.openrouterScan;
+      const account = accountById(accountId);
+      if (!accountId || !account || !accountIsOpenRouter(account)) return;
+      selectedAccountId = accountId;
+      void loadChatModelCatalog(accountId, true);
+    });
+  });
+
+  document.querySelectorAll<HTMLInputElement>("[data-openrouter-model]").forEach((input) => {
+    input.addEventListener("input", () => input.setCustomValidity(""));
+    input.addEventListener("change", () => {
+      void (async () => {
+        const accountId = input.dataset.openrouterModel;
+        const account = accountById(accountId);
+        const requested = input.value.trim();
+        if (!accountId || !account || !accountIsOpenRouter(account)) return;
+        const selection = validatedAccountModelSelection(
+          account,
+          requested,
+          account.reasoningEffort,
+        );
+        if (selection.error || !selection.catalogModel) {
+          input.setCustomValidity(selection.error ?? "Choisis un modèle OpenRouter valide.");
+          input.reportValidity();
+          return;
+        }
+        const previousModel = account.model;
+        const previousReasoningEffort = account.reasoningEffort;
+        const attemptedModel = selection.model;
+        const attemptedReasoningEffort = selection.reasoningEffort;
+        account.model = attemptedModel;
+        account.reasoningEffort = attemptedReasoningEffort;
+        selectedAccountId = accountId;
+        if (!await persistChatPreferences(accountId)) {
+          const currentAccount = accountById(accountId);
+          let rolledBack = false;
+          if (currentAccount === account && currentAccount.model === attemptedModel) {
+            currentAccount.model = previousModel;
+            rolledBack = true;
+          }
+          if (
+            currentAccount === account
+            && currentAccount.reasoningEffort === attemptedReasoningEffort
+          ) {
+            currentAccount.reasoningEffort = previousReasoningEffort;
+            rolledBack = true;
+          }
+          if (rolledBack) render();
+          return;
+        }
+        statusText = `Modèle OpenRouter enregistré : ${selection.catalogModel.displayName || selection.model}`;
+        render();
+      })();
+    });
+  });
+
+  document.querySelectorAll<HTMLSelectElement>("[data-openrouter-effort]").forEach((select) => {
+    select.addEventListener("change", () => {
+      void (async () => {
+        const accountId = select.dataset.openrouterEffort;
+        const account = accountById(accountId);
+        if (!accountId || !account || !accountIsOpenRouter(account)) return;
+        const effort = select.value.trim();
+        const selection = validatedAccountModelSelection(
+          account,
+          accountModel(account),
+          effort,
+        );
+        if (selection.error || (effort && selection.reasoningEffort !== effort)) {
+          statusText = selection.error
+            ?? "Cette intensité n'est pas publiée pour le modèle OpenRouter sélectionné";
+          render();
+          return;
+        }
+        const previousModel = account.model;
+        const previousReasoningEffort = account.reasoningEffort;
+        const attemptedModel = selection.model;
+        const attemptedReasoningEffort = selection.reasoningEffort;
+        account.model = attemptedModel;
+        account.reasoningEffort = attemptedReasoningEffort;
+        selectedAccountId = accountId;
+        if (!await persistChatPreferences(accountId)) {
+          const currentAccount = accountById(accountId);
+          let rolledBack = false;
+          if (currentAccount === account && currentAccount.model === attemptedModel) {
+            currentAccount.model = previousModel;
+            rolledBack = true;
+          }
+          if (
+            currentAccount === account
+            && currentAccount.reasoningEffort === attemptedReasoningEffort
+          ) {
+            currentAccount.reasoningEffort = previousReasoningEffort;
+            rolledBack = true;
+          }
+          if (rolledBack) render();
+          return;
+        }
+        statusText = effort
+          ? `Intensité OpenRouter enregistrée : ${reasoningEffortLabel(effort)}`
+          : "Intensité OpenRouter automatique enregistrée";
+        render();
+      })();
+    });
+  });
+
+  document.querySelectorAll<HTMLButtonElement>("[data-account-daily-completion]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const accountId = button.dataset.accountDailyCompletion;
+      if (accountId) void toggleAccountDailyCompletion(accountId);
     });
   });
 
@@ -27482,11 +31119,32 @@ const bindUi = () => {
   document.querySelector<HTMLButtonElement>("#cancelDiscussionArchive")?.addEventListener("click", () => {
     closeDiscussionArchiveModal();
   });
-  document.querySelector<HTMLButtonElement>("#confirmDiscussionArchive")?.addEventListener("click", () => {
-    void deleteDiscussion();
+  document.querySelector<HTMLButtonElement>("#archiveDiscussion")?.addEventListener("click", () => {
+    void deleteDiscussion(false);
+  });
+  document.querySelector<HTMLButtonElement>("#deleteDiscussionPermanent")?.addEventListener("click", () => {
+    if (!discussionEraseArmed) {
+      discussionEraseArmed = true;
+      render();
+      document.querySelector<HTMLButtonElement>("#deleteDiscussionPermanent")?.focus();
+      return;
+    }
+    void deleteDiscussion(true);
   });
   document.querySelector<HTMLDivElement>("#discussionArchiveBackdrop")?.addEventListener("click", (event) => {
     if (event.target === event.currentTarget) closeDiscussionArchiveModal();
+  });
+  document.querySelector<HTMLButtonElement>("#closeTerminalDelete")?.addEventListener("click", () => {
+    closeTerminalDeleteModal();
+  });
+  document.querySelector<HTMLButtonElement>("#cancelTerminalDelete")?.addEventListener("click", () => {
+    closeTerminalDeleteModal();
+  });
+  document.querySelector<HTMLButtonElement>("#confirmTerminalDelete")?.addEventListener("click", () => {
+    void deleteTerminalHistoryAndChat();
+  });
+  document.querySelector<HTMLDivElement>("#terminalDeleteBackdrop")?.addEventListener("click", (event) => {
+    if (event.target === event.currentTarget) closeTerminalDeleteModal();
   });
 
   document.querySelector<HTMLButtonElement>("#expertTerminalAction")?.addEventListener("click", () => {
@@ -27601,8 +31259,12 @@ const bindUi = () => {
     if (newChatRoutingMode === "automatic") {
       void confirmNewChatWithBestQuota();
     } else {
-      confirmNewChatModal();
+      void confirmNewChatModal();
     }
+  });
+
+  document.querySelector<HTMLSelectElement>("#newChatProxy")?.addEventListener("change", (event) => {
+    newChatProxyId = (event.currentTarget as HTMLSelectElement).value || null;
   });
 
   document.querySelector<HTMLButtonElement>("#closeNewTerminalModal")?.addEventListener("click", () => {
@@ -27780,11 +31442,17 @@ const bindUi = () => {
   document.querySelector<HTMLButtonElement>("#tiktokToggle")?.addEventListener("click", () => {
     setActiveView("tiktok");
   });
+  document.querySelector<HTMLButtonElement>("#devicesToggle")?.addEventListener("click", () => {
+    setActiveView("devices");
+  });
+  document.querySelector<HTMLButtonElement>("#androidToggle")?.addEventListener("click", () => {
+    setActiveView("android");
+  });
 
   // Barre latérale : « Historique » (à la place de l'ancien « Comptes ») ouvre
   // la liste des conversations avec le sélecteur de compte de reprise.
   document.querySelector<HTMLButtonElement>("#sideDiscussions")?.addEventListener("click", () => {
-    setActiveView("discussions");
+    openDiscussionHistory();
   });
   // « Paramètres » : page dédiée qui héberge aussi l'accès aux comptes.
   document.querySelector<HTMLButtonElement>("#settingsToggle")?.addEventListener("click", () => {
@@ -27792,6 +31460,9 @@ const bindUi = () => {
   });
   document.querySelector<HTMLButtonElement>("#settingsAccounts")?.addEventListener("click", () => {
     setActiveView("pool");
+  });
+  document.querySelector<HTMLButtonElement>("#settingsProxies")?.addEventListener("click", () => {
+    openProxyManagerModal();
   });
   document.querySelector<HTMLButtonElement>("#settingsMobileConnection")?.addEventListener("click", () => {
     openMobileSettings();
@@ -27985,8 +31656,20 @@ const bindUi = () => {
     setActiveView("dashboard");
   });
 
+  document.querySelector<HTMLButtonElement>("#trackingToggle")?.addEventListener("click", () => {
+    setActiveView("tracking");
+  });
+
+  document.querySelector<HTMLButtonElement>("#duelloBankToggle")?.addEventListener("click", () => {
+    setActiveView("duello-bank");
+  });
+
   document.querySelector<HTMLButtonElement>("#vpsToggle")?.addEventListener("click", () => {
     setActiveView("vps");
+  });
+
+  document.querySelector<HTMLButtonElement>("#freebuffCloudToggle")?.addEventListener("click", () => {
+    setActiveView("freebuff-cloud");
   });
 
   document.querySelector<HTMLButtonElement>("#tasksToggle")?.addEventListener("click", () => {
@@ -28009,12 +31692,16 @@ const bindUi = () => {
         return;
       }
       statusText = "Tâche terminée";
+      void import("./tasks-sync").then(({ markTasksDirty, pushTasksToServer }) => {
+        markTasksDirty();
+        void pushTasksToServer(next, accountId);
+      });
       render();
     });
   });
 
-  document.querySelector<HTMLButtonElement>("#tutorialToggle")?.addEventListener("click", () => {
-    setActiveView("tutorial");
+  document.querySelector<HTMLButtonElement>("#proxyToggle")?.addEventListener("click", () => {
+    openProxyManagerModal();
   });
 
   document.querySelector<HTMLButtonElement>("#scheduledChatToggle")?.addEventListener("click", () => {
@@ -28036,11 +31723,65 @@ const bindUi = () => {
   document.querySelectorAll<HTMLButtonElement>("[data-stats-tab]").forEach((button) => {
     button.addEventListener("click", () => {
       const tab = button.dataset.statsTab;
-      if ((tab !== "tokens" && tab !== "work-time") || tab === statsActiveTab) return;
+      if (
+        (tab !== "tokens" && tab !== "work-time" && tab !== "referral")
+        || tab === statsActiveTab
+      ) {
+        return;
+      }
       statsActiveTab = tab;
       if (tab === "work-time" && !workTimeLoaded) void refreshWorkTimeDashboard();
+      if (tab === "referral" && !referralLoaded) void refreshReferralDashboard();
       render();
     });
+  });
+
+  document.querySelectorAll<HTMLButtonElement>("[data-open-referral-modal]").forEach((button) => {
+    button.addEventListener("click", () => {
+      referralError = "";
+      referralModalOpen = true;
+      render();
+    });
+  });
+  document.querySelectorAll<HTMLButtonElement>("[data-close-referral-modal]").forEach((button) => {
+    button.addEventListener("click", () => {
+      referralModalOpen = false;
+      referralError = "";
+      render();
+    });
+  });
+  document.querySelector<HTMLElement>("[data-referral-modal-backdrop]")?.addEventListener("pointerdown", (event) => {
+    if (event.target !== event.currentTarget) return;
+    referralModalOpen = false;
+    referralError = "";
+    render();
+  });
+  document.querySelector<HTMLButtonElement>("#referralRefresh")?.addEventListener("click", () => {
+    void refreshReferralDashboard(true);
+  });
+  document.querySelectorAll<HTMLButtonElement>("[data-copy-referral]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const code = button.dataset.copyReferral;
+      if (!code) return;
+      void navigator.clipboard.writeText(referralLinkFor(code)).then(() => {
+        showReferralToast("Lien copié");
+      });
+    });
+  });
+  document.querySelectorAll<HTMLButtonElement>("[data-delete-referral]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const code = button.dataset.deleteReferral;
+      if (!code || referralDeleting) return;
+      if (!window.confirm("Supprimer ce code de parrainage ? Le lien existant cessera de fonctionner.")) {
+        return;
+      }
+      void deleteReferralCode(code);
+    });
+  });
+  document.querySelector<HTMLFormElement>("[data-referral-form]")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget as HTMLFormElement);
+    void createReferralCode(String(form.get("label") ?? "").trim());
   });
 
   document.querySelectorAll<HTMLButtonElement>("[data-stats-range]").forEach((button) => {
@@ -28091,6 +31832,24 @@ const bindUi = () => {
       selectedWorkTimeBucket = bucket;
       render();
     });
+  });
+
+  document.querySelector<HTMLButtonElement>("#tokscaleSubmit")?.addEventListener("click", () => {
+    const button = document.querySelector<HTMLButtonElement>("#tokscaleSubmit");
+    if (!button) return;
+    button.disabled = true;
+    const label = button.querySelector("span");
+    if (label) label.textContent = "Envoi en cours…";
+    void invoke("tokscale_submit_usage")
+      .then(() => {
+        statusText = "Usage Freebuff envoyé à Tokscale avec les compteurs input et cache corrigés.";
+      })
+      .catch((error) => {
+        statusText = `Envoi Tokscale impossible : ${String(error)}`;
+      })
+      .finally(() => {
+        if (activeView === "dashboard") render();
+      });
   });
 
   document.querySelector<HTMLButtonElement>("#dashboardRefresh")?.addEventListener("click", () => {
@@ -28265,7 +32024,7 @@ const bindUi = () => {
   });
 
   document.querySelectorAll<HTMLButtonElement>("[data-open-discussions]").forEach((button) => {
-    button.addEventListener("click", () => setActiveView("discussions"));
+    button.addEventListener("click", () => openDiscussionHistory());
   });
 
   const returnToChat = () => {
@@ -28298,6 +32057,9 @@ const bindUi = () => {
   document.querySelector<HTMLButtonElement>("#refreshDiscussions")?.addEventListener("click", () => {
     void refreshDiscussions();
   });
+  document.querySelector<HTMLButtonElement>("#clearDiscussionSearch")?.addEventListener("click", () => {
+    openDiscussionHistory();
+  });
 
   // Vue conversation : navigation, composer, arret et copie des blocs de code.
   document.querySelector<HTMLButtonElement>("#chatBack")?.addEventListener("click", () => {
@@ -28305,7 +32067,7 @@ const bindUi = () => {
       document.body.classList.add("chat-sidebar-open");
       syncMobileDrawerAccessibility(true, true);
     } else {
-      setActiveView("discussions");
+      openDiscussionHistory();
     }
   });
   document.querySelector<HTMLButtonElement>("#chatRefresh")?.addEventListener("click", () => {
@@ -28425,6 +32187,7 @@ const bindUi = () => {
   };
   chatPrompt?.addEventListener("input", () => {
     chatDraft = chatPrompt.value;
+    scheduleChatDraftPersist();
     chatPrompt.setCustomValidity("");
     resizeChatPrompt();
   });
@@ -28479,6 +32242,7 @@ const bindUi = () => {
   document.querySelectorAll<HTMLButtonElement>("#chatPanel [data-chat-starter]").forEach((button) => {
     button.addEventListener("click", () => {
       chatDraft = button.dataset.chatStarter ?? "";
+      scheduleChatDraftPersist();
       const prompt = document.querySelector<HTMLTextAreaElement>("#chatPrompt");
       if (prompt) {
         prompt.value = chatDraft;
@@ -28630,6 +32394,44 @@ const bindUi = () => {
   document.querySelector<HTMLButtonElement>("#doctor")?.addEventListener("click", () => {
     const agent = activeAgent();
     if (agent?.doctorCommand) void sendLine(agentSubcommand(agent, agent.doctorCommand));
+  });
+
+  document.querySelector<HTMLButtonElement>("#closeProxyManager")?.addEventListener("click", () => {
+    closeProxyManagerModal();
+  });
+  document.querySelector<HTMLButtonElement>("#cancelProxyManager")?.addEventListener("click", () => {
+    closeProxyManagerModal();
+  });
+  document.querySelector<HTMLDivElement>("#proxyManagerBackdrop")?.addEventListener("click", (event) => {
+    if (event.target === event.currentTarget) closeProxyManagerModal();
+  });
+  document.querySelector<HTMLInputElement>("#proxyManagerControls")?.addEventListener("change", (event) => {
+    proxyManagerControlsEnabled = (event.currentTarget as HTMLInputElement).checked;
+  });
+  document.querySelector<HTMLButtonElement>("#addProxyDraft")?.addEventListener("click", () => {
+    addProxyManagerDraft();
+  });
+  document.querySelectorAll<HTMLButtonElement>("[data-remove-proxy-draft]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const proxyId = button.dataset.removeProxyDraft;
+      if (proxyId) removeProxyManagerDraft(proxyId);
+    });
+  });
+  document.querySelectorAll<HTMLButtonElement>("[data-toggle-proxy-secret]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const proxyId = button.dataset.toggleProxySecret;
+      if (!proxyId) return;
+      const input = proxyManagerDraftInput(proxyId, "proxyUrl");
+      if (!input) return;
+      const reveal = input.type === "password";
+      input.type = reveal ? "text" : "password";
+      button.title = reveal ? "Masquer l’URL" : "Afficher l’URL";
+      button.setAttribute("aria-pressed", String(reveal));
+      renderIcons(button);
+    });
+  });
+  document.querySelector<HTMLButtonElement>("#saveProxyManager")?.addEventListener("click", () => {
+    void saveProxyManager();
   });
 
   document.querySelector<HTMLButtonElement>("#closeAgentsModal")?.addEventListener("click", () => {
@@ -28811,18 +32613,399 @@ const createTerminalSession = async (
   };
 
   terminal.onData((data) => {
-    if (session.ptyId !== null) {
-      void invoke("write_terminal", { id: session.ptyId, data }).catch(() => undefined);
+    const probing = termInputProbeActive();
+    if (probing) {
+      console.log(
+        "[TERM-INPUT] onData",
+        JSON.stringify(data),
+        "ptyId=", session.ptyId,
+        "running=", session.running,
+        "externalSync=", session.externalSync,
+        "key=", session.key,
+      );
     }
+    // Terminal Freebuff Desktop synchronise : aucun PTY Switch derriere.
+    // Ne jamais tenter d'ecrire ni de bufferiser (ce qui rendait muet le
+    // terminal et simulant un clavier actif sans aucune sortie).
+    if (session.externalSync) return;
+    if (session.ptyId !== null && session.running) {
+      if (probing) {
+        const st = terminalProbeStats.get(session.key) ?? { sent: 0, echoed: 0 };
+        st.sent += data.length;
+        terminalProbeStats.set(session.key, st);
+      }
+      void invoke("write_terminal", { id: session.ptyId, data }).catch(() => {
+        queueTerminalInput(session, data);
+        if (probing) console.log("[TERM-INPUT] write_terminal ECHOUÉ -> bufferisé", JSON.stringify(data));
+      });
+      return;
+    }
+    if (probing) {
+      console.log(
+        "[TERM-INPUT] onData mais ptyId/running non prêt (ptyId=",
+        session.ptyId,
+        ", running=",
+        session.running,
+        ") -> bufferisé, jamais envoyé tant que non rattaché",
+      );
+    }
+    // Le changement Chat -> Terminal peut arriver pendant la reconnexion VPS.
+    // Ne pas perdre les caractères saisis avant que le PTY soit réattaché.
+    queueTerminalInput(session, data);
   });
-
   return session;
 };
 
+const terminalFocusHosts = new WeakSet<HTMLElement>();
+const terminalPendingInput = new Map<string, string[]>();
+
+const queueTerminalInput = (session: TerminalSession, data: string): void => {
+  if (!data) return;
+  const chunks = terminalPendingInput.get(session.key) ?? [];
+  chunks.push(data);
+  terminalPendingInput.set(session.key, chunks);
+};
+
+const flushTerminalInput = (session: TerminalSession): void => {
+  if (!session.running || session.ptyId === null) return;
+  const chunks = terminalPendingInput.get(session.key);
+  if (!chunks?.length) return;
+  terminalPendingInput.delete(session.key);
+  void invoke("write_terminal", { id: session.ptyId, data: chunks.join("") }).catch(() => {
+    const retry = terminalPendingInput.get(session.key) ?? [];
+    terminalPendingInput.set(session.key, [...chunks, ...retry]);
+  });
+};
+
+// --- Verrou clavier terminal -----------------------------------------------
+// Le textarea cache de xterm reste le seul capteur de clavier (mecanisme
+// officiel de xterm.js). Les protections documentees dans
+// docs/terminal-focus-vps-fix.md (file terminalPendingInput, flushTerminalInput,
+// focus differe) restent en place ; ce bloc ajoute trois couches pour qu'une
+// frappe ne soit jamais perdue et qu'un silence ne soit plus jamais muet :
+//  1. un chien de garde qui reprend le focus toutes les 500 ms ;
+//  2. un intercepteur global keydown qui re-delivre a xterm la premiere frappe
+//     tapee hors focus (alt-tab, remontage DOM, clic hors terminal...) ;
+//  3. un badge par terminal montrant focus, file d'attente et transport.
+type TerminalKeyboardBadgeTone = "ok" | "warn" | "off";
+
+const TERMINAL_KEYBOARD_WATCHDOG_MS = 500;
+const TERMINAL_INPUT_QUEUE_GUARD_MS = 2_000;
+
+// Touches que l'intercepteur re-delivre a xterm quand le focus a ete perdu.
+// Ctrl+lettre (hors AltGr) reste la propriete du navigateur et des raccourcis
+// applicatifs ; Echap et F11 gardent leur comportement global.
+const TERMINAL_KEYBOARD_INTERCEPT_SPECIAL_KEYS = new Set([
+  "Enter",
+  "Backspace",
+  "Delete",
+  "Tab",
+  "Insert",
+  "ArrowUp",
+  "ArrowDown",
+  "ArrowLeft",
+  "ArrowRight",
+  "Home",
+  "End",
+  "PageUp",
+  "PageDown",
+]);
+const TERMINAL_KEYBOARD_INTERCEPT_SKIP_KEYS = new Set([
+  "Shift",
+  "Control",
+  "Alt",
+  "Meta",
+  "AltGraph",
+  "CapsLock",
+  "NumLock",
+  "ScrollLock",
+  "Escape",
+  "Dead",
+  "Unidentified",
+  "ContextMenu",
+  "F11",
+]);
+
+// Sonde javascript de diagnostic des inputs terminaux (cote navigateur).
+// Activee par `localStorage.setItem("cst.termInputProbe","1")` avant rechargement.
+// Consigne dans la console chaque etape d'une frappe : keydown intercepte,
+// focus textarea, onData xterm, envoi socket. Permet de localiser la couche
+// qui perd les touches (capteur clavier vs focus vs transport) sans toucher au
+// serveur.
+const termInputProbeActive = (): boolean => {
+  try {
+    return window.localStorage.getItem("cst.termInputProbe") === "1";
+  } catch {
+    return false;
+  }
+};
+
+// Compteurs d'octets emiss/receus par terminal, uniquement en mode sonde, pour
+// distinguer dans l'overlay « les touches partent mais rien ne revient » (emiss>0,
+// echo=0 -> transport/serveur) de « xterm n'emet pas onData » (emiss=0 -> focus).
+const terminalProbeStats = new Map<string, { sent: number; echoed: number }>();
+
+const updateTerminalProbeStatus = (): void => {
+  if (!termInputProbeActive()) return;
+  terminalSessions.forEach((session) => {
+    const pill = document.querySelector<HTMLElement>(
+      `[data-probe-status="${CSS.escape(session.key)}"]`,
+    );
+    if (!pill) return;
+    const transport =
+      session.externalSync
+        ? "externe(RO)"
+        : isRemoteMode() && session.ptyId !== null
+          ? terminalTransportState(session.ptyId)
+          : (session.ptyId !== null ? "local" : "aucun");
+    const pending =
+      session.ptyId !== null && isRemoteMode() ? terminalRemotePendingInputChars(session.ptyId) : 0;
+    const st = terminalProbeStats.get(session.key);
+    const focus =
+      document.activeElement === session.terminal.textarea && document.hasFocus()
+        ? "focus:OK"
+        : "focus:PAS-FOCUS";
+    pill.textContent = (
+      "probe | ptyId=" + (session.ptyId ?? "-")
+      + " running=" + String(session.running)
+      + " | " + focus
+      + " | transport=" + transport
+      + " | pending=" + pending
+      + " | echo=" + (st ? String(st.sent) + "->" + String(st.echoed) : "0->0")
+    );
+  });
+};
+
+const terminalKeyboardOverlayOpen = (): boolean =>
+  activeModalDialog() !== null ||
+  newTerminalModalOpen ||
+  agentsModalOpen ||
+  workspaceModalOpen ||
+  terminalEnvironmentMenuOpen;
+
+// L'intercepteur ne vole jamais une frappe destinee a un element interactif :
+// le clavier du terminal ne se reprend que lorsque la frappe ne vise rien.
+const terminalKeyboardBlockedTarget = (target: EventTarget | null): boolean => {
+  if (!(target instanceof Element)) return false;
+  if (target.closest(".xterm, [data-terminal-host]")) return true;
+  return Boolean(
+    target.closest(
+      "input, textarea, select, button, a, label, summary, option, [contenteditable='true'], [contenteditable='plaintext-only'], [role='button'], [role='menuitem']",
+    ),
+  );
+};
+
+const focusTerminalKeyboard = (session: TerminalSession): void => {
+  const textarea = session.terminal.textarea;
+  if (!textarea || textarea.disabled) return;
+  activeTerminalKey = session.key;
+  session.terminal.focus();
+  textarea.focus({ preventScroll: true });
+  if (termInputProbeActive()) {
+    console.log(
+      "[TERM-INPUT] focusTerminalKeyboard key=",
+      session.key,
+      "ptyId=",
+      session.ptyId,
+      "running=",
+      session.running,
+      "activeElement=",
+      document.activeElement?.tagName,
+      "hasFocus=",
+      document.hasFocus(),
+      "textareaDisabled=",
+      textarea.disabled,
+    );
+  }
+};
+
+const activeElementBlocksTerminalFocus = (): boolean => {
+  const active = document.activeElement;
+  if (!active || active === document.body || active === document.documentElement) return false;
+  if (active.tagName === "TEXTAREA" && active.classList.contains("xterm-helper-textarea")) {
+    return false;
+  }
+  return (
+    active.tagName === "INPUT" ||
+    active.tagName === "SELECT" ||
+    active.tagName === "TEXTAREA" ||
+    (active instanceof HTMLElement && active.isContentEditable)
+  );
+};
+
+const terminalKeydownIsInterceptable = (event: KeyboardEvent): boolean => {
+  // Une frappe synthetique (re-delivrance) ne doit jamais etre reinterceptee :
+  // c'est aussi ce qui empeche toute boucle.
+  if (!event.isTrusted || event.isComposing || event.metaKey) return false;
+  if (TERMINAL_KEYBOARD_INTERCEPT_SKIP_KEYS.has(event.key)) return false;
+  const printable = event.key.length === 1;
+  // AltGr arrive comme Ctrl+Alt sous Windows : c'est une saisie de caractere,
+  // pas un raccourci. Un Ctrl simple reste hors interception.
+  const printableCombo = printable && (!event.ctrlKey || event.altKey);
+  const special =
+    TERMINAL_KEYBOARD_INTERCEPT_SPECIAL_KEYS.has(event.key) && !event.ctrlKey && !event.altKey;
+  return printableCombo || special;
+};
+
+const interceptTerminalKeyboard = (event: KeyboardEvent): void => {
+  const probing = termInputProbeActive();
+  if (activeView !== "terminal" || terminalKeyboardOverlayOpen()) {
+    if (probing) console.log("[TERM-INPUT] keydown NON intercepté (vue/overlay) key=", event.key);
+    return;
+  }
+  if (!terminalKeydownIsInterceptable(event)) {
+    if (probing && event.key.length === 1 && event.isTrusted) {
+      console.log("[TERM-INPUT] keydown non interceptable key=", JSON.stringify(event.key), "ctrl=", event.ctrlKey, "alt=", event.altKey, "trusted=", event.isTrusted);
+    }
+    return;
+  }
+  if (terminalKeyboardBlockedTarget(event.target)) {
+    if (probing) console.log("[TERM-INPUT] keydown laissé à xterm (target dans .xterm) key=", JSON.stringify(event.key), "target=", (event.target as Element)?.className);
+    return;
+  }
+  const session = activeTerminal();
+  if (!session?.running || !session.terminal.element?.isConnected) {
+    if (probing) console.log("[TERM-INPUT] keydown ignoré (pas de session running/isConnected) key=", JSON.stringify(event.key));
+    return;
+  }
+  const textarea = session.terminal.textarea;
+  if (!textarea || textarea.disabled) return;
+  // Le focus a ete perdu (alt-tab, remontage DOM, clic hors terminal) : on le
+  // reprend puis on re-delivre l'evenement a la textarea pour que xterm traduise
+  // la sequence exactement comme une frappe recue directement.
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  focusTerminalKeyboard(session);
+  textarea.dispatchEvent(
+    new KeyboardEvent("keydown", {
+      key: event.key,
+      code: event.code,
+      location: event.location,
+      repeat: event.repeat,
+      ctrlKey: event.ctrlKey,
+      altKey: event.altKey,
+      shiftKey: event.shiftKey,
+      metaKey: event.metaKey,
+      bubbles: true,
+      cancelable: true,
+    }),
+  );
+};
+
+const lastTerminalKeyboardBadgeState = new Map<string, string>();
+
+const terminalKeyboardBadgeState = (
+  session: TerminalSession,
+): { tone: TerminalKeyboardBadgeTone; label: string; title: string } => {
+  if (session.externalSync) {
+    return {
+      tone: "off",
+      label: "Synchro",
+      title: "Terminal Freebuff Desktop synchronisé : Switch l'affiche mais n'a aucun clavier à piloter. Ouvre un nouveau terminal Switch pour taper.",
+    };
+  }
+  if (!session.running) {
+    return {
+      tone: "off",
+      label: "Inactif",
+      title: "Aucun PTY actif pour ce terminal. Cliquez pour tenter un rattachement.",
+    };
+  }
+  const transport =
+    isRemoteMode() && session.ptyId !== null ? terminalTransportState(session.ptyId) : "socket";
+  if (transport === "reconnecting" || transport === "starting") {
+    return {
+      tone: "warn",
+      label: "Reconnexion",
+      title: "Le transport vers le PTY se retablit ; les frappes sont conservees dans l'ordre.",
+    };
+  }
+  if (transport === "ended" || transport === "idle") {
+    return {
+      tone: "off",
+      label: "PTY perdu",
+      title: "Le PTY distant n'est plus rattache a cet onglet. Cliquez pour rattacher.",
+    };
+  }
+  const localPending = (terminalPendingInput.get(session.key) ?? []).join("").length;
+  const remotePending =
+    session.ptyId !== null && isRemoteMode() ? terminalRemotePendingInputChars(session.ptyId) : 0;
+  const pending = localPending + remotePending;
+  if (pending > 0) {
+    return {
+      tone: "warn",
+      label: `File ${pending}`,
+      title: "Des frappes sont bufferisees et partiront des que le PTY sera pret.",
+    };
+  }
+  const textarea = session.terminal.textarea;
+  if (textarea && document.activeElement === textarea && document.hasFocus()) {
+    return { tone: "ok", label: "Clavier", title: "Les touches tapees vont dans ce terminal." };
+  }
+  return {
+    tone: "off",
+    label: "Clavier",
+    title: "Ce terminal n'a pas le focus clavier. Cliquez dedans ou tapez une touche pour l'activer.",
+  };
+};
+
+const updateTerminalKeyboardBadges = (): void => {
+  terminalSessions.forEach((session) => {
+    const badge = document.querySelector<HTMLElement>(
+      `[data-terminal-keyboard="${CSS.escape(session.key)}"]`,
+    );
+    if (!badge) return;
+    const state = terminalKeyboardBadgeState(session);
+    const signature = `${state.tone}:${state.label}:${state.title}`;
+    if (lastTerminalKeyboardBadgeState.get(session.key) === signature) return;
+    lastTerminalKeyboardBadgeState.set(session.key, signature);
+    badge.dataset.terminalKeyboardTone = state.tone;
+    const label = badge.querySelector<HTMLElement>("[data-terminal-keyboard-label]");
+    if (label) label.textContent = state.label;
+    badge.title = state.title;
+  });
+};
+
+let terminalKeyboardWatchdogTimer: number | null = null;
+let terminalInputQueueGuardTimer: number | null = null;
+
+const ensureTerminalKeyboardWatchdog = (): void => {
+  if (terminalKeyboardWatchdogTimer !== null) return;
+  terminalKeyboardWatchdogTimer = window.setInterval(() => {
+    if (activeView === "terminal" && document.hasFocus() && !terminalKeyboardOverlayOpen()) {
+      const session = activeTerminal();
+      // Le chien de garde ne vole jamais le focus d'un champ reellement editable
+      // (recherche, code de login, cle API...) : il ne reprend le clavier que
+      // lorsque le focus repose sur le corps de la page ou un element non editable.
+      if (
+        session?.running
+        && session.terminal.element?.isConnected
+        && document.activeElement !== session.terminal.textarea
+        && !activeElementBlocksTerminalFocus()
+      ) {
+        focusTerminalKeyboard(session);
+      }
+    }
+    updateTerminalKeyboardBadges();
+    updateTerminalProbeStatus();
+  }, TERMINAL_KEYBOARD_WATCHDOG_MS);
+};
+
+const ensureTerminalInputQueueGuard = (): void => {
+  if (terminalInputQueueGuardTimer !== null) return;
+  terminalInputQueueGuardTimer = window.setInterval(() => {
+    if (terminalPendingInput.size === 0) return;
+    // Une session prete avec une file stagnante (flush rate pendant un
+    // demarrage, ecriture echouee) repart sans attendre une nouvelle frappe.
+    terminalSessions.forEach((session) => {
+      if (session.running && session.ptyId !== null) flushTerminalInput(session);
+    });
+  }, TERMINAL_INPUT_QUEUE_GUARD_MS);
+};
+
 const mountExpertTerminals = () => {
-  // Le mur de chats peut afficher des tuiles de terminal : la table couvre donc
-  // tous les terminaux ouverts, et la taille de police suit le nombre de tuiles
-  // reellement presentes dans le DOM plutot que le seul mur de terminaux.
+  // Les terminaux ne sont montes que dans la vue Terminal. La session et son PTY
+  // restent actifs lorsque l'utilisateur revient aux chats.
   const sessionByKey = new Map(terminalSessions.map((session) => [session.key, session]));
   const hosts = document.querySelectorAll<HTMLDivElement>("[data-terminal-host]");
   const fontSize = hosts.length > 9 ? 10 : hosts.length > 4 ? 11 : 12;
@@ -28832,13 +33015,52 @@ const mountExpertTerminals = () => {
     if (!session) return;
     session.terminal.options.fontSize = session.key === expertTerminalFullscreenKey ? 13 : fontSize;
     if (session.terminal.element) {
-      host.appendChild(session.terminal.element);
+      // xterm ne tolère pas les détachements/attachés répétés : on ne le
+      // déplace que s'il n'est pas déjà dans ce conteneur. Sinon on garde la
+      // même instance (scrollback, curseur) et on se contente de la re-mesurer.
+      if (session.terminal.element.parentElement !== host) {
+        host.appendChild(session.terminal.element);
+      }
     } else {
       session.terminal.open(host);
+    }
+    if (!terminalFocusHosts.has(host)) {
+      terminalFocusHosts.add(host);
+      const restorePointerFocus = () => {
+        if (!session.running || activeView !== "terminal" || activeModalDialog()) return;
+        activeTerminalKey = session.key;
+        session.terminal.focus();
+        const input = host.querySelector<HTMLTextAreaElement>(".xterm-helper-textarea");
+        if (input && !input.disabled) input.focus({ preventScroll: true });
+      };
+      const restorePointerFocusAfterPaint = () => {
+        window.requestAnimationFrame(() => {
+          window.requestAnimationFrame(restorePointerFocus);
+        });
+      };
+      host.addEventListener("pointerdown", restorePointerFocus, true);
+      host.addEventListener("pointerup", () => {
+        restorePointerFocus();
+        restorePointerFocusAfterPaint();
+      }, true);
+      host.addEventListener("keydown", (event) => {
+        if (
+          event.key !== "Enter"
+          || !(event.target instanceof HTMLTextAreaElement)
+          || !event.target.matches(".xterm-helper-textarea")
+        ) {
+          return;
+        }
+        // Le choix du modele Freebuff se valide avec Entree. Son TUI peut
+        // alors rendre un nouvel ecran et faire perdre le textarea clavier
+        // de xterm : on le reprend une fois ce nouvel ecran peint.
+        restorePointerFocusAfterPaint();
+      }, true);
     }
   });
 
   const modalOpen =
+    activeModalDialog() !== null ||
     newTerminalModalOpen ||
     agentsModalOpen ||
     workspaceModalOpen ||
@@ -28851,12 +33073,32 @@ const mountExpertTerminals = () => {
     const openCodeKeyInput = Array.from(
       document.querySelectorAll<HTMLInputElement>("[data-opencode-login-key-input]"),
     ).find((input) => input.dataset.opencodeLoginKeyInput === focusKey);
+    const terminalSession = sessionByKey.get(focusKey) ?? null;
     if (claudeCodeInput) claudeCodeInput.focus();
     else if (openCodeKeyInput) openCodeKeyInput.focus();
-    else sessionByKey.get(focusKey)?.terminal.focus();
+    else terminalSession?.terminal.focus();
+    if (claudeCodeInput || openCodeKeyInput || terminalSession) {
+      if (requestTerminalFocusKey === focusKey) requestTerminalFocusKey = null;
+      if (terminalSession) {
+        window.requestAnimationFrame(() => {
+          window.requestAnimationFrame(() => {
+            if (
+              activeView === "terminal"
+              && !activeModalDialog()
+              && terminalSession.running
+              && terminalSession.terminal.element?.isConnected
+            ) {
+              terminalSession.terminal.focus();
+            }
+          });
+        });
+      }
+    }
   }
-  requestTerminalFocusKey = null;
-  requestAnimationFrame(() => fitAndResizeExpertTerminals());
+  updateTerminalKeyboardBadges();
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => fitAndResizeExpertTerminals());
+  });
 };
 
 const createNewTerminalOnce = async (
@@ -28881,30 +33123,23 @@ const createNewTerminalOnce = async (
   if (!backgroundLogin) activeView = "terminal";
   // Ouvrir un login ne doit pas faire apparaitre en meme temps tous les
   // terminaux de travail sauvegardes. Si une restauration a deja commence, on
-  // l'attend toutefois pour conserver un comptage de slots coherent.
-  if (!loginOnly || terminalRestoreAttempted) {
+  // l'attend toutefois pour ne pas melanger la restauration et le login.
+  if (!loginOnly && !terminalRestoreAttempted) {
+    // Premiere creation apres chargement : ne pas bloquer le spawn du nouveau
+    // terminal sur la restauration des anciens onglets. Celle-ci se poursuit
+    // en arriere-plan ; ses rattachements par ptyId n'entrent pas en conflit
+    // avec cette nouvelle session (identifiants distincts), et le focus du
+    // terminal fraichement cree reste porte par requestTerminalFocusKey.
+    void ensureTerminalsRestored();
+  } else if (!loginOnly || terminalRestoreAttempted) {
     await ensureTerminalsRestored();
   }
-  if (terminalSessions.length + pendingTerminalCreations >= EXPERT_MAX_TERMINALS) {
-    statusText = `Limite atteinte: ${EXPERT_MAX_TERMINALS} terminaux maximum dans une fenetre`;
-    render();
-    return null;
-  }
-  pendingTerminalCreations += 1;
-  let terminalSlotReserved = true;
-  const releaseTerminalSlot = () => {
-    if (terminalSlotReserved) {
-      terminalSlotReserved = false;
-      pendingTerminalCreations -= 1;
-    }
-  };
 
   if (!settingsAlreadyRead) {
     readSettingsForm();
   }
   const account = settings.accounts.find((candidate) => candidate.id === accountId) ?? null;
   if (!account) {
-    releaseTerminalSlot();
     return null;
   }
 
@@ -28922,6 +33157,15 @@ const createNewTerminalOnce = async (
   // ne force que pour les agents CLI "premier rang" (on laisse les agents IDE /
   // customs intacts).
   const wantedProvider = accountProvider(account);
+  if (wantedProvider === "freebuff") {
+    try {
+      await assertFreebuffAccountAvailable(account);
+    } catch (error) {
+      statusText = `Lancement Freebuff refusé : ${String(error)}`;
+      render();
+      return null;
+    }
+  }
   const chosenAgent = agentById(chosenAgentId);
   if (isFirstPartyAgent(chosenAgent) && agentProvider(chosenAgent) !== wantedProvider) {
     chosenAgentId = providerAgentId(wantedProvider);
@@ -28934,7 +33178,6 @@ const createNewTerminalOnce = async (
     try {
       settings = await invoke<AppSettings>("save_settings", { settings });
     } catch (error) {
-      releaseTerminalSlot();
       throw error;
     }
   }
@@ -28945,7 +33188,6 @@ const createNewTerminalOnce = async (
   // partages encore presents dans le navigateur d'un utilisateur.
   const savedAccount = settings.accounts.find((candidate) => candidate.id === account.id) ?? null;
   if (!savedAccount) {
-    releaseTerminalSlot();
     return null;
   }
 
@@ -28960,9 +33202,9 @@ const createNewTerminalOnce = async (
   if (resumeSessionId) {
     session.codexSessionId = resumeSessionId;
     claimedSessionIds.add(resumeSessionId);
+    if (wantedProvider === "freebuff") session.sessionCaptureDone = true;
   }
   terminalSessions.push(session);
-  releaseTerminalSlot();
   if (!backgroundLogin) {
     activateTerminalSession(session);
     requestTerminalFocusKey = session.key;
@@ -29331,13 +33573,23 @@ const startTerminalSession = async (
       rows: session.terminal.rows,
       command: commandOverride ?? autoRunCommand,
       agentId: session.agentId,
+      sourceTerminalKey: session.key,
       loginOnly,
       targetNodeId: isRemoteMode() ? workspaceExecutionTargetIdForPath(folder) : undefined,
     });
     const ptyId = typeof started === "number" ? started : started.id;
     if (ptyId !== requestedId) terminalSessionsByPtyId.delete(requestedId);
+    if (typeof started !== "number") {
+      session.nodeId = started.nodeId ?? null;
+      session.remoteId = started.remoteId ?? ptyId;
+    } else {
+      session.nodeId = null;
+      session.remoteId = null;
+    }
     session.ptyId = ptyId;
     terminalSessionsByPtyId.set(ptyId, session);
+    flushTerminalInput(session);
+    flushTerminalInput(session);
     session.workspaceId = loginOnly || typeof started === "number" ? null : started.workspaceId;
     session.workspacePath = loginOnly || typeof started === "number" ? null : started.workspacePath;
     session.running = true;
@@ -29388,6 +33640,12 @@ const closeTerminalSession = async (key: string) => {
     forgetOpenCodeLoginOutput(session.key);
   }
   if (expertTerminalFullscreenKey === key) expertTerminalFullscreenKey = null;
+  const timer = terminalFitTimers.get(key);
+  if (timer !== undefined) window.clearTimeout(timer);
+  terminalFitTimers.delete(key);
+  terminalActivity.forget(key);
+  terminalPendingInput.delete(key);
+  lastTerminalKeyboardBadgeState.delete(key);
   const closedWorkspaceKey = terminalWorkspaceDescriptor(session).key;
   const ptyId = session.ptyId;
   if (ptyId !== null) terminalSessionsByPtyId.delete(ptyId);
@@ -29473,20 +33731,6 @@ const closeHoveredExpertChat = (action: ChatHoverShortcutAction): boolean => {
 };
 
 const toggleHoveredExpertFullscreen = (): boolean => {
-  // Une tuile de terminal peut desormais etre survolee dans le mur de chats.
-  const hoveredTerminalPane =
-    activeView === "chat"
-      ? document.querySelector<HTMLElement>("[data-expert-terminal-pane]:hover")
-      : null;
-  if (hoveredTerminalPane) {
-    const hoveredSession = terminalSessions.find(
-      (candidate) => candidate.key === hoveredTerminalPane.dataset.expertTerminalPane,
-    );
-    if (hoveredSession) {
-      toggleExpertTerminalFullscreen(hoveredSession);
-      return true;
-    }
-  }
   if (activeView === "terminal") {
     const hoveredPane = document.querySelector<HTMLElement>("[data-expert-terminal-pane]:hover");
     const key = expertTerminalFullscreenKey ?? hoveredPane?.dataset.expertTerminalPane;
@@ -29550,6 +33794,7 @@ const setupEvents = async () => {
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState !== "visible") return;
     refreshChatRuntimeClocks();
+    if (activeView === "terminal") void recoverActiveTerminalInput();
     void dispatchDueScheduledChats();
     if ((nextUnconnectedAccountExpiry() ?? Number.POSITIVE_INFINITY) <= Date.now()) {
       void cleanupExpiredUnconnectedAccounts();
@@ -29565,11 +33810,24 @@ const setupEvents = async () => {
     ) {
       void refreshLimitStatus(true);
     }
-    if (activeView === "pool") void refreshPoolStatus();
+    if (activeView === "pool") {
+      void refreshAccountCompletions();
+      void refreshPoolStatus();
+    }
     if (activeView === "dashboard") {
       void refreshUsageDashboard();
       void refreshAccountUsage();
       void refreshWorkTimeDashboard();
+      void refreshReferralDashboard(false, true);
+    }
+    if (activeView === "tracking") {
+      void trackingViewModule?.refreshTrackingPanel(render, true);
+    }
+    if (activeView === "duello-bank") {
+      void duelloBankModule?.refreshDuelloBankPanel(render, true);
+    }
+    if (activeView === "freebuff-cloud") {
+      void freebuffCloudModule?.refreshFreebuffCloudPanel(render, true);
     }
     if (activeView === "vps") void vpsModule?.refreshVpsPanel(render, true);
     if (activeView === "video") void videoModule?.refreshVideoPanel(render, true);
@@ -29596,6 +33854,11 @@ const setupEvents = async () => {
       });
     }
   });
+  const recoverTerminalOnPageReturn = () => {
+    if (activeView === "terminal") void recoverActiveTerminalInput();
+  };
+  window.addEventListener("pageshow", recoverTerminalOnPageReturn);
+  window.addEventListener("online", recoverTerminalOnPageReturn);
   document.addEventListener("fullscreenchange", scheduleFullscreenSync);
   document.addEventListener("webkitfullscreenchange", scheduleFullscreenSync);
   window.addEventListener("resize", scheduleFullscreenSync);
@@ -29619,8 +33882,12 @@ const setupEvents = async () => {
   startTerminalActivityTicker();
   unlistenData = await listen<PtyDataEvent>("pty-data", (event) => {
     const session = terminalSessionsByPtyId.get(event.payload.id);
-    session?.terminal.write(event.payload.data);
-    if (session) terminalLastOutputAt.set(session.key, Date.now());
+    if (session) {
+      // xterm accepte les écritures par lots ; éviter de forcer un layout/reflow
+      // pour chaque fragment PTY réduit les micro-freezes pendant le streaming.
+      session.terminal.write(event.payload.data);
+      terminalActivity.record(session.key, event.payload.data);
+    }
     if (session?.loginOnly) {
       applyRemoteCodexLoginOutput(session, event.payload.data);
       applyRemoteClaudeLoginOutput(session, event.payload.data);
@@ -29632,10 +33899,14 @@ const setupEvents = async () => {
     const session = terminalSessionsByPtyId.get(event.payload.id);
     if (!session) return;
     terminalSessionsByPtyId.delete(event.payload.id);
+    const sessionIndex = terminalSessions.indexOf(session);
+    if (sessionIndex >= 0) terminalSessions.splice(sessionIndex, 1);
+    if (session.codexSessionId) claimedSessionIds.delete(session.codexSessionId);
 
     session.ptyId = null;
     session.running = false;
     session.status = "Ferme";
+    terminalActivity.forget(session.key);
 
     if (session.loginOnly) {
       forgetRemoteClaudeLoginOutput(session.key);
@@ -29670,6 +33941,7 @@ const setupEvents = async () => {
   });
 
   window.addEventListener("keydown", (event) => {
+    if (keyboardShortcutTargetIsTerminal(event.target)) return;
     if (!keyboardShortcutMatchesAction("toggle-environments", event) || !settings) return;
     if (
       !terminalEnvironmentMenuOpen &&
@@ -29725,6 +33997,7 @@ const setupEvents = async () => {
   }, true);
 
   window.addEventListener("keydown", (event) => {
+    if (keyboardShortcutTargetIsTerminal(event.target)) return;
     if (keyboardShortcutMatchesAction("toggle-sidebar", event)) {
       event.preventDefault();
       event.stopImmediatePropagation();
@@ -29756,7 +34029,7 @@ const setupEvents = async () => {
     if (keyboardShortcutMatchesAction("open-discussions", event)) {
       event.preventDefault();
       event.stopImmediatePropagation();
-      setActiveView("discussions");
+      openDiscussionHistory();
       return;
     }
 
@@ -29787,6 +34060,12 @@ const setupEvents = async () => {
       return;
     }
 
+    if (event.key === "Escape" && terminalDeleteCandidateKey) {
+      event.preventDefault();
+      closeTerminalDeleteModal();
+      return;
+    }
+
     if (event.key === "Escape" && terminalEnvironmentMenuOpen) {
       event.preventDefault();
       closeTerminalEnvironmentMenu();
@@ -29808,6 +34087,12 @@ const setupEvents = async () => {
     if (event.key === "Escape" && document.body.classList.contains("chat-sidebar-open")) {
       event.preventDefault();
       closeMobileOverlays();
+      return;
+    }
+
+    if (event.key === "Escape" && proxyManagerModalOpen) {
+      event.preventDefault();
+      closeProxyManagerModal();
       return;
     }
 
@@ -29850,6 +34135,25 @@ const setupEvents = async () => {
     if (event.key !== "F11") return;
     event.preventDefault();
     void toggleFullscreen();
+  });
+
+  // Verrou clavier terminal : la fenetre qui revient au premier plan, la
+  // premiere frappe tapee hors focus et les files stagnantes sont repris ici.
+  // Enregistre en dernier : les raccourcis applicatifs et les echappements de
+  // modales restent toujours prioritaires sur la re-delivrance a xterm.
+  window.addEventListener("focus", () => {
+    if (activeView === "terminal") void recoverActiveTerminalInput();
+  });
+  window.addEventListener("keydown", interceptTerminalKeyboard, true);
+  ensureTerminalKeyboardWatchdog();
+  ensureTerminalInputQueueGuard();
+  // Tout rechargement (web-update, chunk perime, F5) passe par pagehide :
+  // le brouillon differe est force sur disque avant la navigation. La mise en
+  // arriere-plan est un second filet : certains navigateurs mobiles sautent
+  // pagehide dans des cas limites.
+  window.addEventListener("pagehide", flushChatDraft);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") flushChatDraft();
   });
 };
 
@@ -29988,6 +34292,9 @@ const boot = async () => {
   // localStorage est partage par origine : le compte authentifie devient la
   // portee de toutes les donnees fonctionnelles conservees sur cet appareil.
   setAccountStorageScope(isRemoteMode() ? authenticatedUser()?.id : null);
+  // Le brouillon tape avant un rechargement impose est restaure avec la portee
+  // compte : l'utilisateur retrouve son message au lieu de le retaper.
+  restoreChatDraft();
   activeDesignTool = normalizeDesignToolPreference(
     accountScopedStorage.getItem(DESIGN_TOOL_STORAGE_KEY),
   );
@@ -30039,6 +34346,7 @@ const boot = async () => {
   const recoveredLazyView = consumeRecoveredLazyView();
   activeView = "chat";
   render();
+  scheduleAccountCompletionMidnightReset();
   unlistenMobileAutonomousAgentHandoff?.();
   unlistenMobileAutonomousAgentHandoff = installMobileAutonomousAgentHandoffListener((handoff) => {
     void openMobileAutonomousAgentHandoff(handoff);
@@ -30064,6 +34372,7 @@ const boot = async () => {
     });
   }
   startRuntimeSync();
+  startActiveTerminalsTracking();
   startAutonomousAgentsPoll();
   initDesktopUpdaterDeferred();
   startChatRuntimeClock();
@@ -30071,6 +34380,10 @@ const boot = async () => {
   startDiscussionsPoll();
   void refreshDiscussions().then(() => {
     restoreExpertChats();
+    // Le premier catalogue de tours peut arriver avant la restauration du
+    // localStorage. Une seconde reconciliation adopte alors les chats crees
+    // sur mobile sans attendre un nouvel evenement serveur.
+    void refreshActiveChatTurns();
     if (activeView === "chat") {
       render();
       startAllExpertChatWork();
@@ -30091,6 +34404,10 @@ const boot = async () => {
 };
 
 window.addEventListener("beforeunload", () => {
+  if (accountCompletionResetTimer !== null) {
+    window.clearTimeout(accountCompletionResetTimer);
+    accountCompletionResetTimer = null;
+  }
   persistTerminalSessions();
   persistExpertChats();
   unlistenData?.();
@@ -30107,10 +34424,13 @@ window.addEventListener("beforeunload", () => {
   stopAutonomousMonitorTurnPoll();
   stopOrchestrationsPoll();
   stopDiscussionsPoll();
+  stopActiveTerminalsTracking();
   stopRuntimeSync();
   forumModule?.stopForumPolling();
   messagingModule?.stopMessagingPolling();
   tiktokAccountsModule?.deactivateTikTokAccountsPanel();
+  deviceFleetModule?.deactivateDeviceFleetPanel();
+  androidControlModule?.deactivateAndroidControlPanel();
   stopChatSync();
   stopChatTurnPoll();
   stopChatRuntimeClock();

@@ -1,0 +1,5 @@
+*
+!Dockerfile
+!proxy.mjs
+gateway.env
+*.log

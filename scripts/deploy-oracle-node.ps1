@@ -120,6 +120,13 @@ try {
     'CST_MICROSOFT_TENANT_ID'
     'CST_MICROSOFT_REDIRECT_URI'
     'CST_MICROSOFT_SCOPES'
+    'CST_REVOLUT_PUBLIC_KEY'
+    'CST_REVOLUT_SECRET_KEY'
+    'CST_REVOLUT_CURRENCY'
+    'CST_REVOLUT_SANDBOX'
+    'CST_REVOLUT_MERCHANT_BASE_URL'
+    'CST_REVOLUT_RETURN_URL'
+    'CST_REVOLUT_WEBHOOK_URL'
   )) {
     $value = [Environment]::GetEnvironmentVariable($name)
     if ($null -ne $value -and $value.Trim()) {

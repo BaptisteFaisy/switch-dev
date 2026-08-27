@@ -1,0 +1,11 @@
+# Override local de Switch developpement (non commité).
+# Le compose.yaml WIP a retiré la publication HTTP du service `cst` au profit
+# d'une façade social-gateway (service non déployé sur ce poste). Cet override
+# restaure la publication directe 127.0.0.1:18080 -> cst:8080 qui servait le
+# dashboard avant, en conservant le pont SSH. À supprimer quand social-gateway
+# sera déployé.
+services:
+  cst:
+    ports:
+      - "127.0.0.1:${CST_SSH_PORT:-2224}:22"
+      - "127.0.0.1:${CST_HOST_PORT:-18080}:8080"

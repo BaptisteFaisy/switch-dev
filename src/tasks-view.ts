@@ -357,7 +357,14 @@ export const mountTasksPanel = (options: TasksPanelOptions = {}): void => {
   const save = (items: TaskItem[], message: string, focus: TaskFocusTarget = null) => {
     const persisted = persistTaskItems(items, options.storage, options.accountId);
     taskFeedback = persisted ? message : "Impossible d’enregistrer les tâches sur cet appareil.";
-    if (persisted) syncTaskNavigationBadges(items, options.environment?.path);
+    if (persisted) {
+      syncTaskNavigationBadges(items, options.environment?.path);
+      // Le cache local est immédiat ; le serveur reçoit la liste en arrière-plan.
+      void import("./tasks-sync").then(({ markTasksDirty, pushTasksToServer }) => {
+        markTasksDirty();
+        void pushTasksToServer(items, options.accountId);
+      });
+    }
     refresh(focus);
     if (persisted) options.onItemsChanged?.(items);
   };

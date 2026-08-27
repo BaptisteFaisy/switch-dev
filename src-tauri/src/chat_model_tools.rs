@@ -13,6 +13,7 @@ use crate::{
     },
     chat::{ChatAppConnector, ChatTurnMode},
     metrics,
+    terminal_goal::{TerminalGoalSnapshot, TerminalGoalStatus},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -23,6 +24,9 @@ use std::{
 use uuid::Uuid;
 
 pub const AUTONOMOUS_AGENT_TOOL_NAME: &str = "create_autonomous_agent";
+pub const CREATE_GOAL_TOOL_NAME: &str = "create_goal";
+pub const GET_GOAL_TOOL_NAME: &str = "get_goal";
+pub const UPDATE_GOAL_TOOL_NAME: &str = "update_goal";
 pub const UPDATE_AUTONOMOUS_AGENT_TOOL_NAME: &str = "update_autonomous_agent";
 pub const PAUSE_AUTONOMOUS_AGENT_TOOL_NAME: &str = "pause_autonomous_agent";
 pub const APPLY_AUTONOMOUS_AGENT_POLICY_TOOL_NAME: &str = "apply_autonomous_agent_policy";
@@ -32,6 +36,9 @@ pub const LIST_PRIVATE_MESSAGE_USERS_TOOL_NAME: &str = "list_private_message_use
 pub const LIST_PRIVATE_MESSAGE_CAMPAIGNS_TOOL_NAME: &str = "list_private_message_campaigns";
 pub const CREATE_PRIVATE_MESSAGE_CAMPAIGN_TOOL_NAME: &str = "create_private_message_campaign";
 pub const CONTROL_PRIVATE_MESSAGE_CAMPAIGN_TOOL_NAME: &str = "control_private_message_campaign";
+pub const LIST_CONTROL_DEVICES_TOOL_NAME: &str = "list_control_devices";
+pub const CONTROL_DEVICE_TOOL_NAME: &str = "control_device";
+pub const GET_CONTROL_DEVICE_ACTION_TOOL_NAME: &str = "get_control_device_action";
 pub const LIST_TIKTOK_DM_CAMPAIGNS_TOOL_NAME: &str = "list_tiktok_dm_campaigns";
 pub const LIST_TIKTOK_SENDER_ACCOUNTS_TOOL_NAME: &str = "list_tiktok_sender_accounts";
 pub const MANAGE_TIKTOK_SENDER_LOGIN_TOOL_NAME: &str = "manage_tiktok_sender_login";
@@ -48,7 +55,8 @@ pub const UPDATE_CALENDAR_EVENT_TOOL_NAME: &str = "update_calendar_event";
 pub const MCP_SERVER_NAME: &str = "cst_chat";
 pub const MCP_BEARER_ENV: &str = "CST_CHAT_AUTONOMOUS_TOOL_TOKEN";
 const CAPABILITY_TTL_SECONDS: i64 = 2 * 60 * 60;
-const MAX_TOOL_CALLS_PER_TURN: u8 = 8;
+const MAX_TOOL_CALLS_PER_TURN: u16 = 8;
+const MAX_GOAL_TOOL_CALLS_PER_SESSION: u16 = 512;
 const MAX_CHAT_CREATIONS_PER_TURN: u8 = 1;
 /// Sous-quota des actions qui sortent de l'application (e-mail, agenda, TikTok). Le
 /// budget global de 8 appels est partage avec les outils d'agents : sans ce
@@ -74,6 +82,9 @@ pub(crate) enum ChatToolScope {
     /// devant l'ecran, n'a rien a faire avec la creation d'autres agents ou
     /// l'ouverture de chats — il se dupliquerait sans controle.
     PersonalDataOnly,
+    /// Terminal Freebuff interactif : uniquement l'etat Goal lie a ce
+    /// proprietaire, ce compte et ce panneau/workspace.
+    GoalsOnly,
 }
 
 /// Outils qui travaillent sur le compte Microsoft de l'utilisateur.
@@ -100,16 +111,25 @@ pub(crate) const TIKTOK_DM_TOOL_NAMES: [&str; 8] = [
     LIST_TIKTOK_FOLLOWER_EXTRACTIONS_TOOL_NAME,
     QUEUE_TIKTOK_FOLLOWER_EXTRACTION_TOOL_NAME,
 ];
+pub(crate) const TERMINAL_GOAL_TOOL_NAMES: [&str; 3] = [
+    CREATE_GOAL_TOOL_NAME,
+    GET_GOAL_TOOL_NAME,
+    UPDATE_GOAL_TOOL_NAME,
+];
 
 impl ChatToolScope {
     pub fn allows(&self, tool_name: &str) -> bool {
         match self {
-            Self::Full => true,
+            // Un chat normal recoit le Goal autonome de Switch. get_goal et
+            // update_goal sont reserves au TUI Freebuff, dont le processus
+            // interactif reprend lui-meme le travail entre deux appels.
+            Self::Full => ![GET_GOAL_TOOL_NAME, UPDATE_GOAL_TOOL_NAME].contains(&tool_name),
             Self::PersonalDataOnly => {
                 MICROSOFT_TOOL_NAMES.contains(&tool_name)
                     || PRIVATE_MESSAGE_TOOL_NAMES.contains(&tool_name)
                     || TIKTOK_DM_TOOL_NAMES.contains(&tool_name)
             }
+            Self::GoalsOnly => TERMINAL_GOAL_TOOL_NAMES.contains(&tool_name),
         }
     }
 }
@@ -128,15 +148,27 @@ pub(crate) struct AutonomousAgentToolContext {
     pub mode: ChatTurnMode,
     pub model: Option<String>,
     pub reasoning_effort: Option<String>,
+    /// Cle opaque de persistance des goals. Le modele ne peut jamais la
+    /// fournir ni la remplacer.
+    pub goal_key: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 struct ChatToolCapability {
     context: AutonomousAgentToolContext,
     expires_at: i64,
-    calls: u8,
+    calls: u16,
     chat_creations: u8,
     external_actions: u8,
+}
+
+impl ChatToolCapability {
+    fn max_calls(&self) -> u16 {
+        match self.context.scope {
+            ChatToolScope::GoalsOnly => MAX_GOAL_TOOL_CALLS_PER_SESSION,
+            ChatToolScope::Full | ChatToolScope::PersonalDataOnly => MAX_TOOL_CALLS_PER_TURN,
+        }
+    }
 }
 
 #[derive(Clone, Default)]
@@ -147,6 +179,11 @@ pub(crate) struct ChatToolCapabilityRegistry {
 impl ChatToolCapabilityRegistry {
     pub fn issue(&self, context: AutonomousAgentToolContext) -> Result<String, String> {
         let now = metrics::now_ts();
+        let expires_at = if context.scope == ChatToolScope::GoalsOnly {
+            i64::MAX
+        } else {
+            now.saturating_add(CAPABILITY_TTL_SECONDS)
+        };
         let token = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
         let mut entries = self
             .inner
@@ -157,7 +194,7 @@ impl ChatToolCapabilityRegistry {
             token.clone(),
             ChatToolCapability {
                 context,
-                expires_at: now.saturating_add(CAPABILITY_TTL_SECONDS),
+                expires_at,
                 calls: 0,
                 chat_creations: 0,
                 external_actions: 0,
@@ -189,7 +226,7 @@ impl ChatToolCapabilityRegistry {
         let entry = entries
             .get_mut(token)
             .ok_or_else(|| "Capacite MCP absente ou expiree".to_string())?;
-        if entry.calls >= MAX_TOOL_CALLS_PER_TURN {
+        if entry.calls >= entry.max_calls() {
             return Err("Limite d'actions autonomes atteinte pour ce tour".to_string());
         }
         entry.calls = entry.calls.saturating_add(1);
@@ -331,6 +368,47 @@ impl ChatOpenRequestRegistry {
         requests.retain(|item| item.created_at + CHAT_OPEN_REQUEST_TTL_SECONDS >= now);
         Ok(requests.drain(..).collect())
     }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct CreateAutonomousGoalToolArguments {
+    pub objective: String,
+}
+
+impl CreateAutonomousGoalToolArguments {
+    pub fn into_request(
+        self,
+        context: AutonomousAgentToolContext,
+    ) -> Result<CreateAutonomousAgentRequest, String> {
+        CreateAutonomousAgentToolArguments {
+            objective: self.objective,
+            name: None,
+            role: None,
+            mode: None,
+            interval_minutes: None,
+            require_user_review: None,
+            mobile_notifications_enabled: None,
+            initial_memory: None,
+            test_command: None,
+            test_timeout_seconds: None,
+        }
+        .into_request(context)
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CreateTerminalGoalToolArguments {
+    pub objective: String,
+    #[serde(default)]
+    pub token_budget: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct UpdateGoalToolArguments {
+    pub status: TerminalGoalStatus,
 }
 
 #[derive(Debug, Deserialize)]
@@ -637,6 +715,7 @@ pub(crate) fn linked_agent_for_context(
         .filter(|agent| {
             !agent.system_managed
                 && agent.account_id == context.account_id
+                && agent.owner_id == context.user_id
                 && agent.source_chat_key.as_deref() == Some(source_chat_key)
         })
         .max_by_key(|agent| (agent.created_at, agent.updated_at))
@@ -655,6 +734,22 @@ pub(crate) fn initialize_response(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or("2025-06-18");
+    if scope == ChatToolScope::GoalsOnly {
+        return json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": {
+                "protocolVersion": protocol_version,
+                "capabilities": { "tools": { "listChanged": false } },
+                "serverInfo": {
+                    "name": "codex-switch-terminal-freebuff-goals",
+                    "title": "Goals persistants du terminal Freebuff",
+                    "version": env!("CARGO_PKG_VERSION")
+                },
+                "instructions": "Ces outils appartiennent uniquement au terminal Freebuff courant. Cree un goal seulement pour un objectif long explicitement demande, poursuis-le jusqu'a son resultat reel, consulte get_goal lors d'une reprise, et n'appelle update_goal avec complete que lorsque plus aucun travail requis ne reste. blocked exige le meme blocage pendant au moins trois tentatives consecutives sans autre progres possible."
+            }
+        });
+    }
     if scope == ChatToolScope::PersonalDataOnly {
         return json!({
             "jsonrpc": "2.0",
@@ -682,12 +777,15 @@ pub(crate) fn initialize_response(
                 "title": "Outils du chat Codex Switch Terminal",
                 "version": env!("CARGO_PKG_VERSION")
             },
-            "instructions": "Utilise les outils d'agents et de chats uniquement sur demande explicite. N'affirme jamais qu'une creation, une modification ou une mise en pause a reussi avant le succes de l'outil. L'authentification TikTok reste sur Windows et l'appareil Android ; ne demande jamais de secret TikTok dans le chat. Pour connecter un emetteur, utilise manage_tiktok_sender_login avec open_login, demande a l'utilisateur d'effectuer localement le login/captcha/2FA et d'indiquer quand il a termine, puis utilise match_accounts. Verifie ensuite les emetteurs avec list_tiktok_sender_accounts et choisis-en un avec select_tiktok_sender_account. Aucun token TikTok n'est extrait : la session est conservee par l'application locale. Quand une demande explicite contient un @username destinataire et le message exact, send_tiktok_dm_campaign peut utiliser l'emetteur selectionne, preparer et mettre en file cet envoi unique directement avec recipient et message, sans seconde confirmation. Utilise prepare_tiktok_dm_campaign pour un brouillon ou une demande incomplete. Refuse toute prospection non sollicitee et indique si le connecteur Windows est hors ligne. La collecte de followers accepte une demande unique jusqu'a 1000 noms pour un compte appartenant a l'utilisateur ou explicitement autorise. TikTok peut cependant limiter la liste visible a environ 50 profils : annonce le nombre reellement retourne et ne qualifie jamais le resultat d'exhaustif sans preuve. L'option dmPipeline de la collecte peut preparer un brouillon uniquement pour l'intersection avec une liste explicite d'au plus cinq comptes secondaires confirmes comme controles. N'utilise jamais les autres noms extraits. Affiche le brouillon termine puis attends une nouvelle confirmation humaine avant send_tiktok_dm_campaign. La messagerie interne conserve son propre flux de brouillon et de consentement. Les outils Microsoft lisent la boite et l'agenda lies au compte ; leurs outils d'ecriture ne font que preparer une carte que l'utilisateur doit confirmer. Distingue toujours l'acceptation par TikMatrix d'une livraison confirmee par TikTok."
+            "instructions": "Utilise les outils d'agents et de chats uniquement sur demande explicite. N'affirme jamais qu'une creation, une modification ou une mise en pause a reussi avant le succes de l'outil. Utilise list_control_devices avant de viser un appareil Android ou iOS. N'appelle control_device pour une action qui modifie l'appareil que sur demande explicite de l'utilisateur et ne mets confirmed a true qu'apres sa confirmation explicite. Pour l'action shell, montre la commande exacte et attends sa confirmation explicite avant l'appel confirme. Si control_device retourne queued ou claimed, suis uniquement cet identifiant avec get_control_device_action et ne duplique jamais l'action. L'authentification TikTok reste sur Windows et l'appareil Android ; ne demande jamais de secret TikTok dans le chat. Pour connecter un emetteur, utilise manage_tiktok_sender_login avec open_login, demande a l'utilisateur d'effectuer localement le login/captcha/2FA et d'indiquer quand il a termine, puis utilise match_accounts. Verifie ensuite les emetteurs avec list_tiktok_sender_accounts et choisis-en un avec select_tiktok_sender_account. Aucun token TikTok n'est extrait : la session est conservee par l'application locale. Quand une demande explicite contient un @username destinataire et le message exact, send_tiktok_dm_campaign peut utiliser l'emetteur selectionne, preparer et mettre en file cet envoi unique directement avec recipient et message, sans seconde confirmation. Utilise prepare_tiktok_dm_campaign pour un brouillon ou une demande incomplete. Refuse toute prospection non sollicitee et indique si le connecteur Windows est hors ligne. La collecte de followers accepte une demande unique jusqu'a 1000 noms pour un compte appartenant a l'utilisateur ou explicitement autorise. TikTok peut cependant limiter la liste visible a environ 50 profils : annonce le nombre reellement retourne et ne qualifie jamais le resultat d'exhaustif sans preuve. L'option dmPipeline de la collecte peut preparer un brouillon uniquement pour l'intersection avec une liste explicite d'au plus cinq comptes secondaires confirmes comme controles. N'utilise jamais les autres noms extraits. Affiche le brouillon termine puis attends une nouvelle confirmation humaine avant send_tiktok_dm_campaign. La messagerie interne conserve son propre flux de brouillon et de consentement. Les outils Microsoft lisent la boite et l'agenda lies au compte ; leurs outils d'ecriture ne font que preparer une carte que l'utilisateur doit confirmer. Distingue toujours l'acceptation par TikMatrix d'une livraison confirmee par TikTok."
         }
     })
 }
 
 pub(crate) fn tools_list_response(id: Value, scope: ChatToolScope) -> Value {
+    if scope == ChatToolScope::GoalsOnly {
+        return goal_tools_response(id);
+    }
     let mut response = all_tools_response(id);
     if scope != ChatToolScope::Full {
         if let Some(tools) = response
@@ -702,6 +800,87 @@ pub(crate) fn tools_list_response(id: Value, scope: ChatToolScope) -> Value {
         }
     }
     response
+}
+
+fn goal_tools_response(id: Value) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "result": {
+            "tools": [
+                {
+                    "name": CREATE_GOAL_TOOL_NAME,
+                    "title": "Creer un goal persistant",
+                    "description": "Cree le goal actif du terminal Freebuff pour un objectif long. Echoue si un goal inacheve existe deja. token_budget ne doit etre fourni que si l'utilisateur a explicitement fixe ce budget.",
+                    "inputSchema": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                            "objective": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 32768,
+                                "description": "Objectif concret a poursuivre jusqu'a sa completion reelle."
+                            },
+                            "token_budget": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "description": "Budget facultatif, uniquement lorsque l'utilisateur l'a explicitement demande."
+                            }
+                        },
+                        "required": ["objective"]
+                    },
+                    "annotations": {
+                        "title": "Creer un goal",
+                        "readOnlyHint": false,
+                        "destructiveHint": false,
+                        "idempotentHint": false,
+                        "openWorldHint": false
+                    }
+                },
+                {
+                    "name": GET_GOAL_TOOL_NAME,
+                    "title": "Lire le goal courant",
+                    "description": "Retourne le goal persistant du terminal Freebuff courant et son statut, ou indique qu'aucun goal n'existe.",
+                    "inputSchema": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {}
+                    },
+                    "annotations": {
+                        "title": "Lire le goal",
+                        "readOnlyHint": true,
+                        "destructiveHint": false,
+                        "idempotentHint": true,
+                        "openWorldHint": false
+                    }
+                },
+                {
+                    "name": UPDATE_GOAL_TOOL_NAME,
+                    "title": "Terminer ou bloquer le goal",
+                    "description": "Met le goal actif a complete uniquement quand l'objectif est reellement atteint, ou a blocked seulement apres trois tentatives consecutives confrontees au meme blocage sans progres possible.",
+                    "inputSchema": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                            "status": {
+                                "type": "string",
+                                "enum": ["complete", "blocked"]
+                            }
+                        },
+                        "required": ["status"]
+                    },
+                    "annotations": {
+                        "title": "Mettre a jour le goal",
+                        "readOnlyHint": false,
+                        "destructiveHint": false,
+                        "idempotentHint": false,
+                        "openWorldHint": false
+                    }
+                }
+            ]
+        }
+    })
 }
 
 fn all_tools_response(id: Value) -> Value {
@@ -850,6 +1029,32 @@ fn all_tools_response(id: Value) -> Value {
         "id": id,
         "result": {
             "tools": [
+                {
+                    "name": CREATE_GOAL_TOOL_NAME,
+                    "title": "Creer un goal durable",
+                    "description": "Cree et demarre un goal persistant lie au chat courant. Le goal poursuit l'objectif dans le temps avec un agent autonome Switch qui herite du compte, du modele et de l'environnement du chat. Utilise cet outil uniquement lorsque l'utilisateur demande explicitement un goal. Ne simule jamais sa creation et n'annonce sa reussite qu'apres le succes de l'outil.",
+                    "inputSchema": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                            "objective": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 32768,
+                                "description": "Objectif durable, precis, verifiable et directement actionnable."
+                            }
+                        },
+                        "required": ["objective"]
+                    },
+                    "outputSchema": output_schema.clone(),
+                    "annotations": {
+                        "title": "Creer un goal durable",
+                        "readOnlyHint": false,
+                        "destructiveHint": false,
+                        "idempotentHint": false,
+                        "openWorldHint": false
+                    }
+                },
                 {
                     "name": AUTONOMOUS_AGENT_TOOL_NAME,
                     "title": "Creer un agent autonome",
@@ -1196,6 +1401,85 @@ fn all_tools_response(id: Value) -> Value {
                         "readOnlyHint": false,
                         "destructiveHint": false,
                         "idempotentHint": false,
+                        "openWorldHint": false
+                    }
+                },
+                {
+                    "name": LIST_CONTROL_DEVICES_TOOL_NAME,
+                    "title": "Lister les appareils controles",
+                    "description": "Liste les appareils Android et iOS actuellement visibles par le connecteur de controle, avec leur identifiant, leur etat et leurs capacites. Utilise cet outil avant control_device afin de selectionner un appareil reel et disponible.",
+                    "inputSchema": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {}
+                    },
+                    "annotations": {
+                        "title": "Lister les appareils controles",
+                        "readOnlyHint": true,
+                        "destructiveHint": false,
+                        "idempotentHint": true,
+                        "openWorldHint": false
+                    }
+                },
+                {
+                    "name": CONTROL_DEVICE_TOOL_NAME,
+                    "title": "Controler un appareil",
+                    "description": "Execute une action sur un appareil Android ou iOS explicitement selectionne. Les actions qui modifient l'appareil (open_screen, tap, swipe, type_text, key_event, open_app et shell) exigent une demande explicite de l'utilisateur et confirmed=true seulement apres sa confirmation explicite. Pour shell, presente toujours la commande exacte, attends sa confirmation explicite, puis transmets exactement cette commande sans l'etendre ni la reformuler.",
+                    "inputSchema": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                            "deviceId": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 256,
+                                "description": "Identifiant exact retourne par list_control_devices."
+                            },
+                            "action": {
+                                "type": "string",
+                                "enum": ["info", "screenshot", "open_screen", "tap", "swipe", "type_text", "key_event", "open_app", "shell"]
+                            },
+                            "args": {
+                                "type": "object",
+                                "description": "Arguments propres a l'action. N'ajoute aucun argument qui n'a pas ete demande ou necessaire a l'action selectionnee."
+                            },
+                            "confirmed": {
+                                "type": "boolean",
+                                "description": "Vrai uniquement apres confirmation explicite par l'utilisateur de l'action mutante ; pour shell, cette confirmation doit porter sur la commande exacte."
+                            }
+                        },
+                        "required": ["deviceId", "action"]
+                    },
+                    "annotations": {
+                        "title": "Controler un appareil",
+                        "readOnlyHint": false,
+                        "destructiveHint": true,
+                        "idempotentHint": false,
+                        "openWorldHint": false
+                    }
+                },
+                {
+                    "name": GET_CONTROL_DEVICE_ACTION_TOOL_NAME,
+                    "title": "Suivre une action appareil",
+                    "description": "Lit l'etat et le resultat d'une action deja retournee par control_device. Utilise cet outil lorsqu'une action est queued ou claimed ; ne soumets jamais une seconde action identique pour contourner un delai d'attente.",
+                    "inputSchema": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                            "actionId": {
+                                "type": "string",
+                                "minLength": 36,
+                                "maxLength": 36,
+                                "pattern": "^[0-9a-fA-F-]{36}$"
+                            }
+                        },
+                        "required": ["actionId"]
+                    },
+                    "annotations": {
+                        "title": "Suivre une action appareil",
+                        "readOnlyHint": true,
+                        "destructiveHint": false,
+                        "idempotentHint": true,
                         "openWorldHint": false
                     }
                 },
@@ -1902,6 +2186,76 @@ pub(crate) fn tool_success_response(id: Value, agent: &AutonomousAgentSnapshot) 
     })
 }
 
+pub(crate) fn tool_autonomous_goal_success_response(
+    id: Value,
+    agent: &AutonomousAgentSnapshot,
+) -> Value {
+    let structured = json!({
+        "agentId": agent.id,
+        "name": agent.name,
+        "status": agent.status,
+        "sourceChatKey": agent.source_chat_key,
+    });
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "result": {
+            "content": [{
+                "type": "text",
+                "text": format!(
+                    "Goal « {} » cree et demarre avec succes (id: {}). Il est persistant et lie au chat courant.",
+                    agent.name, agent.id
+                )
+            }],
+            "structuredContent": structured,
+            "isError": false
+        }
+    })
+}
+
+pub(crate) fn tool_terminal_goal_success_response(
+    id: Value,
+    action: &str,
+    goal: &TerminalGoalSnapshot,
+) -> Value {
+    let status = match goal.status {
+        TerminalGoalStatus::Active => "active",
+        TerminalGoalStatus::Blocked => "blocked",
+        TerminalGoalStatus::Complete => "complete",
+    };
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "result": {
+            "content": [{
+                "type": "text",
+                "text": format!("Goal Switch {action} avec succes (statut: {status}).")
+            }],
+            "structuredContent": goal,
+            "isError": false
+        }
+    })
+}
+
+pub(crate) fn tool_terminal_goal_get_response(
+    id: Value,
+    goal: Option<&TerminalGoalSnapshot>,
+) -> Value {
+    let text = match goal {
+        Some(goal) => format!("Goal Switch courant : {}", goal.objective),
+        None => "Aucun goal Switch n'existe pour ce terminal.".to_string(),
+    };
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "result": {
+            "content": [{ "type": "text", "text": text }],
+            "structuredContent": { "goal": goal },
+            "isError": false
+        }
+    })
+}
+
 pub(crate) fn tool_update_success_response(id: Value, agent: &AutonomousAgentSnapshot) -> Value {
     let structured = json!({
         "agentId": agent.id,
@@ -2089,6 +2443,7 @@ mod tests {
             mode: ChatTurnMode::Build,
             model: Some("gpt-test".to_string()),
             reasoning_effort: Some("high".to_string()),
+            goal_key: None,
         }
     }
 
@@ -2100,6 +2455,7 @@ mod tests {
             "role": "Role initial",
             "sourceChatKey": "chat-1",
             "accountId": "account-1",
+            "ownerId": "user-1",
             "projectDir": "C:/original",
             "mode": "plan",
             "model": "gpt-original",
@@ -2191,6 +2547,25 @@ mod tests {
 
     #[test]
     fn tool_arguments_cannot_override_account_or_environment() {
+        let goal: CreateAutonomousGoalToolArguments = serde_json::from_value(json!({
+            "objective": "Livrer le correctif OX Alpha"
+        }))
+        .unwrap();
+        let goal_request = goal.into_request(context()).unwrap();
+        assert_eq!(goal_request.objective, "Livrer le correctif OX Alpha");
+        assert_eq!(goal_request.account_id, "account-1");
+        assert_eq!(goal_request.source_chat_key.as_deref(), Some("chat-1"));
+        assert_eq!(goal_request.project_dir.as_deref(), Some("C:/project"));
+        assert_eq!(goal_request.model.as_deref(), Some("gpt-test"));
+        assert!(goal_request.require_user_review);
+        assert!(
+            serde_json::from_value::<CreateAutonomousGoalToolArguments>(json!({
+                "objective": "Objectif",
+                "accountId": "account-2"
+            }))
+            .is_err()
+        );
+
         let arguments: CreateAutonomousAgentToolArguments = serde_json::from_value(json!({
             "objective": "Surveiller les regressions",
             "intervalMinutes": 30
@@ -2256,9 +2631,13 @@ mod tests {
         other_chat.source_chat_key = Some("chat-2".to_string());
         let mut other_account = snapshot("other-account", 40);
         other_account.account_id = "account-2".to_string();
-        let selected =
-            linked_agent_for_context(&[older, newer, other_chat, other_account], &context())
-                .unwrap();
+        let mut other_owner = snapshot("other-owner", 50);
+        other_owner.owner_id = Some("user-2".to_string());
+        let selected = linked_agent_for_context(
+            &[older, newer, other_chat, other_account, other_owner],
+            &context(),
+        )
+        .unwrap();
         assert_eq!(selected.id, "newer");
     }
 
@@ -2327,6 +2706,25 @@ mod tests {
         let response = tools_list_response(json!(1), ChatToolScope::Full);
         let tools = response["result"]["tools"].as_array().unwrap();
         assert!(tools.len() >= 6);
+        let goal_tool = tools
+            .iter()
+            .find(|tool| tool["name"].as_str() == Some(CREATE_GOAL_TOOL_NAME))
+            .unwrap();
+        assert_eq!(goal_tool["inputSchema"]["required"], json!(["objective"]));
+        assert_eq!(
+            goal_tool["inputSchema"]["additionalProperties"],
+            json!(false)
+        );
+        assert!(goal_tool["description"]
+            .as_str()
+            .unwrap()
+            .contains("modele et de l'environnement du chat"));
+        let goal_response = tool_autonomous_goal_success_response(json!(2), &snapshot("goal", 10));
+        assert_eq!(goal_response["result"]["isError"], false);
+        assert!(goal_response["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Goal"));
         let tool = tools
             .iter()
             .find(|tool| tool["name"].as_str() == Some(AUTONOMOUS_AGENT_TOOL_NAME))
@@ -2422,6 +2820,39 @@ mod tests {
     }
 
     #[test]
+    fn goal_tools_are_scoped_between_chat_and_freebuff() {
+        let full = tools_list_response(json!(1), ChatToolScope::Full);
+        let full_names = full["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .collect::<Vec<_>>();
+        assert!(full_names.contains(&CREATE_GOAL_TOOL_NAME));
+        assert!(!full_names.contains(&GET_GOAL_TOOL_NAME));
+        assert!(!full_names.contains(&UPDATE_GOAL_TOOL_NAME));
+
+        let goals = tools_list_response(json!(2), ChatToolScope::GoalsOnly);
+        let goal_names = goals["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(goal_names.as_slice(), TERMINAL_GOAL_TOOL_NAMES.as_slice());
+        assert!(ChatToolScope::GoalsOnly.allows(CREATE_GOAL_TOOL_NAME));
+        assert!(!ChatToolScope::GoalsOnly.allows(CREATE_CHAT_TOOL_NAME));
+        assert!(ChatToolScope::Full.allows(CREATE_GOAL_TOOL_NAME));
+        assert!(!ChatToolScope::Full.allows(GET_GOAL_TOOL_NAME));
+
+        let instructions = initialize_response(json!(3), None, ChatToolScope::GoalsOnly);
+        assert!(instructions["result"]["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("get_goal"));
+    }
+
+    #[test]
     fn an_autonomous_agent_only_sees_personal_data_and_messaging_tools() {
         let response = tools_list_response(json!(1), ChatToolScope::PersonalDataOnly);
         let tools = response["result"]["tools"].as_array().unwrap();
@@ -2447,12 +2878,16 @@ mod tests {
         // Un agent autonome qui pourrait se dupliquer ou ouvrir des chats
         // echapperait a tout controle : ces outils lui restent fermes.
         for forbidden in [
+            CREATE_GOAL_TOOL_NAME,
             AUTONOMOUS_AGENT_TOOL_NAME,
             UPDATE_AUTONOMOUS_AGENT_TOOL_NAME,
             PAUSE_AUTONOMOUS_AGENT_TOOL_NAME,
             APPLY_AUTONOMOUS_AGENT_POLICY_TOOL_NAME,
             ACTIVATE_SUPERVISOR_GENERAL_REPORT_TOOL_NAME,
             CREATE_CHAT_TOOL_NAME,
+            LIST_CONTROL_DEVICES_TOOL_NAME,
+            CONTROL_DEVICE_TOOL_NAME,
+            GET_CONTROL_DEVICE_ACTION_TOOL_NAME,
         ] {
             assert!(
                 !names.contains(&forbidden),
@@ -2465,6 +2900,79 @@ mod tests {
         assert!(ChatToolScope::PersonalDataOnly.allows(SEND_OUTLOOK_EMAIL_TOOL_NAME));
         assert!(ChatToolScope::PersonalDataOnly.allows(CREATE_PRIVATE_MESSAGE_CAMPAIGN_TOOL_NAME));
         assert!(ChatToolScope::PersonalDataOnly.allows(SEND_TIKTOK_DM_CAMPAIGN_TOOL_NAME));
+    }
+
+    #[test]
+    fn device_control_tools_are_full_scope_only_and_have_strict_schemas() {
+        let response = tools_list_response(json!(1), ChatToolScope::Full);
+        let tools = response["result"]["tools"].as_array().unwrap();
+        let list = tools
+            .iter()
+            .find(|tool| tool["name"].as_str() == Some(LIST_CONTROL_DEVICES_TOOL_NAME))
+            .expect("outil de liste des appareils absent");
+        assert_eq!(list["inputSchema"]["additionalProperties"], false);
+        assert_eq!(list["inputSchema"]["properties"], json!({}));
+        assert_eq!(list["annotations"]["readOnlyHint"], true);
+
+        let control = tools
+            .iter()
+            .find(|tool| tool["name"].as_str() == Some(CONTROL_DEVICE_TOOL_NAME))
+            .expect("outil de controle des appareils absent");
+        assert_eq!(control["inputSchema"]["additionalProperties"], false);
+        assert_eq!(
+            control["inputSchema"]["required"],
+            json!(["deviceId", "action"])
+        );
+        assert_eq!(
+            control["inputSchema"]["properties"]["deviceId"]["minLength"],
+            1
+        );
+        assert_eq!(
+            control["inputSchema"]["properties"]["deviceId"]["maxLength"],
+            256
+        );
+        assert_eq!(
+            control["inputSchema"]["properties"]["action"]["enum"],
+            json!([
+                "info",
+                "screenshot",
+                "open_screen",
+                "tap",
+                "swipe",
+                "type_text",
+                "key_event",
+                "open_app",
+                "shell"
+            ])
+        );
+        let description = control["description"].as_str().unwrap();
+        assert!(description.contains("demande explicite"));
+        assert!(description.contains("commande exacte"));
+        assert!(!ChatToolScope::PersonalDataOnly.allows(LIST_CONTROL_DEVICES_TOOL_NAME));
+        assert!(!ChatToolScope::PersonalDataOnly.allows(CONTROL_DEVICE_TOOL_NAME));
+        let status = tools
+            .iter()
+            .find(|tool| tool["name"].as_str() == Some(GET_CONTROL_DEVICE_ACTION_TOOL_NAME))
+            .expect("outil de suivi des actions appareil absent");
+        assert_eq!(status["inputSchema"]["additionalProperties"], false);
+        assert_eq!(status["inputSchema"]["required"], json!(["actionId"]));
+        assert_eq!(status["annotations"]["readOnlyHint"], true);
+        assert!(!ChatToolScope::PersonalDataOnly.allows(GET_CONTROL_DEVICE_ACTION_TOOL_NAME));
+
+        let full_initialize = initialize_response(json!(2), None, ChatToolScope::Full);
+        let full_instructions = full_initialize["result"]["instructions"].as_str().unwrap();
+        assert!(full_instructions.contains(LIST_CONTROL_DEVICES_TOOL_NAME));
+        assert!(full_instructions.contains(CONTROL_DEVICE_TOOL_NAME));
+        assert!(full_instructions.contains(GET_CONTROL_DEVICE_ACTION_TOOL_NAME));
+        assert!(full_instructions.contains("commande exacte"));
+        let personal_initialize =
+            initialize_response(json!(3), None, ChatToolScope::PersonalDataOnly);
+        let personal_instructions = personal_initialize["result"]["instructions"]
+            .as_str()
+            .unwrap();
+        assert!(!personal_instructions.contains(LIST_CONTROL_DEVICES_TOOL_NAME));
+        assert!(!personal_instructions.contains(CONTROL_DEVICE_TOOL_NAME));
+        assert!(!personal_instructions.contains(GET_CONTROL_DEVICE_ACTION_TOOL_NAME));
     }
 
     #[test]

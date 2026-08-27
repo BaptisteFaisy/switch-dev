@@ -46,7 +46,7 @@ test("l'image contient le frontend, le serveur et les outils de travail", () => 
   assert.match(dockerfile, /--profile server/);
   assert.match(
     dockerfile,
-    /npm install --global --prefix \/home\/cst\/\.local @openai\/codex @anthropic-ai\/claude-code opencode-ai/,
+    /npm install --global --prefix \/home\/cst\/\.local @openai\/codex @anthropic-ai\/claude-code(?:@[\d.]+)? opencode-ai freebuff/,
   );
   assert.match(dockerfile, /codex --version/);
   assert.match(dockerfile, /claude --version/);
@@ -95,10 +95,12 @@ test("le runtime OpenCode est mutualise et pre-chauffe dans l'image", () => {
 });
 
 test("Compose garde le runtime prive et les donnees hors de l'image", () => {
-  assert.match(compose, /127\.0\.0\.1:\$\{CST_HOST_PORT:-8080\}:8080/);
+  // La pile de production Azure peut utiliser un port d'écoute différent de la pile locale.
+
+  assert.match(compose, /127\.0\.0\.1:\$\{CST_HOST_PORT:-\d+\}:\d+/);
   assert.match(compose, /:\/srv\/cst/);
   assert.match(compose, /no-new-privileges:true/);
-  assert.match(composeTemplate, /127\.0\.0\.1:\{\{ cst_remote_port \}\}:8080/);
+  assert.match(composeTemplate, /127\.0\.0\.1:\{\{ cst_remote_port \}\}:\d+/);
   assert.match(
     composeTemplate,
     /volumes:[\s\S]*?- type: bind[\s\S]*?source: \/srv\/cst[\s\S]*?target: \/srv\/cst[\s\S]*?propagation: rslave/,
@@ -167,7 +169,6 @@ test("le wrapper protege les secrets et cree un profil reutilisable", () => {
   assert.doesNotMatch(wrapper, /Write-Host[^\n]*\$adminToken/);
   assert.match(packageJson.scripts["deploy:vps:portable"], /deploy-vps-ansible\.ps1/);
   assert.match(packageJson.scripts["update:vps:github"], /update-vps-from-github\.ps1/);
-  assert.match(packageJson.scripts["provision:google"], /provision-google-trial\.ps1/);
 });
 
 test("un profil VPS peut etre mis a jour depuis une revision GitHub exacte", () => {

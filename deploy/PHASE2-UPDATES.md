@@ -91,6 +91,11 @@ gh secret set TAURI_SIGNING_PRIVATE_KEY_PASSWORD --body 'MOT_DE_PASSE_TAURI'
 La clé publique minisign doit être connue des nœuds pour vérifier les téléchargements.
 Deux options (l'une OU l'autre) :
 
+- **Chaîne continue (`deploy-web.yml`)** : commite la clé publique dans
+  `deploy/minisign.pub` (une ligne `RW...`, non secrète). Le workflow la lit et
+  la passe au nœud ; sans elle, le déploiement échoue si `MINISIGN_SECRET_KEY`
+  est configuré. C'est aussi elle qui permet de changer de VPS sans toucher
+  aux scripts.
 - **Éditer le défaut** dans `deploy/update-node.sh` et `scripts/update-node.ps1` :
   remplace `RWQPLACEHOLDER_REMPLACE_MOI` / la valeur par ta vraie clé publique.
 - **Passer à l'exécution** (sans éditer) :
@@ -246,6 +251,18 @@ npx tauri build               # doit générer les bundles + les artefacts updat
 # Oracle d'abord puis PC — chacun draine, bascule, vérifie, rollback si besoin.
 scripts\rolling-update.ps1 -OracleSshTarget ubuntu@oracle -Port 8080
 ```
+
+**Chaîne continue (push sur `main`)** : la CI compile et signe en amont ; le
+nœud ne compile plus. Deux modes selon le diff du push :
+
+- `--prebuilt /tmp/cst-server-linux-x86_64.tar.gz` : `src-tauri/` a changé,
+  binaire CI précompilé + `dist`, vérifié SHA-256 + minisign ;
+- `--frontend /tmp/cst-frontend.tar.gz` : push frontend-only, le binaire
+  courant est conservé et seul `dist/` est remplacé (bascule quasi
+  instantanée).
+
+Les deux modes partagent la même séquence sûre (attente sans drain → lease de
+drain → bascule atomique → sonde de santé → rollback).
 
 Ou nœud par nœud, en mode release signée :
 

@@ -1,5 +1,5 @@
 import { execSync } from "node:child_process";
-import { defineConfig } from "vite";
+import { defineConfig, type Plugin } from "vite";
 
 const buildId =
   process.env.CST_BUILD_ID
@@ -21,7 +21,37 @@ const gitShortCommit = (): string | undefined => {
 
 const buildCommit = process.env.CST_GIT_COMMIT?.trim() || gitShortCommit() || "unknown";
 
+// Le chunk d'entree est charge via un import() dynamique plutot qu'un
+// <script type="module" src="..."> statique. Si un index.html perime (garde en
+// cache par le service worker) reference un chunk deja purge du serveur, le
+// navigateur rejette l'import : on recharge une seule fois avec
+// ?cst-chunk-build=<buildId> pour repartir d'un index frais, au lieu de laisser
+// le boot-splash tourner indefiniment sans message d'erreur.
+const dynamicEntryChunk = (): Plugin => ({
+  name: "cst-dynamic-entry-chunk",
+  enforce: "post",
+  apply: "build",
+  transformIndexHtml(html) {
+    const entry = /<script type="module" crossorigin src="(\/assets\/index-[^"]+\.js)"><\/script>/.exec(html);
+    if (!entry) return html;
+    const entryUrl = entry[1];
+    const bootstrap = [
+      '<script type="module">',
+      "const u = new URL(window.location.href);",
+      `import(${JSON.stringify(entryUrl)}).catch(() => {`,
+      `  if (u.searchParams.get("cst-chunk-build") !== ${JSON.stringify(buildId)}) {`,
+      `    u.searchParams.set("cst-chunk-build", ${JSON.stringify(buildId)});`,
+      "    window.location.replace(u.toString());",
+      "  }",
+      "});",
+      "</script>",
+    ].join("");
+    return html.replace(entry[0], bootstrap);
+  },
+});
+
 export default defineConfig({
+  plugins: [dynamicEntryChunk()],
   clearScreen: false,
   define: {
     __CST_BUILD_ID__: JSON.stringify(buildId),

@@ -24,7 +24,7 @@ test("le bouton simple reprendre restaure le dossier puis continue dans le chat"
   assert.match(chatBackend, /resolve_project_dir\(&account, request\.project_dir\.as_deref\(\)\)/);
 
   const start = main.indexOf("const resumeDiscussion = async");
-  const end = main.indexOf("\n// Archive la version source", start);
+  const end = main.indexOf("\nconst transferredDiscussionStatus", start);
   assert.notEqual(start, -1);
   assert.notEqual(end, -1);
   const resume = main.slice(start, end);

@@ -6,7 +6,7 @@ import { spawnSync } from "node:child_process";
 
 const scriptPath = fileURLToPath(import.meta.url);
 const projectRoot = resolve(dirname(scriptPath), "..");
-const defaultSiteUrl = "http://127.0.0.1:8080";
+const defaultSiteUrl = "http://127.0.0.1:18080";
 
 const boundedTimeout = (value) => {
   const parsed = Number.parseInt(String(value ?? ""), 10);

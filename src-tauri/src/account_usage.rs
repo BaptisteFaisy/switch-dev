@@ -523,8 +523,16 @@ fn account_usage_view_from_homes(
     default_model: &str,
 ) -> AccountUsageView {
     let has_tokens = settings::account_has_auth_tokens(account);
-    let files = collect_account_rollouts_from_homes(homes);
-    let sessions = unique_session_usages(&files, default_model);
+    let sessions = if account.provider == Provider::Freebuff {
+        let mut files = Vec::new();
+        for home in homes {
+            files.extend(collect_freebuff_chats(home));
+        }
+        unique_freebuff_sessions(&files, default_model)
+    } else {
+        let files = collect_account_rollouts_from_homes(homes);
+        unique_session_usages(&files, default_model)
+    };
 
     let mut all_time = TokenTotals::default();
     let mut all_models = BTreeMap::<String, ModelAgg>::new();
@@ -995,6 +1003,277 @@ pub(crate) fn is_rollout_file(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+// ---------------------------------------------------------------------------
+// Freebuff : estimation de tokens depuis les transcripts locaux.
+//
+// Freebuff ne persiste AUCUN compteur de tokens (`ChatMessageMetadata` n'a pas
+// de champ usage, et `credits` vaut 0 en mode gratuit). La consommation est
+// donc ESTIMÉE depuis le texte des messages, à ~4 caractères/token — la même
+// convention que les autres sources estimées (CommandCode, Kiro, ZCode).
+//
+// Layout lu : <home>/.config/manicode/projects/<project>/chats/<chatId>/
+//   chat-messages.json (chat terminé/archivé), et projects-archive/… pour les
+// chats archivés. Les chats actifs sont en log.jsonl (journal runtime, pas un
+// transcript) et ne sont donc comptés qu'une fois archivés.
+// ---------------------------------------------------------------------------
+
+const FREEBUFF_CHATS_ROOTS: &[&str] = &["projects", "projects-archive"];
+const FREEBUFF_CHARS_PER_TOKEN: u64 = 4;
+
+fn freebuff_manicode_dir(home: &Path) -> PathBuf {
+    home.join(".config").join("manicode")
+}
+
+fn collect_freebuff_chats(home: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    let mut seen = HashSet::new();
+    let manicode = freebuff_manicode_dir(home);
+    for root in FREEBUFF_CHATS_ROOTS {
+        collect_freebuff_chats_in(&manicode.join(root), &mut files, &mut seen);
+    }
+    files
+}
+
+fn collect_freebuff_chats_in(
+    dir: &Path,
+    out: &mut Vec<PathBuf>,
+    seen: &mut HashSet<String>,
+) {
+    let Ok(projects) = fs::read_dir(dir) else {
+        return;
+    };
+    for project in projects.flatten() {
+        let chats_dir = project.path().join("chats");
+        let Ok(chats) = fs::read_dir(chats_dir) else {
+            continue;
+        };
+        for chat in chats.flatten() {
+            let file = chat.path().join("chat-messages.json");
+            if !file.is_file() {
+                continue;
+            }
+            // Un chat archivé peut coexister avec sa copie active : le
+            // session_id (<project>/<chatId>) dédoublonne.
+            if seen.insert(freebuff_session_id(&file)) {
+                out.push(file);
+            }
+        }
+    }
+}
+
+fn freebuff_session_id(path: &Path) -> String {
+    let chat = path
+        .parent()
+        .and_then(|p| p.file_name())
+        .and_then(|name| name.to_str())
+        .unwrap_or("?");
+    let project = path
+        .parent()
+        .and_then(|p| p.parent())
+        .and_then(|p| p.parent())
+        .and_then(|p| p.file_name())
+        .and_then(|name| name.to_str())
+        .unwrap_or("?");
+    format!("{project}/{chat}")
+}
+
+/// Modèle choisi par le picker freebuff, lu dans settings.json à la racine du
+/// canal manicode (`freebuffModel`). Retombe sur le modèle par défaut.
+fn freebuff_model_from_chat(path: &Path) -> Option<String> {
+    // .../manicode/projects/<p>/chats/<id>/chat-messages.json
+    // parent x5 => manicode
+    let manicode = path.parent()?.parent()?.parent()?.parent()?.parent()?;
+    let settings = fs::read(manicode.join("settings.json")).ok()?;
+    let value: Value = serde_json::from_slice(&settings).ok()?;
+    value
+        .get("freebuffModel")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .map(ToString::to_string)
+}
+
+/// (texte hors raisonnement, raisonnement, résultat des tools) d'un message.
+/// `content` + blocs non-reasoning = texte ; blocs `textType: "reasoning"` =
+/// raisonnement ; le `output` des blocs `type: "tool"` est le contexte qui sera
+/// réinjecté au tour suivant (donc compté en input).
+fn freebuff_message_text(msg: &Value) -> (u64, u64, u64) {
+    let mut text = 0_u64;
+    let mut reasoning = 0_u64;
+    let mut tool_output = 0_u64;
+    if let Some(content) = msg.get("content").and_then(Value::as_str) {
+        text = text.saturating_add(content.chars().count() as u64);
+    }
+    if let Some(blocks) = msg.get("blocks").and_then(Value::as_array) {
+        for block in blocks {
+            if block.get("type").and_then(Value::as_str) == Some("tool") {
+                if let Some(output) = block.get("output") {
+                    let chars = match output {
+                        Value::String(s) => s.chars().count() as u64,
+                        other => serde_json::to_string(other)
+                            .map(|serialized| serialized.chars().count() as u64)
+                            .unwrap_or(0),
+                    };
+                    tool_output = tool_output.saturating_add(chars);
+                }
+                continue;
+            }
+            let Some(content) = block.get("content").and_then(Value::as_str) else {
+                continue;
+            };
+            let is_reasoning = block
+                .get("textType")
+                .and_then(Value::as_str)
+                .map(|kind| kind.eq_ignore_ascii_case("reasoning"))
+                .unwrap_or(false);
+            let chars = content.chars().count() as u64;
+            if is_reasoning {
+                reasoning = reasoning.saturating_add(chars);
+            } else {
+                text = text.saturating_add(chars);
+            }
+        }
+    }
+    (text, reasoning, tool_output)
+}
+
+fn estimate_tokens_from_chars(chars: u64) -> u64 {
+    chars.div_ceil(FREEBUFF_CHARS_PER_TOKEN)
+}
+
+/// Le nom de dossier d'un chat freebuff est un horodatage ISO dont les `:` de
+/// l'heure sont remplacés par `-` (ex. `2026-08-20T14-34-24.513Z`).
+fn parse_chat_dir_to_unix(dir: &str) -> Option<i64> {
+    let t_index = dir.find('T')?;
+    let (date, time) = dir.split_at(t_index);
+    let rebuilt = format!("{date}{}", time.replacen('-', ":", 2));
+    parse_rfc3339_to_unix(&rebuilt)
+}
+
+fn file_mtime_unix(path: &Path) -> Option<i64> {
+    fs::metadata(path)
+        .ok()
+        .and_then(|meta| meta.modified().ok())
+        .and_then(|modified| modified.duration_since(SystemTime::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs() as i64)
+}
+
+fn scan_freebuff_chat_file(path: &Path, default_model: &str) -> Option<SessionUsage> {
+    let bytes = fs::read(path).ok()?;
+    let messages: Value = serde_json::from_slice(&bytes).ok()?;
+    let messages = messages.as_array()?;
+
+    let model = freebuff_model_from_chat(path)
+        .filter(|model| !model.trim().is_empty())
+        .unwrap_or_else(|| default_model.to_string());
+    let session_id = freebuff_session_id(path);
+    let chat_id = path
+        .parent()
+        .and_then(|p| p.file_name())
+        .and_then(|name| name.to_str());
+    let ts = chat_id
+        .and_then(parse_chat_dir_to_unix)
+        .or_else(|| file_mtime_unix(path));
+
+    let mut totals = TokenTotals::default();
+    // Chaque réponse est calculée avec tout le transcript précédent comme
+    // contexte. L'ancien calcul ne gardait que le dernier message utilisateur,
+    // ce qui sous-estimait fortement l'input des longs chats.
+    let mut conversation_context_chars = 0_u64;
+    let mut pending_turn_chars = 0_u64;
+    let mut saw_turn = false;
+
+    for msg in messages {
+        let variant = msg.get("variant").and_then(Value::as_str).unwrap_or("");
+        let is_assistant = matches!(variant, "ai" | "agent" | "assistant");
+        let (text_chars, reasoning_chars, tool_output_chars) = freebuff_message_text(msg);
+
+        if !is_assistant {
+            // Le contenu utilisateur/outil est le nouveau contexte du prochain
+            // tour assistant.
+            let incoming = text_chars
+                .saturating_add(reasoning_chars)
+                .saturating_add(tool_output_chars);
+            pending_turn_chars = pending_turn_chars.saturating_add(incoming);
+            conversation_context_chars = conversation_context_chars.saturating_add(incoming);
+            continue;
+        }
+
+        // Lignes vides (mode-divider…) : aucun usage à enregistrer.
+        if text_chars == 0 && reasoning_chars == 0 {
+            continue;
+        }
+
+        // Approximation de l'API : le contexte précédent est renvoyé à chaque
+        // tour. On inclut donc le transcript accumulé, pas seulement le dernier
+        // prompt. Le tour courant est compté une seule fois comme input.
+        let input_chars = conversation_context_chars.max(pending_turn_chars);
+        let input = estimate_tokens_from_chars(input_chars);
+        let output = estimate_tokens_from_chars(text_chars);
+        let reasoning = estimate_tokens_from_chars(reasoning_chars);
+        // Le résultat des tools de ce tour devient le contexte du tour suivant.
+        let assistant_output = text_chars.saturating_add(reasoning_chars);
+        conversation_context_chars = conversation_context_chars.saturating_add(assistant_output);
+        pending_turn_chars = tool_output_chars;
+        totals.add(&TokenTotals {
+            input,
+            cached: 0,
+            output,
+            reasoning,
+            total: input.saturating_add(output).saturating_add(reasoning),
+        });
+        saw_turn = true;
+    }
+
+    if !saw_turn {
+        return None;
+    }
+
+    let day = ts.map(local_day).unwrap_or_else(|| "inconnu".to_string());
+    let mut days = BTreeMap::new();
+    let mut day_usage = SessionDayUsage::default();
+    day_usage.totals.add(&totals);
+    add_model_usage(&mut day_usage.models, &model, &totals, 0.0, 0);
+    days.insert(day, day_usage);
+
+    let mut models = BTreeMap::new();
+    add_model_usage(&mut models, &model, &totals, 0.0, 0);
+
+    Some(SessionUsage {
+        session_id: Some(session_id),
+        days,
+        models,
+        totals,
+        cost: 0.0,
+        ts,
+    })
+}
+
+fn unique_freebuff_sessions(files: &[PathBuf], default_model: &str) -> Vec<SessionUsage> {
+    let mut sessions = Vec::<SessionUsage>::new();
+    let mut positions = HashMap::<String, usize>::new();
+
+    for file in files {
+        let Some(session) = scan_freebuff_chat_file(file, default_model) else {
+            continue;
+        };
+        let Some(identity) = session.session_id.clone() else {
+            sessions.push(session);
+            continue;
+        };
+        if let Some(index) = positions.get(&identity).copied() {
+            if session.totals.total > sessions[index].totals.total {
+                sessions[index] = session;
+            }
+        } else {
+            positions.insert(identity, sessions.len());
+            sessions.push(session);
+        }
+    }
+
+    sessions
+}
+
 /// Lit un rollout et renvoie l'usage final de la session (plus haut cumul
 /// cohérent de `total_token_usage`), le modèle (dernier `turn_context`) et
 /// l'horodatage du dernier événement `token_count`. Renvoie `None` si aucun
@@ -1340,6 +1619,54 @@ mod tests {
                 .count(),
             1
         );
+
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn freebuff_chat_is_estimated_from_text_reasoning_and_tool_output() {
+        let home = fresh_dir();
+        let manicode = home.join(".config").join("manicode");
+        let chat_dir = manicode
+            .join("projects")
+            .join("proj-1")
+            .join("chats")
+            .join("2026-08-20T14-34-24.513Z");
+        fs::create_dir_all(&chat_dir).unwrap();
+        fs::write(
+            manicode.join("settings.json"),
+            r#"{"freebuffModel":"deepseek/deepseek-v4-flash"}"#,
+        )
+        .unwrap();
+
+        let chat = json!([
+            {"variant":"user","content":"fais un truc"},
+            {"variant":"ai","content":"","blocks":[
+                {"type":"tool","toolName":"ls","output":"a\nb\nc\n"},
+                {"type":"text","content":"résultat final"}
+            ]},
+            {"variant":"ai","content":"ok"}
+        ]);
+        fs::write(
+            chat_dir.join("chat-messages.json"),
+            serde_json::to_string(&chat).unwrap(),
+        )
+        .unwrap();
+
+        let files = collect_freebuff_chats(&home);
+        let sessions = unique_freebuff_sessions(&files, "fallback/model");
+        assert_eq!(sessions.len(), 1);
+
+        let session = &sessions[0];
+        // Tour 1 : transcript accumulé = "fais un truc" (12 car -> 3).
+        // Tour 2 : transcript accumulé = user (12) + "résultat final" (14) -> 26 car -> 7.
+        assert_eq!(session.totals.input, 10);
+        // "résultat final" (14 -> 4) + "ok" (2 -> 1).
+        assert_eq!(session.totals.output, 5);
+        assert_eq!(session.totals.reasoning, 0);
+        assert_eq!(session.totals.total, 15);
+        // Le modèle vient de settings.json, pas du fallback.
+        assert!(session.models.contains_key("deepseek/deepseek-v4-flash"));
 
         let _ = fs::remove_dir_all(&home);
     }

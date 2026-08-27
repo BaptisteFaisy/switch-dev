@@ -10,6 +10,7 @@ import {
   keyboardShortcutConflict,
   keyboardShortcutFromEvent,
   keyboardShortcutMatches,
+  keyboardShortcutTargetIsTerminal,
   loadKeyboardShortcutOverrides,
   normalizeKeyboardShortcutBinding,
   persistKeyboardShortcutOverrides,
@@ -61,6 +62,16 @@ test("Ctrl et Commande déclenchent le même raccourci portable", () => {
   assert.equal(keyboardShortcutMatches(keyEvent({ ctrlKey: true }), "Mod+N"), true);
   assert.equal(keyboardShortcutMatches(keyEvent({ metaKey: true }), "Mod+N"), true);
   assert.equal(keyboardShortcutMatches(keyEvent({ ctrlKey: true, repeat: true }), "Mod+N"), false);
+});
+
+test("un terminal xterm garde la priorite sur les raccourcis globaux", () => {
+  const terminalTarget = {
+    closest: (selector) => selector.includes(".xterm") ? {} : null,
+  };
+  const regularTarget = { closest: () => null };
+  assert.equal(keyboardShortcutTargetIsTerminal(terminalTarget), true);
+  assert.equal(keyboardShortcutTargetIsTerminal(regularTarget), false);
+  assert.match(main, /if \(keyboardShortcutTargetIsTerminal\(event\.target\)\) return;/);
 });
 
 test("le raccourci accent grave reste compatible avec les claviers AZERTY", () => {

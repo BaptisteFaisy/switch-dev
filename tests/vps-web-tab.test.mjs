@@ -27,10 +27,6 @@ test("l'onglet utilise des routes dediees et suit les deploiements", () => {
   assert.match(platform, /case "vps_deploy_capabilities":\s*return api<T>\("GET", "\/api\/vps\/capabilities"\)/);
   assert.match(platform, /case "vps_list_deployments":\s*return api<T>\("GET", "\/api\/vps\/deployments"\)/);
   assert.match(platform, /case "vps_start_deployment":\s*return api<T>\("POST", "\/api\/vps\/deployments", args\.request\)/);
-  assert.match(platform, /case "vps_google_status":\s*return api<T>\("GET", "\/api\/vps\/google\/status"\)/);
-  assert.match(platform, /case "vps_google_start_auth":\s*return api<T>\("POST", "\/api\/vps\/google\/auth"\)/);
-  assert.match(platform, /case "vps_google_open_trial":\s*return api<T>\("POST", "\/api\/vps\/google\/trial"\)/);
-  assert.match(platform, /case "vps_google_start_deployment":\s*return api<T>\("POST", "\/api\/vps\/google\/deployments", args\.request\)/);
   assert.match(panel, /window\.setTimeout\(\(\) => void refreshVpsPanel\(rerender, true\), 1_500\)/);
   assert.match(panel, /Déploiements récents/);
 });
@@ -43,10 +39,6 @@ test("les operations VPS sont reservees au jeton de maintenance", () => {
     "api_vps_deployments",
     "api_vps_deployment",
     "api_vps_start_deployment",
-    "api_vps_google_status",
-    "api_vps_google_auth",
-    "api_vps_google_trial",
-    "api_vps_google_start_deployment",
   ]) {
     const start = server.indexOf(`async fn ${handler}`);
     assert.notEqual(start, -1, `${handler} absent`);
@@ -55,26 +47,12 @@ test("les operations VPS sont reservees au jeton de maintenance", () => {
   }
 });
 
-test("Google Cloud se connecte dans le navigateur puis lance le provisionneur dedie", () => {
-  assert.match(server, /"\/vps\/google\/status", get\(api_vps_google_status\)/);
-  assert.match(server, /"\/vps\/google\/auth", post\(api_vps_google_auth\)/);
-  assert.match(server, /"\/vps\/google\/trial", post\(api_vps_google_trial\)/);
-  assert.match(server, /post\(api_vps_google_start_deployment\)/);
-  assert.match(manager, /locate_google_account_script/);
-  assert.match(manager, /\.arg\("-Login"\)/);
-  assert.match(manager, /\.arg\("-Apply"\)\s*\.arg\("-Deploy"\)/);
-  assert.match(manager, /if !status\.authenticated/);
-  assert.match(manager, /if !status\.billing_ready/);
-  assert.doesNotMatch(manager, /cmd\.exe|\/bin\/sh|-Command/);
-});
-
-test("l'interface Google ne collecte aucune information bancaire", () => {
-  assert.match(panel, /id="vpsGoogleConnect"/);
-  assert.match(panel, /id="vpsGoogleTrial"/);
-  assert.match(panel, /id="vpsGoogleDeploy"/);
-  assert.match(panel, /mot de passe, ton MFA ni ta carte/);
-  assert.match(panel, /pages officielles Google/);
-  assert.doesNotMatch(panel, /id="vpsGoogle(?:Card|Password|Mfa|Cvv)/i);
+test("le panneau VPS reste strictement Azure et sans provisionnement Google", () => {
+  assert.match(panel, /Déployer sur Azure/);
+  assert.match(panel, /Connexion SSH Azure/);
+  assert.doesNotMatch(panel, /vpsGoogle|Google Cloud|provisionneur Google/i);
+  assert.doesNotMatch(server, /api_vps_google_status|api_vps_google_auth|api_vps_google_trial|api_vps_google_start_deployment|StartGoogleCloudDeployRequest/);
+  assert.doesNotMatch(manager, /google-trial|Google Cloud|locate_google/i);
 });
 
 test("le backend valide les champs et lance PowerShell sans shell intermediaire", () => {
@@ -90,7 +68,7 @@ test("le backend valide les champs et lance PowerShell sans shell intermediaire"
 
 test("aucune cle privee ne transite dans le navigateur", () => {
   assert.match(panel, /Chemin de la clé privée/);
-  assert.match(panel, /jamais envoyée au navigateur/);
+  assert.match(panel, /La clé reste sur la machine/);
   assert.match(manager, /canonical_file\(&request\.identity_file/);
   assert.doesNotMatch(panel, /privateKey(Content|Base64)|readAsText\(/);
   assert.doesNotMatch(server, /private_key_content|privateKeyContent/);
@@ -107,8 +85,6 @@ test("la vue VPS s'adapte aux ecrans mobiles", () => {
   assert.match(styles, /@media \(max-width: 680px\)/);
   assert.match(styles, /\.vps-layout \{ grid-template-columns: 1fr; \}/);
   assert.match(styles, /\.vps-panel \{ padding: 18px 14px 94px; \}/);
-  assert.match(styles, /\.vps-google-steps\s*\{\s*grid-template-columns: 1fr;/);
-  assert.match(styles, /\.vps-google-actions\s*\{\s*grid-template-columns: 1fr;/);
 });
 
 test("la vue VPS affiche l'essentiel et garde les details a la demande", () => {

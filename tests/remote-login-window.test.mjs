@@ -36,6 +36,30 @@ test("la connexion Codex distante ouvre directement OpenAI dans un nouvel onglet
   assert.match(main, /window\.setTimeout\(\(\) => void reloginAccount\(accountId, true\), 0\)/);
 });
 
+test("le mode mobile persiste le compte et demarre son terminal avant d'ouvrir OpenAI", () => {
+  const flowStart = main.indexOf("const addAccountAndLogin = async () =>");
+  const flowEnd = main.indexOf("const deleteSelectedAccount =", flowStart);
+  const flow = main.slice(flowStart, flowEnd);
+
+  assert.match(platform, /export const hasMobileExternalHttpsOpener/);
+  assert.match(flow, /const nativeMobileLogin = remoteCodexLogin && hasMobileExternalHttpsOpener\(\)/);
+  assert.match(
+    flow,
+    /const deferredMobileLogin =[\s\S]*?nativeMobileLogin \|\| window\.matchMedia\("\(max-width: 860px\)"\)\.matches/,
+  );
+  assert.match(
+    flow,
+    /deferredMobileLogin\s*\? prepareRemoteCodexLoginTab\(account\.id, account\.label\)\s*:\s*openRemoteCodexLoginWindow/,
+  );
+  const persistedAt = flow.indexOf('await invoke<AppSettings>("add_shared_account"');
+  const terminalAt = flow.indexOf("await reloginAccount(account.id, deferredMobileLogin)");
+  const browserAt = flow.indexOf("await openExternalHttpsUrl(CODEX_DEVICE_VERIFICATION_URL)");
+  assert.ok(persistedAt >= 0, "la sauvegarde distante doit rester presente");
+  assert.ok(terminalAt > persistedAt, "le terminal doit demarrer apres la sauvegarde");
+  assert.ok(browserAt > terminalAt, "Android ne doit passer en arriere-plan qu'en dernier");
+  assert.match(flow, /touche « Ouvrir OpenAI » pour terminer la connexion/);
+});
+
 test("la fenetre extrait uniquement le lien appareil OpenAI et son code", () => {
   assert.match(popup, /https:\\\/\\\/auth\\\.openai\\\.com\\\/codex\\\/device/);
   assert.match(popup, /\[A-Z0-9\]\{4\}-\[A-Z0-9\]\{4,5\}/);
@@ -98,7 +122,7 @@ test("un popup bloque conserve le terminal comme solution de repli", () => {
 
 test("la sortie initiale du terminal est tamponnee puis rejouee dans la fenetre", () => {
   assert.match(platform, /const remoteTerminalOutput = new Map<number, string>\(\)/);
-  assert.match(platform, /emitRemoteTerminalData\(message\.id, message\.data\)/);
+  assert.match(platform, /emitRemoteTerminalData\(id, message\.data\)/);
   assert.match(platform, /case "terminal_output_snapshot":/);
   assert.match(main, /const replayRemoteCodexLoginOutput = async/);
   assert.match(main, /invoke<string>\("terminal_output_snapshot", \{ id: terminalId \}\)/);

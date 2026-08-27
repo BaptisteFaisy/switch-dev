@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#070909" />
+    <title>Réseaux sociaux — Switch Développement</title>
+    <link rel="stylesheet" href="/social/styles.css" />
+    <script type="module" src="/social/app.js"></script>
+  </head>
+  <body>
+    <main class="social-app" id="socialApp">
+      <header class="page-head">
+        <div class="page-title">
+          <span class="switch-mark" aria-hidden="true">S</span>
+          <span>
+            <small>SWITCH DÉVELOPPEMENT</small>
+            <strong>Réseaux sociaux</strong>
+          </span>
+        </div>
+        <div class="head-actions">
+          <span class="sync-status" id="syncStatus" role="status" aria-live="polite" aria-atomic="true"><i></i> Connexion au service…</span>
+          <button class="button secondary" id="syncButton" type="button" aria-label="Actualiser les données">Actualiser</button>
+          <button class="button primary" id="connectButton" type="button"><span>＋</span> Connecter un compte</button>
+        </div>
+      </header>
+
+      <section class="mode-banner" id="modeBanner" hidden>
+        <span class="mode-icon">DEV</span>
+        <span><strong>Mode développement</strong><small>Les comptes de test et leurs données simulées sont toujours identifiés.</small></span>
+        <button id="modeDetailsButton" type="button">À savoir</button>
+      </section>
+
+      <section class="toolbar" aria-label="Filtres du dashboard">
+        <div class="filter-group">
+          <span>Période</span>
+          <div class="segmented" id="rangeFilter" role="group" aria-label="Période">
+            <button class="active" data-range="7" type="button" aria-pressed="true">7 jours</button>
+            <button data-range="30" type="button" aria-pressed="false">30 jours</button>
+            <button data-range="90" type="button" aria-pressed="false">90 jours</button>
+          </div>
+        </div>
+        <div class="filter-group">
+          <span>Plateforme</span>
+          <div class="segmented" id="platformFilter" role="group" aria-label="Plateforme">
+            <button class="active" data-platform="all" type="button" aria-pressed="true">Toutes</button>
+            <button data-platform="instagram" type="button" aria-pressed="false">Instagram</button>
+            <button data-platform="tiktok" type="button" aria-pressed="false">TikTok</button>
+          </div>
+        </div>
+        <div class="toolbar-spacer"></div>
+        <button class="text-button" id="toggleTableButton" type="button" aria-expanded="false" aria-controls="dataTableCard">Afficher le tableau</button>
+      </section>
+
+      <section class="account-filter" id="accountFilter" aria-label="Comptes affichés"></section>
+
+      <section class="kpi-grid" aria-label="Indicateurs clés">
+        <article class="kpi-card kpi-primary">
+          <div><span>Vues sur la période</span><b id="trendBadge">—</b></div>
+          <strong id="totalViews">—</strong>
+          <small id="totalViewsCaption">Tous les comptes sélectionnés</small>
+        </article>
+        <article class="kpi-card">
+          <div><span>Moyenne par jour</span><b>JOUR</b></div>
+          <strong id="dailyAverage">—</strong>
+          <small>Fuseau Europe/Paris</small>
+        </article>
+        <article class="kpi-card">
+          <div><span>Meilleur jour</span><b>MAX</b></div>
+          <strong id="bestDayViews">—</strong>
+          <small id="bestDayLabel">—</small>
+        </article>
+        <article class="kpi-card">
+          <div><span>Comptes suivis</span><b id="platformCount">—</b></div>
+          <strong id="selectedCount">—</strong>
+          <small id="accountCountCaption">—</small>
+        </article>
+      </section>
+
+      <section class="chart-card" aria-labelledby="chartTitle">
+        <header class="card-head">
+          <div>
+            <span class="eyebrow">ÉVOLUTION QUOTIDIENNE</span>
+            <h1 id="chartTitle">Vues par jour et par compte</h1>
+          </div>
+          <div class="chart-legend" id="chartLegend"></div>
+        </header>
+        <div class="chart-wrap" id="chartWrap">
+          <canvas id="viewsChart" role="img" aria-label="Graphique des vues quotidiennes" aria-describedby="chartSummary chartHelp" tabindex="0"></canvas>
+          <div class="chart-tooltip" id="chartTooltip" hidden></div>
+          <span class="visually-hidden" id="chartAnnouncement" aria-live="polite"></span>
+          <div class="chart-empty" id="chartEmpty" hidden>
+            <strong>Aucun compte sélectionné</strong>
+            <span>Choisissez au moins un compte pour afficher ses vues.</span>
+            <button id="resetFiltersButton" type="button">Tout afficher</button>
+          </div>
+        </div>
+        <p class="chart-summary" id="chartSummary" aria-live="polite"></p>
+        <footer class="chart-foot">
+          <span id="lastUpdated">Dernière synchronisation : —</span>
+          <span id="chartHelp">Une « vue » peut être comptée différemment par chaque plateforme. Sur le graphique, utilisez les flèches gauche et droite pour parcourir les dates.</span>
+        </footer>
+      </section>
+
+      <section class="data-table-card" id="dataTableCard" hidden aria-labelledby="dataTableTitle">
+        <header class="card-head">
+          <div><span class="eyebrow">DONNÉES ACCESSIBLES</span><h2 id="dataTableTitle">Détail quotidien</h2></div>
+        </header>
+        <div class="table-scroll"><table id="dataTable" aria-labelledby="dataTableTitle"></table></div>
+      </section>
+
+      <section class="media-section" id="mediaSection" aria-labelledby="mediaTitle">
+        <header class="card-head">
+          <div>
+            <span class="eyebrow">CONTENUS OFFICIELS</span>
+            <h2 id="mediaTitle">Vues par Reel et vidéo TikTok</h2>
+          </div>
+          <p class="media-summary" id="mediaSummary">Chargement des contenus…</p>
+        </header>
+        <div class="media-grid" id="mediaGrid" aria-live="polite"></div>
+        <p class="media-note">Le total est le compteur cumulatif exact renvoyé par la plateforme. Les vues par jour sont calculées seulement entre deux relevés quotidiens comparables, espacés de 18 à 30 heures ; aucun historique manquant n’est inventé.</p>
+      </section>
+
+      <section class="accounts-section" aria-labelledby="accountsTitle">
+        <header class="card-head">
+          <div><span class="eyebrow">CONNEXIONS</span><h2 id="accountsTitle">Comptes connectés</h2></div>
+          <button class="button secondary" id="manageAccountsButton" type="button">Gérer les comptes</button>
+        </header>
+        <div class="accounts-grid" id="accountsGrid"></div>
+      </section>
+    </main>
+
+    <div class="modal-backdrop" id="connectModal" hidden>
+      <section class="modal" role="dialog" aria-modal="true" aria-labelledby="connectTitle">
+        <button class="modal-close" id="modalCloseButton" type="button" aria-label="Fermer">×</button>
+        <span class="eyebrow">NOUVELLE CONNEXION</span>
+        <h2 id="connectTitle">Connecter un compte</h2>
+        <p class="modal-intro">Choisissez la plateforme puis connectez-vous chez Instagram ou TikTok. Switch rattache les données à l’identifiant officiel renvoyé par la plateforme, jamais au pseudo saisi.</p>
+
+        <div class="provider-picker" id="providerPicker" role="group" aria-label="Plateforme à connecter">
+          <button class="active" data-provider="instagram" type="button" aria-pressed="true"><span class="provider-logo instagram">IG</span><span><strong>Instagram</strong><small>Business ou Creator</small></span><i>✓</i></button>
+          <button data-provider="tiktok" type="button" aria-pressed="false"><span class="provider-logo tiktok">TT</span><span><strong>TikTok</strong><small>Compte Creator ou Business</small></span><i>✓</i></button>
+        </div>
+
+        <section class="live-connect-card">
+          <span><strong id="liveConnectTitle">Connexion officielle Instagram</strong><small id="liveConnectCopy">Vérification de la configuration…</small></span>
+          <button class="button primary" id="liveConnectButton" type="button" disabled>Connecter</button>
+        </section>
+        <p class="form-error" id="oauthError" role="alert" hidden></p>
+
+        <div class="divider" id="demoDivider"><span>OU, DANS CE CONTENEUR DE DÉVELOPPEMENT</span></div>
+
+        <form id="demoAccountForm">
+          <label><span>Nom affiché</span><input id="displayNameInput" name="displayName" maxlength="80" placeholder="Ex. Atelier Noa" autocomplete="off" required /></label>
+          <label><span>Identifiant du compte</span><div class="handle-input"><i>@</i><input id="handleInput" name="handle" maxlength="30" pattern="[A-Za-z0-9._]{2,30}" placeholder="atelier.noa" autocomplete="off" autocapitalize="off" spellcheck="false" required /></div></label>
+          <p class="form-note"><span>TEST</span> Jeu de démonstration séparé, sans rapport avec un vrai compte Instagram ou TikTok.</p>
+          <p class="form-error" id="formError" role="alert" hidden></p>
+          <button class="button demo-button" id="demoSubmitButton" type="submit">Ajouter le compte test <span>→</span></button>
+        </form>
+      </section>
+    </div>
+
+    <div class="toast" id="toast" role="status" hidden></div>
+  </body>
+</html>
+

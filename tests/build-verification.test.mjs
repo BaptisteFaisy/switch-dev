@@ -38,9 +38,11 @@ test("le tag de release vient de la ligne de commande ou de GitHub Actions", () 
 
 test("les commandes de production passent par la barriere de verification", async () => {
   const packageJson = JSON.parse(await readFile(resolve(projectRoot, "package.json"), "utf8"));
-  assert.equal(packageJson.scripts.prebuild, "npm run verify");
-  assert.equal(packageJson.scripts["prebuild:signed"], "npm run verify");
-  assert.equal(packageJson.scripts["prebuild:server"], "npm run verify");
+  // La barriere de verification est precedee par la porte de provenance de la
+  // source (prebuild:source-guard) : les deux restent obligatoires.
+  assert.match(packageJson.scripts.prebuild, /npm run verify$/);
+  assert.match(packageJson.scripts["prebuild:signed"], /npm run verify$/);
+  assert.match(packageJson.scripts["prebuild:server"], /npm run verify$/);
   assert.match(packageJson.scripts.verify, /cargo test/);
 
   const localTauriConfig = JSON.parse(

@@ -146,6 +146,8 @@ export type ChatPanelModel = {
   selectedReasoningEffort: string;
   reasoningEffortOptions: ChatSelectOption[];
   supportsReasoningEffort: boolean;
+  /** OpenRouter conserve une valeur vide explicite : aucun niveau force. */
+  reasoningEffortAutomatic?: boolean;
   fastModeEnabled: boolean;
   supportsFastMode: boolean;
   fastModeHelp: string;
@@ -388,6 +390,69 @@ const actionGroupSummary = (parts: ChatPart[]): string => {
   }
 };
 
+// Les tours d'agent peuvent contenir plusieurs centaines d'actions. Les
+// injecter dans le DOM alors que leur <details> est ferme faisait exploser le
+// cout de chaque render global (sorties <pre>, lignes et icones comprises).
+// On ne conserve ici que les references aux parts ; le HTML detaille est cree
+// au premier depliage par le listener delegue de main.ts.
+const DEFERRED_CHAT_ACTION_GROUP_LIMIT = 4096;
+const deferredChatActionGroups = new Map<string, ChatPart[]>();
+let deferredChatActionGroupSequence = 0;
+
+const registerDeferredChatActionGroup = (parts: ChatPart[]): string => {
+  deferredChatActionGroupSequence += 1;
+  const id = `chat-action-group-${deferredChatActionGroupSequence}`;
+  deferredChatActionGroups.set(id, parts);
+  while (deferredChatActionGroups.size > DEFERRED_CHAT_ACTION_GROUP_LIMIT) {
+    const oldest = deferredChatActionGroups.keys().next().value as string | undefined;
+    if (!oldest) break;
+    deferredChatActionGroups.delete(oldest);
+  }
+  return id;
+};
+
+const renderOpenCodeActionItem = (part: ChatPart): string => {
+  const partRunning = part.status === "running" || part.status === "queued";
+  const partFailed = part.status === "error" || part.status === "failed";
+  const details = renderOpenCodeToolOutput(part);
+  const row = `
+    <span class="chat-action-state" aria-hidden="true">
+      ${partRunning ? `<span class="chat-tool-spinner"></span>` : `<i data-lucide="${partFailed ? "circle-alert" : activityIcon(part.waitCount ? "wait" : part.tool || "tool")}"></i>`}
+    </span>
+    <span class="chat-action-copy">
+      <strong>${escapeHtml(part.title || "Outil")}</strong>
+      ${part.subtitle ? `<small>${escapeHtml(part.subtitle)}</small>` : ""}
+    </span>`;
+  if (!details) {
+    return `<li class="chat-action-item chat-action-item--${escapeHtml(part.status)}"><div class="chat-action-row">${row}</div></li>`;
+  }
+  return `<li class="chat-action-item chat-action-item--${escapeHtml(part.status)}">
+    <details>
+      <summary class="chat-action-row">${row}<i class="chat-action-chevron" data-lucide="chevron-down"></i></summary>
+      ${details}
+    </details>
+  </li>`;
+};
+
+const renderOpenCodeActionList = (parts: ChatPart[]): string =>
+  `<ul class="chat-action-list">${parts.map(renderOpenCodeActionItem).join("")}</ul>`;
+
+export const renderDeferredChatActionGroup = (
+  id: string | null | undefined,
+): string | null => {
+  if (!id) return null;
+  const parts = deferredChatActionGroups.get(id);
+  if (!parts) return null;
+  deferredChatActionGroups.delete(id);
+  return renderOpenCodeActionList(parts);
+};
+
+export const pruneDeferredChatActionGroups = (activeIds: ReadonlySet<string>): void => {
+  for (const id of deferredChatActionGroups.keys()) {
+    if (!activeIds.has(id)) deferredChatActionGroups.delete(id);
+  }
+};
+
 const renderChatAgentTools = (
   tools: readonly ChatAgentToolDefinition[],
   enabledTools: readonly ChatAgentToolId[],
@@ -421,32 +486,11 @@ const renderOpenCodeActionGroup = (parts: ChatPart[]): string => {
     <span class="chat-tool-icon" aria-hidden="true">${running ? `<span class="chat-tool-spinner"></span>` : `<i data-lucide="${failed ? "circle-alert" : "list-checks"}"></i>`}</span>
     <span class="chat-tool-copy"><strong>${title}</strong><small>${actionGroupSummary(parts)}</small></span>
     <i class="chat-tool-chevron" data-lucide="chevron-down"></i>`;
-  const actions = parts.map((part) => {
-    const partRunning = part.status === "running" || part.status === "queued";
-    const partFailed = part.status === "error" || part.status === "failed";
-    const details = renderOpenCodeToolOutput(part);
-    const row = `
-      <span class="chat-action-state" aria-hidden="true">
-        ${partRunning ? `<span class="chat-tool-spinner"></span>` : `<i data-lucide="${partFailed ? "circle-alert" : activityIcon(part.waitCount ? "wait" : part.tool || "tool")}"></i>`}
-      </span>
-      <span class="chat-action-copy">
-        <strong>${escapeHtml(part.title || "Outil")}</strong>
-        ${part.subtitle ? `<small>${escapeHtml(part.subtitle)}</small>` : ""}
-      </span>`;
-    if (!details) {
-      return `<li class="chat-action-item chat-action-item--${escapeHtml(part.status)}"><div class="chat-action-row">${row}</div></li>`;
-    }
-    return `<li class="chat-action-item chat-action-item--${escapeHtml(part.status)}">
-      <details>
-        <summary class="chat-action-row">${row}<i class="chat-action-chevron" data-lucide="chevron-down"></i></summary>
-        ${details}
-      </details>
-    </li>`;
-  }).join("");
+  const deferredGroupId = registerDeferredChatActionGroup(parts);
 
-  return `<details data-component="tool-part" data-tool-kind="activity-group" class="chat-tool-part chat-action-group chat-tool-part--${status}">
+  return `<details data-component="tool-part" data-tool-kind="activity-group" data-chat-action-group="${deferredGroupId}" class="chat-tool-part chat-action-group chat-tool-part--${status}">
     <summary>${trigger}</summary>
-    <ul class="chat-action-list">${actions}</ul>
+    <div class="chat-action-deferred" data-chat-action-content></div>
   </details>`;
 };
 
@@ -906,16 +950,29 @@ export const renderChatFeedInner = (model: ChatPanelModel, instanceId = ""): str
   return notice + olderTurns + conversation + microsoftPendingActions + turnError + quotaSuggestion;
 };
 
-const modelSuggestions = (model: ChatPanelModel): string =>
-  Array.from(new Set([model.selectedModel, ...model.modelSuggestions].filter(Boolean)))
+const modelSuggestions = (model: ChatPanelModel): string => {
+  const selectedIsAvailable = model.modelSuggestions.some(
+    (candidate) => candidate.toLocaleLowerCase() === model.selectedModel.toLocaleLowerCase(),
+  );
+  // Un ID OpenRouter disparu reste visible dans le champ comme etat invalide,
+  // sans reapparaitre dans la liste des modeles disponibles.
+  const includeSelected = !model.reasoningEffortAutomatic || selectedIsAvailable;
+  return Array.from(new Set([
+    ...(includeSelected ? [model.selectedModel] : []),
+    ...model.modelSuggestions,
+  ].filter(Boolean)))
     .map((value) => `<option value="${escapeHtml(value)}"></option>`)
     .join("");
+};
 
 const reasoningEffortOptions = (model: ChatPanelModel): string => {
+  const automatic = model.reasoningEffortAutomatic
+    ? `<option value="" ${model.selectedReasoningEffort ? "" : "selected"}>Automatique · OpenRouter</option>`
+    : "";
   if (!model.supportsReasoningEffort) {
-    return `<option value="">Non applicable</option>`;
+    return automatic || `<option value="">Non applicable</option>`;
   }
-  return model.reasoningEffortOptions
+  return automatic + model.reasoningEffortOptions
     .map(
       (option) =>
         `<option value="${escapeHtml(option.value)}" ${option.value === model.selectedReasoningEffort ? "selected" : ""}>${escapeHtml(option.label)}</option>`,
@@ -1176,7 +1233,7 @@ export const renderChatPanel = (
             data-chat-action="goal"
             type="button"
             class="chat-goal"
-            title="${model.supportsGoals ? "Créer un goal à partir du texte saisi" : "Les goals sont disponibles avec Codex"}"
+            title="${model.supportsGoals ? "Créer un goal à partir du texte saisi" : "Les goals ne sont pas pris en charge par ce fournisseur"}"
             aria-label="Créer un goal"
             ${busy || !model.selectedAccountId || !model.supportsGoals ? "disabled" : ""}
           >

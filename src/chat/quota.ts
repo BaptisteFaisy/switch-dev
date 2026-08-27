@@ -6,6 +6,8 @@ export type ChatQuotaBucket = {
 export type ChatAccountQuota = {
   id: string;
   hasTokens: boolean;
+  /** Erreur de lecture du quota renvoyee par le provider, si presente. */
+  error?: string | null;
   sessionUsedPercent?: number | null;
   weeklyUsedPercent?: number | null;
   buckets?: ChatQuotaBucket[];
@@ -46,6 +48,23 @@ const normalizedError = (value: string): string =>
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "")
     .toLowerCase();
+
+/**
+ * Un fichier de jetons peut encore exister alors que le provider refuse la
+ * session (401, token revoque, reconnexion requise). Un ancien pourcentage en
+ * cache ne doit jamais rendre ce compte eligible a une nouvelle conversation
+ * ou a une reprise automatique.
+ */
+export const isQuotaAuthenticationError = (
+  error: string | null | undefined,
+): boolean => {
+  if (!error?.trim()) return false;
+  return /token[_ ]?invalidat|refresh[_ ]?token|revoked|revoqu|\b401\b|\b403\b|unauthor|authentication|session (?:has )?ended|sign(?:ing)? ?in again|log ?in again|not logged in|connexion requise|authentication required/i
+    .test(error);
+};
+
+const quotaAccountIsSelectable = (account: ChatAccountQuota): boolean =>
+  account.hasTokens && !isQuotaAuthenticationError(account.error);
 
 /**
  * Distingue un quota de compte epuise d'une limite de contexte ou d'un prompt
@@ -238,7 +257,7 @@ export const bestQuotaAccountForNewChat = <T extends ChatAccountQuota>(
 
   let best: BestNewChatQuotaAccount<T> | null = null;
   for (const account of accounts) {
-    if (!eligible.has(account.id)) continue;
+    if (!eligible.has(account.id) || !quotaAccountIsSelectable(account)) continue;
     const remainingPercent = remainingQuotaPercent(account);
     if (remainingPercent === null || remainingPercent <= 0) continue;
     const openChatCount = openChatCounts.get(account.id) ?? 0;
@@ -298,7 +317,11 @@ export const bestQuotaAccount = <T extends ChatAccountQuota>(
   let best: BestQuotaAccount<T> | null = null;
 
   for (const account of accounts) {
-    if (account.id === currentAccountId || !eligible.has(account.id)) continue;
+    if (
+      account.id === currentAccountId
+      || !eligible.has(account.id)
+      || !quotaAccountIsSelectable(account)
+    ) continue;
     const remainingPercent = remainingQuotaPercent(account);
     if (remainingPercent === null || remainingPercent <= 0) continue;
     if (!best || remainingPercent > best.remainingPercent) {

@@ -183,6 +183,35 @@ pub fn usage_dashboard_for_server(
     load_usage_dashboard(active_runs)
 }
 
+#[cfg_attr(feature = "desktop", tauri::command)]
+pub fn tokscale_submit_usage() -> Result<serde_json::Value, String> {
+    submit_usage_to_tokscale()
+}
+
+pub fn submit_usage_to_tokscale() -> Result<serde_json::Value, String> {
+    let token = env::var("TOKSCALE_API_TOKEN")
+        .map_err(|_| "TOKSCALE_API_TOKEN n'est pas configuré sur le serveur".to_string())?;
+    if token.trim().is_empty() {
+        return Err("TOKSCALE_API_TOKEN est vide".to_string());
+    }
+    let script = env::var("CST_TOKSCALE_SCRIPT")
+        .unwrap_or_else(|_| "/srv/cst/tokscale-all.sh".to_string());
+    if !Path::new(&script).is_file() {
+        return Err(format!("script Tokscale introuvable: {script}"));
+    }
+    let output = std::process::Command::new(&script)
+        .arg("--submit")
+        .env("TOKSCALE_API_TOKEN", token)
+        .env("TOKSCALE_THREADS", "1")
+        .output()
+        .map_err(|error| format!("lancement Tokscale impossible: {error}"))?;
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("Tokscale a refusé l'envoi: {}", detail.trim()));
+    }
+    Ok(serde_json::json!({"submitted": true, "script": script}))
+}
+
 pub fn now_ts() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

@@ -2,7 +2,12 @@ import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { listen as tauriListen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { openUrl as tauriOpenUrl } from "@tauri-apps/plugin-opener";
-import { TerminalInputBuffer, terminalTransportErrorMessage } from "./terminal-transport";
+import {
+  TerminalInputBuffer,
+  terminalInputDelivery,
+  terminalReconnectPlan,
+  terminalTransportErrorMessage,
+} from "./terminal-transport";
 import {
   rankRemoteAllocations,
   type RemoteAllocationObservation,
@@ -18,7 +23,12 @@ export type DiscussionStreamMessage =
   | { type: "error"; message: string }
   | { type: "pong" };
 
-export type RuntimeSyncTopic = "activeChatTurns" | "autonomousAgents" | "privateMessages";
+export type RuntimeSyncTopic =
+  | "activeChatTurns"
+  | "activeTerminals"
+  | "autonomousAgents"
+  | "accountCompletions"
+  | "privateMessages";
 
 export type RuntimeSyncMessage =
   | { type: "hello" | "resync"; revision: number }
@@ -70,7 +80,25 @@ type RemoteWsMessage =
   | { type: "exit"; id: number }
   | { type: "error"; id: number; message: string }
   | { type: "status"; id: number; status: string; workspaceId: string; workspacePath: string }
+  | { type: "status"; id: number; status: string; workspace_id: string; workspace_path: string }
   | { type: "pong"; id: number };
+
+function isRemoteWsMessage(value: unknown): value is RemoteWsMessage {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Record<string, unknown>;
+  if (typeof candidate.type !== "string" || !Number.isSafeInteger(candidate.id)) return false;
+  if (candidate.type === "data") return typeof candidate.data === "string";
+  if (candidate.type === "error") return typeof candidate.message === "string";
+  if (candidate.type === "status") {
+    const hasCamelCaseWorkspace = typeof candidate.workspaceId === "string"
+      && typeof candidate.workspacePath === "string";
+    const hasSnakeCaseWorkspace = typeof candidate.workspace_id === "string"
+      && typeof candidate.workspace_path === "string";
+    return typeof candidate.status === "string"
+      && (hasCamelCaseWorkspace || hasSnakeCaseWorkspace);
+  }
+  return candidate.type === "exit" || candidate.type === "pong";
+}
 
 type ClientStartupConfig = {
   remoteMode: boolean;
@@ -153,8 +181,18 @@ const REMOTE_BOOTSTRAP_TIMEOUT_MS = 8_000;
 const listeners = new Map<string, Set<Listener<any>>>();
 const remoteSockets = new Map<number, WebSocket>();
 const remoteTerminalRoutes = new Map<number, RemoteTerminalRoute>();
+// Les noeuds distants attribuent chacun leurs IDs a partir de 1. Le navigateur
+// utilise donc un ID virtuel des qu'une collision apparait, puis reconvertit
+// chaque appel vers l'ID local du noeud proprietaire.
+const remoteTerminalLocalIds = new Map<number, number>();
+let nextRemoteTerminalVirtualId = 1_000_000_000;
 const REMOTE_TERMINAL_OUTPUT_LIMIT = 32_768;
 const remoteTerminalOutput = new Map<number, string>();
+const remoteTerminalHeartbeatTimers = new Map<number, number>();
+const remoteTerminalPendingWrites = new Map<number, Promise<void>>();
+// Toutes les écritures qui ciblent un même socket passent par cette file. Elle
+// sérialise le flush de reconnexion et les frappes arrivées juste après OPEN.
+const remoteTerminalSocketWrites = new Map<number, Promise<void>>();
 const remoteChatTurnRoutes = new Map<number, { route: RemoteTerminalRoute; remoteId: number }>();
 const remoteChatTurnIds = new Map<string, number>();
 const remoteSessionRoutes = new Map<string, RemoteTerminalRoute>();
@@ -162,7 +200,9 @@ const remoteStartingTerminals = new Set<number>();
 const remotePendingTerminalInput = new TerminalInputBuffer();
 const remoteTerminalReconnectTimers = new Map<number, number>();
 const remoteTerminalReconnectAttempts = new Map<number, number>();
+const remoteTerminalStopRetryTimers = new Map<number, number>();
 const remoteStoppingTerminals = new Set<number>();
+const remoteEndedTerminals = new Set<number>();
 let terminalCandidatesInFlight: {
   configKey: string;
   promise: Promise<RemoteTerminalRoute[]>;
@@ -171,7 +211,7 @@ let nextRemoteChatTurnId = Number.MAX_SAFE_INTEGER;
 let remoteChatStartQueue: Promise<void> = Promise.resolve();
 let startupRemoteNodes = "";
 
-const REMOTE_TERMINAL_MAX_RECONNECTS = 6;
+const REMOTE_TERMINAL_CONNECT_TIMEOUT_MS = 6_000;
 
 const viteRemoteBase =
   (typeof import.meta !== "undefined" && import.meta.env?.VITE_CST_API_BASE_URL
@@ -236,6 +276,9 @@ const mobileBridge = (): MobileBridge | null => {
 
 export const hasMobileSettings = () =>
   typeof mobileBridge()?.openSettings === "function";
+
+export const hasMobileExternalHttpsOpener = () =>
+  typeof mobileBridge()?.openExternalHttpsUrl === "function";
 
 export const openMobileSettings = () => {
   const openSettings = mobileBridge()?.openSettings;
@@ -380,7 +423,7 @@ export const openExternalHttpsUrl = async (rawUrl: string) => {
 
   const externalWindow = window.open(url.toString(), "_blank", "noopener,noreferrer");
   if (!externalWindow) {
-    throw new Error("Le navigateur a bloque l'ouverture du paiement.");
+    throw new Error("Le navigateur a bloque l'ouverture du lien.");
   }
   externalWindow.opener = null;
 };
@@ -863,6 +906,14 @@ async function remoteInvoke<T>(command: string, args: Record<string, any>): Prom
         accountId: args.accountId,
         sessionId: args.sessionId,
       });
+    case "import_codex_transcript_to_freebuff":
+      return api<T>("POST", "/api/discussions/import-codex-freebuff", {
+        sourceAccountId: args.sourceAccountId,
+        sessionId: args.sessionId,
+        targetAccountId: args.targetAccountId,
+        folderPath: args.folderPath ?? null,
+        transcript: args.transcript,
+      });
     case "import_account_json":
       return api<T>("POST", "/api/accounts/import", { content: args.content });
     case "import_account_docs":
@@ -878,20 +929,73 @@ async function remoteInvoke<T>(command: string, args: Record<string, any>): Prom
       return api<T>("GET", `/api/limits${args.force ? "?force=true" : ""}`);
     case "usage_dashboard":
       return api<T>("GET", "/api/usage");
+    case "tokscale_submit_usage":
+      return api<T>("POST", "/api/tokscale/submit", {});
     case "account_token_usage":
       return api<T>("GET", "/api/account-usage");
     case "work_time_dashboard":
       return api<T>("GET", "/api/work-time");
+    case "tracking_links":
+      return api<T>("GET", "/api/tracking-links");
+    case "create_tracking_link":
+      return api<T>("POST", "/api/tracking-links", args.request);
+    case "referral_snapshot":
+      return api<T>("GET", args.refresh ? "/api/referral?refresh=1" : "/api/referral");
+    case "create_referral_code":
+      return api<T>("POST", "/api/referral", args.request);
+    case "delete_referral_code":
+      return api<T>(
+        "DELETE",
+        `/api/referral/${encodeURIComponent(String(args.code))}`,
+      );
+    case "duello_bank_snapshot":
+      return api<T>("GET", "/api/duello-bank");
+    case "credit_duello_wallet":
+      return api<T>("POST", "/api/duello-bank/credits", args.request);
+    case "freebuff_cloud_status":
+      return api<T>("GET", "/api/freebuff-cloud/status");
+    case "freebuff_cloud_connect":
+      return api<T>("POST", "/api/freebuff-cloud/connect", { sessionCookie: args.sessionCookie });
+    case "freebuff_cloud_disconnect":
+      return api<T>("POST", "/api/freebuff-cloud/disconnect");
+    case "freebuff_cloud_projects":
+      return api<T>("GET", "/api/freebuff-cloud/projects");
+    case "freebuff_cloud_create_blank":
+      return api<T>("POST", "/api/freebuff-cloud/projects/blank", { name: args.name });
+    case "freebuff_cloud_connect_repo":
+      return api<T>("POST", "/api/freebuff-cloud/projects/repo", { repoFullName: args.repoFullName });
+    case "freebuff_cloud_delete_project":
+      return api<T>("POST", "/api/freebuff-cloud/projects/delete", { projectId: args.projectId });
+    case "freebuff_cloud_repos":
+      return api<T>("GET", "/api/freebuff-cloud/repos");
+    case "tasks_list":
+      return api<T>(
+        "GET",
+        `/api/tasks${args.account ? `?account=${encodeURIComponent(String(args.account))}` : ""}`,
+      );
+    case "tasks_add":
+      return api<T>(
+        "POST",
+        `/api/tasks${args.account ? `?account=${encodeURIComponent(String(args.account))}` : ""}`,
+        args.task,
+      );
+    case "tasks_replace":
+      return api<T>(
+        "PUT",
+        `/api/tasks${args.account ? `?account=${encodeURIComponent(String(args.account))}` : ""}`,
+        args.items,
+      );
+    case "tasks_remove":
+      return api<T>(
+        "DELETE",
+        `/api/tasks/${encodeURIComponent(String(args.id))}${args.account ? `?account=${encodeURIComponent(String(args.account))}` : ""}`,
+      );
     case "vps_deploy_capabilities":
       return api<T>("GET", "/api/vps/capabilities");
-    case "vps_google_status":
-      return api<T>("GET", "/api/vps/google/status");
-    case "vps_google_start_auth":
-      return api<T>("POST", "/api/vps/google/auth");
-    case "vps_google_open_trial":
-      return api<T>("POST", "/api/vps/google/trial");
-    case "vps_google_start_deployment":
-      return api<T>("POST", "/api/vps/google/deployments", args.request);
+    case "cleanup_request":
+      return api<T>("POST", "/api/cleanup/request");
+    case "cleanup_status":
+      return api<T>("GET", "/api/cleanup/status");
     case "vps_list_deployments":
       return api<T>("GET", "/api/vps/deployments");
     case "vps_start_deployment":
@@ -911,6 +1015,8 @@ async function remoteInvoke<T>(command: string, args: Record<string, any>): Prom
       return pickRemotePoolAccount<T>();
     case "start_terminal":
       return startRemoteTerminal<T>(args);
+    case "list_active_terminals":
+      return listRemoteActiveTerminals<T>();
     case "attach_terminal":
       return attachRemoteTerminal<T>(args);
     case "terminal_output_snapshot":
@@ -979,6 +1085,20 @@ async function remoteInvoke<T>(command: string, args: Record<string, any>): Prom
         proposalId: args.proposalId,
         addToGoogleCalendar: args.addToGoogleCalendar ?? false,
       });
+    case "list_control_devices":
+      return api<T>("GET", "/api/device-fleet");
+    case "control_device":
+      return api<T>("POST", "/api/device-fleet/actions", {
+        deviceId: args.deviceId,
+        action: args.action,
+        ...(args.args === undefined ? {} : { args: args.args }),
+        ...(args.confirmed === undefined ? {} : { confirmed: args.confirmed }),
+      });
+    case "get_control_device_action":
+      return api<T>(
+        "GET",
+        `/api/device-fleet/actions/${encodeURIComponent(String(args.actionId))}`,
+      );
     case "list_discussions":
       return listRemoteDiscussions<T>();
     case "get_discussion_transcript":
@@ -1231,20 +1351,14 @@ async function remoteInvoke<T>(command: string, args: Record<string, any>): Prom
         `/api/orchestrations/${encodeURIComponent(String(args.id))}`,
       );
     case "list_prompt_history":
-      return {
-        generatedAt: Math.floor(Date.now() / 1000),
-        totalPrompts: 0,
-        returned: 0,
-        truncated: false,
-        prompts: [],
-      } as T;
+      return listRemotePromptHistory<T>(args.limit);
     case "claim_session_for_terminal":
       return apiAt<T>(
         remoteTerminalRoutes.get(Number(args.terminalId)) ?? defaultRemoteRoute(),
         "POST",
         "/api/discussions/claim",
         {
-        terminalId: args.terminalId,
+        terminalId: remoteTerminalServerId(Number(args.terminalId)),
         accountId: args.accountId,
         afterUnix: args.afterUnix,
         excludeSessionIds: args.excludeSessionIds ?? [],
@@ -1342,10 +1456,10 @@ async function uploadRemoteAudioFile(
 }
 
 /**
- * Souscrit au signal leger partage par les tours actifs, les agents autonomes
- * et la messagerie privee. Un socket est ouvert par noeud afin que le catalogue
- * multi-VPS ne perde aucune transition. Les snapshots restent lus par REST
- * uniquement lors d'un signal ou pendant le repli de reconnexion.
+ * Souscrit au signal leger partage par les tours actifs, les terminaux, les
+ * agents autonomes et la messagerie privee. Un socket est ouvert par noeud afin
+ * que le catalogue multi-VPS ne perde aucune transition. Les snapshots restent
+ * lus par REST uniquement lors d'un signal ou pendant le repli de reconnexion.
  */
 export function subscribeRuntimeUpdates(
   onMessage: (message: RuntimeSyncMessage) => void,
@@ -1711,7 +1825,16 @@ async function rankedRemoteNodeRoutes(
         );
         return {
           node: { ...node, label: health.nodeLabel || node.label },
-          health,
+          // Certains reverse proxies retirent les champs optionnels de santé.
+          // Si le serveur a répondu avec ok=true, il reste candidat ; les
+          // champs de drain/maintenance ne sont bloquants que lorsqu'ils sont
+          // explicitement vrais ou ready=false.
+          health: {
+            ...health,
+            ok: health.ok !== false,
+            ready: health.ready === undefined ? true : health.ready,
+            draining: health.draining === true,
+          },
         };
       } catch {
         return { node, health: null };
@@ -1762,6 +1885,63 @@ function nodeToRoute(node: RemoteNodeConfig): RemoteTerminalRoute {
     token: node.token,
   };
 }
+
+function remoteTerminalServerId(id: number): number {
+  return remoteTerminalLocalIds.get(id) ?? id;
+}
+
+function registerRemoteTerminalId(localId: number, route: RemoteTerminalRoute): number {
+  const existingForRoute = [...remoteTerminalRoutes.entries()].find(
+    ([virtualId, candidate]) =>
+      candidate.baseUrl === route.baseUrl && remoteTerminalServerId(virtualId) === localId,
+  );
+  if (existingForRoute) {
+    remoteEndedTerminals.delete(existingForRoute[0]);
+    return existingForRoute[0];
+  }
+
+  // Le cas courant reste l'ID natif. Une collision avec un autre noeud recoit
+  // un ID virtuel stable pour toute la duree de l'onglet.
+  const existing = remoteTerminalRoutes.get(localId);
+  if (!existing || existing.baseUrl === route.baseUrl) {
+    remoteTerminalRoutes.set(localId, route);
+    remoteTerminalLocalIds.set(localId, localId);
+    remoteEndedTerminals.delete(localId);
+    return localId;
+  }
+  let virtualId = nextRemoteTerminalVirtualId;
+  while (remoteTerminalRoutes.has(virtualId)) virtualId += 1;
+  nextRemoteTerminalVirtualId = virtualId + 1;
+  remoteTerminalRoutes.set(virtualId, route);
+  remoteTerminalLocalIds.set(virtualId, localId);
+  remoteEndedTerminals.delete(virtualId);
+  return virtualId;
+}
+
+function forgetRemoteTerminalId(id: number) {
+  remoteTerminalRoutes.delete(id);
+  remoteTerminalLocalIds.delete(id);
+}
+
+export type TerminalTransportState = "idle" | "starting" | "socket" | "reconnecting" | "ended";
+
+/**
+ * Etat de transport reel d'un terminal distant, lu par le badge d'etat du
+ * terminal. Un socket absent ne prouve jamais que le PTY est mort : seule une
+ * route oubliee ou une fin explicite le declare.
+ */
+export const terminalTransportState = (id: number): TerminalTransportState => {
+  if (remoteStoppingTerminals.has(id) || remoteEndedTerminals.has(id)) return "ended";
+  if (remoteStartingTerminals.has(id)) return "starting";
+  const socket = remoteSockets.get(id);
+  if (socket?.readyState === WebSocket.OPEN) return "socket";
+  if (remoteTerminalRoutes.has(id)) return "reconnecting";
+  return "idle";
+};
+
+/** Caracteres bufferises cote transport pour ce terminal (badge d'etat). */
+export const terminalRemotePendingInputChars = (id: number): number =>
+  remotePendingTerminalInput.size(id);
 
 function serializeRemoteChatStart<T>(work: () => Promise<T>): Promise<T> {
   const result = remoteChatStartQueue.then(work, work);
@@ -1836,6 +2016,75 @@ async function listRemoteDiscussions<T>(): Promise<T> {
     generatedAt: generatedAt || Math.floor(Date.now() / 1000),
     totalDiscussions: accounts.reduce((total, group) => total + group.discussionCount, 0),
     accounts,
+    nodeErrors: results
+      .filter((result) => result.error)
+      .map((result) => ({ nodeLabel: result.route.label, message: String(result.error) })),
+  } as T;
+}
+
+async function listRemotePromptHistory<T>(requestedLimit: unknown): Promise<T> {
+  const numericLimit = Number(requestedLimit ?? 4000);
+  const limit = Number.isFinite(numericLimit)
+    ? Math.min(10_000, Math.max(1, Math.trunc(numericLimit)))
+    : 4000;
+  const routes = parseRemoteNodes().map(nodeToRoute);
+  const results = await Promise.all(
+    routes.map(async (route) => {
+      try {
+        return {
+          route,
+          history: await apiAt<Record<string, any>>(
+            route,
+            "GET",
+            `/api/prompt-history?limit=${encodeURIComponent(String(limit))}`,
+          ),
+          error: null as unknown,
+        };
+      } catch (error) {
+        return { route, history: null, error };
+      }
+    }),
+  );
+  const available = results.filter((result) => result.history !== null);
+  if (available.length === 0) {
+    throw results.at(-1)?.error ?? new Error("Aucun noeud d'historique disponible.");
+  }
+
+  const seen = new Set<string>();
+  const prompts: Record<string, any>[] = [];
+  let generatedAt = 0;
+  let truncated = false;
+  for (const { route, history } of available) {
+    generatedAt = Math.max(generatedAt, Number(history?.generatedAt) || 0);
+    truncated ||= Boolean(history?.truncated);
+    for (const prompt of Array.isArray(history?.prompts) ? history.prompts : []) {
+      const identity = [
+        String(prompt.accountId ?? ""),
+        String(prompt.sessionId ?? ""),
+        String(prompt.timestamp ?? ""),
+        String(prompt.text ?? ""),
+      ].join("\u0000");
+      if (seen.has(identity)) continue;
+      seen.add(identity);
+      prompts.push({
+        ...prompt,
+        nodeId: remoteRouteKey(route),
+        nodeLabel: route.label,
+      });
+    }
+  }
+  prompts.sort((left, right) => Number(right.timestamp ?? 0) - Number(left.timestamp ?? 0));
+  const totalPrompts = prompts.length;
+  if (prompts.length > limit) {
+    prompts.length = limit;
+    truncated = true;
+  }
+  return {
+    generatedAt: generatedAt || Math.floor(Date.now() / 1000),
+    totalPrompts,
+    returned: prompts.length,
+    truncated,
+    prompts,
     nodeErrors: results
       .filter((result) => result.error)
       .map((result) => ({ nodeLabel: result.route.label, message: String(result.error) })),
@@ -2020,6 +2269,93 @@ async function listRemoteActiveChatTurns<T>(): Promise<T> {
   ) as T;
 }
 
+async function listRemoteActiveTerminals<T>(): Promise<T> {
+  const routes = parseRemoteNodes().map(nodeToRoute);
+  const results = await Promise.all(
+    routes.map(async (route) => {
+      try {
+        const terminals = await apiAt<Record<string, any>[]>(
+          route,
+          "GET",
+          "/api/terminals/active",
+          undefined,
+          1800,
+        );
+        return { route, terminals, error: null as unknown };
+      } catch (error) {
+        return { route, terminals: null, error };
+      }
+    }),
+  );
+  if (results.every((result) => result.terminals === null)) {
+    // Compatibilite pendant un deploiement progressif : un ancien noeud ne
+    // connait pas encore le catalogue, mais ne doit pas casser le reste du UI.
+    const endpointMissing = results.every((result) => {
+      const status = (result.error as { httpStatus?: number } | null)?.httpStatus;
+      // L'ancienne route `/terminals/:id` interprete `active` comme un id et
+      // renvoie 405 sur GET ; 404 et 405 signifient donc ici « catalogue absent ».
+      return status === 404 || status === 405;
+    });
+    if (endpointMissing) {
+      const compatibility = await Promise.all(
+        routes.map(async (route) => {
+          try {
+            const snapshot = await apiAt<{ ids?: unknown[] }>(
+              route,
+              "GET",
+              "/legacy-active-terminals.json",
+              undefined,
+              1800,
+            );
+            return (snapshot.ids ?? [])
+              .map(Number)
+              .filter((id) => Number.isSafeInteger(id) && id > 0)
+              .map((id) => {
+                const virtualId = registerRemoteTerminalId(id, route);
+                return {
+                  id: virtualId,
+                  accountId: "",
+                  accountLabel: "Terminal existant",
+                  agentId: null,
+                  sourceTerminalKey: `terminal-compat-${id}`,
+                  workspaceId: "",
+                  workspacePath: "",
+                  startedAt: 0,
+                  loginOnly: false,
+                  compatibilityFallback: true,
+                  nodeId: remoteRouteKey(route),
+                  nodeLabel: route.label,
+                };
+              });
+          } catch {
+            return [];
+          }
+        }),
+      );
+      return compatibility.flat() as T;
+    }
+    throw results.at(-1)?.error ?? new Error("Aucun noeud terminal disponible.");
+  }
+
+  return results.flatMap((result) =>
+    (result.terminals ?? []).flatMap((terminal) => {
+      const localId = Number(terminal.id);
+      const id = Number.isInteger(localId) && localId > 0
+        ? registerRemoteTerminalId(localId, result.route)
+        : localId;
+      // Un DELETE temporairement injoignable ne doit pas faire reapparaitre le
+      // terminal dans le mur pendant que le retry d'arret tourne en fond.
+      if (remoteStoppingTerminals.has(id)) return [];
+      return [{
+        ...terminal,
+        id,
+        nodeId: remoteRouteKey(result.route),
+        nodeLabel: result.route.label,
+      }];
+    }),
+  ) as T;
+}
+
 async function remoteSessionApi<T>(
   accountId: unknown,
   sessionId: unknown,
@@ -2054,6 +2390,7 @@ async function pickRemotePoolAccount<T>() {
 
 async function startRemoteTerminal<T>(args: Record<string, any>): Promise<T> {
   const requestedId = Number(args.id);
+  if (Number.isFinite(requestedId)) remoteEndedTerminals.delete(requestedId);
   const targetNodeId = typeof args.targetNodeId === "string"
     ? normalizeBaseUrl(args.targetNodeId).toLowerCase()
     : "";
@@ -2072,6 +2409,7 @@ async function startRemoteTerminal<T>(args: Record<string, any>): Promise<T> {
     rows: args.rows,
     command: args.command,
     agentId: args.agentId,
+    sourceTerminalKey: args.sourceTerminalKey,
     loginOnly: args.loginOnly ?? false,
   };
   let lastError: unknown = null;
@@ -2081,19 +2419,33 @@ async function startRemoteTerminal<T>(args: Record<string, any>): Promise<T> {
     for (const route of candidates) {
       try {
         const response = await apiAt<RemoteStartResponse>(route, "POST", "/api/terminals", payload);
-        if (Number.isFinite(requestedId) && requestedId !== response.id) {
-          movePendingTerminalInput(requestedId, response.id);
-          moveRemoteTerminalOutput(requestedId, response.id);
+        const virtualId = registerRemoteTerminalId(response.id, route);
+        remoteEndedTerminals.delete(virtualId);
+        if (Number.isFinite(requestedId) && requestedId !== virtualId) {
+          movePendingTerminalInput(requestedId, virtualId);
+          moveRemoteTerminalOutput(requestedId, virtualId);
         }
-        remoteTerminalRoutes.set(response.id, route);
         emitRemoteTerminalData(
-          response.id,
+          virtualId,
           `\r\n[Route] Terminal sur ${route.label} (${route.baseUrl})\r\n`,
         );
-        openTerminalSocket(response.id, route);
-        return response as T;
+        openTerminalSocket(virtualId, route);
+        return {
+          ...response,
+          id: virtualId,
+          remoteId: response.id,
+          nodeId: remoteRouteKey(route),
+          nodeLabel: route.label,
+        } as T;
       } catch (error) {
+        // Ne jamais rejouer ni router vers un autre noeud un POST dont la
+        // reponse a pu etre perdue apres le spawn : cela creerait un second
+        // Freebuff. Une reponse HTTP explicite autorise seulement le fallback
+        // vers le candidat suivant.
         lastError = error;
+        if (typeof (error as { httpStatus?: unknown } | null)?.httpStatus !== "number") {
+          throw error;
+        }
       }
     }
 
@@ -2124,54 +2476,138 @@ async function attachRemoteTerminal<T>(args: Record<string, unknown>): Promise<T
   }
   const cols = Number(args.cols) > 0 ? Number(args.cols) : 80;
   const rows = Number(args.rows) > 0 ? Number(args.rows) : 24;
-  const route = remoteTerminalRoutes.get(id) ?? defaultRemoteRoute();
-  await apiAt(route, "POST", `/api/terminals/${id}/resize`, { cols, rows });
+  const requestedNodeId = typeof args.nodeId === "string" ? args.nodeId.trim().toLowerCase() : "";
+  const knownNode = requestedNodeId
+    ? parseRemoteNodes().find((node) => remoteRouteKey(nodeToRoute(node)) === requestedNodeId)
+    : null;
+  const previousRoute = remoteTerminalRoutes.get(id) ?? null;
+  const previousLocalId = remoteTerminalLocalIds.get(id) ?? null;
+  const route = previousRoute ?? (knownNode ? nodeToRoute(knownNode) : defaultRemoteRoute());
+  const persistedRemoteId = Number(args.remoteId);
+  const candidateLocalId = Number.isSafeInteger(persistedRemoteId) && persistedRemoteId > 0
+    ? persistedRemoteId
+    : previousLocalId ?? id;
+  const serverId = candidateLocalId;
+  try {
+    // Ne remplace ni la route ni le socket existants avant la sonde. Si le
+    // rattachement echoue, une reconnexion concurrente doit continuer a viser
+    // l'ancien noeud et l'ancien ID, pas le terminal restaure qui vient d'etre
+    // declare disparu.
+    await apiAt(route, "POST", `/api/terminals/${serverId}/resize`, { cols, rows });
+  } catch (error) {
+    if (previousRoute) scheduleRemoteTerminalReconnect(id, previousRoute);
+    throw error;
+  }
+
   remoteTerminalRoutes.set(id, route);
+  remoteTerminalLocalIds.set(id, candidateLocalId);
+  remoteEndedTerminals.delete(id);
+  // Le resize confirme le proprietaire. On peut maintenant remplacer le canal
+  // sans perdre l'ancien transport en cas d'erreur de sonde.
+  discardRemoteTerminalSocket(id);
   openTerminalSocket(id, route);
   return { id } as T;
 }
 
-function openTerminalSocket(id: number, route = remoteTerminalRoutes.get(id) ?? defaultRemoteRoute()) {
+function discardRemoteTerminalSocket(id: number) {
   clearRemoteTerminalReconnectTimer(id);
-  const previous = remoteSockets.get(id);
-  if (previous && previous.readyState !== WebSocket.CLOSED) previous.close();
+  const socket = remoteSockets.get(id);
+  remoteSockets.delete(id);
+  const heartbeatTimer = remoteTerminalHeartbeatTimers.get(id);
+  if (heartbeatTimer !== undefined) window.clearInterval(heartbeatTimer);
+  remoteTerminalHeartbeatTimers.delete(id);
+  remoteTerminalSocketWrites.delete(id);
+  if (socket && socket.readyState !== WebSocket.CLOSED) {
+    try { socket.close(); } catch { /* Le nouveau canal prend le relais. */ }
+  }
+}
+
+function openTerminalSocket(id: number, route = remoteTerminalRoutes.get(id) ?? defaultRemoteRoute()) {
+  discardRemoteTerminalSocket(id);
 
   const base = route.baseUrl;
   const wsBase = base.startsWith("https://")
     ? base.replace(/^https:\/\//, "wss://")
     : base.replace(/^http:\/\//, "ws://");
   let socket: WebSocket;
+  let heartbeatTimer: number | null = null;
+  let connectTimer: number | null = null;
+  const clearConnectTimer = () => {
+    if (connectTimer !== null) window.clearTimeout(connectTimer);
+    connectTimer = null;
+  };
   try {
-    socket = new WebSocket(`${wsBase}/ws/terminals/${id}?token=${encodeURIComponent(route.token)}`);
+    const serverId = remoteTerminalServerId(id);
+    socket = new WebSocket(`${wsBase}/ws/terminals/${serverId}?token=${encodeURIComponent(route.token)}`);
   } catch (error) {
     emitTerminalTransportError(id, route, error);
     scheduleRemoteTerminalReconnect(id, route);
     return;
   }
   remoteSockets.set(id, socket);
+  connectTimer = window.setTimeout(() => {
+    if (remoteSockets.get(id) !== socket || socket.readyState !== WebSocket.CONNECTING) return;
+    socket.close();
+  }, REMOTE_TERMINAL_CONNECT_TIMEOUT_MS);
 
   socket.addEventListener("open", () => {
     if (remoteSockets.get(id) !== socket) return;
+    clearConnectTimer();
     remoteTerminalReconnectAttempts.delete(id);
-    const pending = takePendingTerminalInput(id);
-    if (pending) socket.send(JSON.stringify({ type: "input", data: pending }));
+    // Les frappes parties par POST pendant la reconnexion doivent atterrir
+    // AVANT le rejeu tamponne, sinon une frappe rapide peut etre rejouee avant
+    // une frappe plus ancienne encore en vol (desordre de caracteres).
+    void flushRemoteTerminalPendingInput(id, socket);
+    // Keep the browser/proxy path alive while Freebuff is idle. A quiet TUI
+    // must not look like a dead terminal to an intermediate tunnel.
+    heartbeatTimer = window.setInterval(() => {
+      if (remoteSockets.get(id) !== socket || socket.readyState !== WebSocket.OPEN) return;
+      try { socket.send(JSON.stringify({ type: "ping" })); } catch {
+        try { socket.close(); } catch { /* Le timer de reconnexion prend le relais. */ }
+      }
+    }, 20_000);
+    remoteTerminalHeartbeatTimers.set(id, heartbeatTimer);
   });
 
   socket.addEventListener("message", (event) => {
     if (remoteSockets.get(id) !== socket) return;
-    const message = JSON.parse(String(event.data)) as RemoteWsMessage;
+    let message: RemoteWsMessage;
+    try {
+      const parsed: unknown = JSON.parse(String(event.data));
+      if (!isRemoteWsMessage(parsed)) {
+        throw new Error("forme inattendue");
+      }
+      message = parsed;
+    } catch (error) {
+      emitTerminalTransportError(id, route, new Error(`Message WebSocket terminal invalide: ${String(error)}`));
+      return;
+    }
     if (message.type === "data") {
-      emitRemoteTerminalData(message.id, message.data);
+      emitRemoteTerminalData(id, message.data);
     } else if (message.type === "exit") {
-      remoteSockets.delete(message.id);
-      remoteTerminalRoutes.delete(message.id);
-      clearRemoteTerminalReconnectTimer(message.id);
-      remoteTerminalReconnectAttempts.delete(message.id);
-      remotePendingTerminalInput.clear(message.id);
-      emit("pty-exit", { id: message.id });
-      window.setTimeout(() => remoteTerminalOutput.delete(message.id), 30_000);
+      if (remoteEndedTerminals.has(id)) return;
+      remoteEndedTerminals.add(id);
+      const currentSocket = remoteSockets.get(id);
+      if (currentSocket === socket) remoteSockets.delete(id);
+      const heartbeat = remoteTerminalHeartbeatTimers.get(id);
+      if (heartbeat !== undefined) window.clearInterval(heartbeat);
+      if (remoteTerminalHeartbeatTimers.get(id) === heartbeat) {
+        remoteTerminalHeartbeatTimers.delete(id);
+      }
+      clearRemoteTerminalReconnectTimer(id);
+      remoteTerminalReconnectAttempts.delete(id);
+      remotePendingTerminalInput.clear(id);
+      remoteTerminalPendingWrites.delete(id);
+      remoteTerminalSocketWrites.delete(id);
+      forgetRemoteTerminalId(id);
+      try { socket.close(); } catch { /* Le serveur vient de declarer le PTY termine. */ }
+      emit("pty-exit", { id });
+      window.setTimeout(() => {
+        remoteTerminalOutput.delete(id);
+        remoteEndedTerminals.delete(id);
+      }, 30_000);
     } else if (message.type === "error") {
-      emitRemoteTerminalData(message.id, `\r\n${message.message}\r\n`);
+      emitRemoteTerminalData(id, `\r\n${message.message}`);
     } else if (message.type === "status") {
       // Message de controle uniquement. L'injecter dans xterm deplace le
       // curseur a l'insu de la TUI et son prochain redraw peut alors effacer la
@@ -2180,6 +2616,13 @@ function openTerminalSocket(id: number, route = remoteTerminalRoutes.get(id) ?? 
   });
 
   socket.addEventListener("close", () => {
+    clearConnectTimer();
+    if (heartbeatTimer !== null) {
+      window.clearInterval(heartbeatTimer);
+      if (remoteTerminalHeartbeatTimers.get(id) === heartbeatTimer) {
+        remoteTerminalHeartbeatTimers.delete(id);
+      }
+    }
     if (remoteSockets.get(id) !== socket) return;
     remoteSockets.delete(id);
     if (remoteStoppingTerminals.has(id) || !remoteTerminalRoutes.has(id)) return;
@@ -2195,64 +2638,252 @@ function openTerminalSocket(id: number, route = remoteTerminalRoutes.get(id) ?? 
   });
 }
 
+function enqueueRemoteTerminalSocketWrite(id: number, socket: WebSocket, data: string) {
+  const previous = remoteTerminalSocketWrites.get(id) ?? Promise.resolve();
+  let queued: Promise<void>;
+  queued = previous
+    .catch(() => undefined)
+    .then(async () => {
+      const inFlight = remoteTerminalPendingWrites.get(id);
+      if (inFlight) await inFlight.catch(() => undefined);
+      if (remoteSockets.get(id) !== socket || socket.readyState !== WebSocket.OPEN) {
+        queuePendingTerminalInput(id, data);
+        return;
+      }
+      if (remoteStoppingTerminals.has(id) || remoteEndedTerminals.has(id)) return;
+      try {
+        socket.send(JSON.stringify({ type: "input", data }));
+      } catch {
+        if (!remoteStoppingTerminals.has(id) && !remoteEndedTerminals.has(id)) {
+          queuePendingTerminalInput(id, data);
+        }
+        try { socket.close(); } catch { /* La reconnexion reprend le relais. */ }
+      }
+    });
+  remoteTerminalSocketWrites.set(id, queued);
+  void queued.finally(() => {
+    if (remoteTerminalSocketWrites.get(id) === queued) {
+      remoteTerminalSocketWrites.delete(id);
+    }
+  });
+}
+
+async function flushRemoteTerminalPendingInput(id: number, socket: WebSocket) {
+  const previous = remoteTerminalSocketWrites.get(id) ?? Promise.resolve();
+  let queued: Promise<void>;
+  queued = previous
+    .catch(() => undefined)
+    .then(async () => {
+      const inFlight = remoteTerminalPendingWrites.get(id);
+      if (inFlight) await inFlight.catch(() => undefined);
+      if (
+        remoteSockets.get(id) !== socket
+        || socket.readyState !== WebSocket.OPEN
+        || remoteStoppingTerminals.has(id)
+        || remoteEndedTerminals.has(id)
+      ) return;
+      const pending = takePendingTerminalInput(id);
+      if (!pending) return;
+      try {
+        socket.send(JSON.stringify({ type: "input", data: pending }));
+      } catch {
+        if (!remoteStoppingTerminals.has(id) && !remoteEndedTerminals.has(id)) {
+          queuePendingTerminalInput(id, pending);
+        }
+        try { socket.close(); } catch { /* La reconnexion reprend le relais. */ }
+      }
+    });
+  remoteTerminalSocketWrites.set(id, queued);
+  void queued.finally(() => {
+    if (remoteTerminalSocketWrites.get(id) === queued) {
+      remoteTerminalSocketWrites.delete(id);
+    }
+  });
+}
+
+const termInputProbeActive = (): boolean => {
+  try {
+    return window.localStorage.getItem("cst.termInputProbe") === "1";
+  } catch {
+    return false;
+  }
+};
+
 function writeRemoteTerminal(id: number, data: string) {
-  const socket = remoteSockets.get(id);
-  if (socket?.readyState === WebSocket.OPEN) {
-    socket.send(JSON.stringify({ type: "input", data }));
+  const probing = termInputProbeActive();
+  if (remoteEndedTerminals.has(id) || remoteStoppingTerminals.has(id)) {
+    if (probing) console.log("[TERM-INPUT] writeRemoteTerminal ignoré (ended/stopping) id=", id, JSON.stringify(data));
     return;
   }
+  const socket = remoteSockets.get(id);
+  const delivery = terminalInputDelivery(
+    socket?.readyState === WebSocket.OPEN
+      ? "open"
+      : socket?.readyState === WebSocket.CONNECTING ? "connecting" : "closed",
+    remoteStartingTerminals.has(id),
+    remotePendingTerminalInput.has(id),
+  );
+  if (probing) {
+    console.log(
+      "[TERM-INPUT] writeRemoteTerminal id=", id,
+      "data=", JSON.stringify(data),
+      "delivery=", delivery,
+      "socketState=", socket?.readyState,
+      "pendingBuf=", remotePendingTerminalInput.has(id),
+    );
+  }
+  if (delivery === "socket" && socket) {
+    if (
+      remoteTerminalPendingWrites.has(id)
+      || remotePendingTerminalInput.has(id)
+      || remoteTerminalSocketWrites.has(id)
+    ) {
+      if (probing) console.log("[TERM-INPUT]   -> enqueueRemoteTerminalSocketWrite (file en cours)");
+      enqueueRemoteTerminalSocketWrite(id, socket, data);
+      return;
+    }
+    try {
+      if (probing) console.log("[TERM-INPUT]   -> socket.send direct");
+      socket.send(JSON.stringify({ type: "input", data }));
+      return;
+    } catch {
+      if (probing) console.log("[TERM-INPUT]   -> socket.send échoué, repli POST");
+      try { socket.close(); } catch { /* Le POST de repli prend le relais. */ }
+    }
+  }
 
-  if (socket?.readyState === WebSocket.CONNECTING || remoteStartingTerminals.has(id)) {
+  if (delivery === "buffer") {
+    if (probing) console.log("[TERM-INPUT]   -> BUFFERISÉ (pas envoyé, attend le socket/POST)");
     queuePendingTerminalInput(id, data);
     return;
   }
 
   const route = remoteTerminalRoutes.get(id) ?? defaultRemoteRoute();
-  void apiAt(route, "POST", `/api/terminals/${id}/write`, { data }).catch((error) => {
+  // La reconnexion peut être en cours juste après un clic/focus. Une seule
+  // file POST séquentielle évite que plusieurs frappes arrivent hors ordre.
+  const previous = remoteTerminalPendingWrites.get(id) ?? Promise.resolve();
+  const write = previous
+    .catch(() => undefined)
+    .then(() => apiAt(route, "POST", `/api/terminals/${remoteTerminalServerId(id)}/write`, { data }));
+  let queuedWrite: Promise<void>;
+  queuedWrite = write.then(() => undefined).finally(() => {
+    if (remoteTerminalPendingWrites.get(id) === queuedWrite) {
+      remoteTerminalPendingWrites.delete(id);
+      const currentSocket = remoteSockets.get(id);
+      if (currentSocket?.readyState === WebSocket.OPEN) {
+        void flushRemoteTerminalPendingInput(id, currentSocket);
+      }
+    }
+  });
+  remoteTerminalPendingWrites.set(id, queuedWrite);
+  void write.catch((error) => {
     const message = terminalTransportErrorMessage(route.baseUrl, error);
     emit("pty-data", { id, data: `\r\n${message}\r\n` });
-    if (/session terminal introuvable/i.test(String(error))) {
-      remoteTerminalRoutes.delete(id);
+    if (remoteStoppingTerminals.has(id) || remoteEndedTerminals.has(id)) return;
+    // La frappe n'a pas atteint le PTY (coupure reseau en cours) : la
+    // re-tamponner evite de la perdre ; le flush de reconnexion la rejouera
+    // dans l'ordre. Un doublon eventuel reste preferable a une frappe perdue.
+    queuePendingTerminalInput(id, data);
+    if (/session terminal introuvable|terminal introuvable ou inaccessible/i.test(String(error))) {
+      forgetRemoteTerminalId(id);
       clearRemoteTerminalReconnectTimer(id);
       remoteTerminalReconnectAttempts.delete(id);
       remotePendingTerminalInput.clear(id);
+      remoteTerminalPendingWrites.delete(id);
       emit("pty-exit", { id });
     }
   });
 }
 
 function resizeRemoteTerminal(id: number, cols: number, rows: number) {
+  if (remoteEndedTerminals.has(id) || remoteStoppingTerminals.has(id)) return;
   const socket = remoteSockets.get(id);
   if (socket?.readyState === WebSocket.OPEN) {
-    socket.send(JSON.stringify({ type: "resize", cols, rows }));
-    return;
+    try {
+      socket.send(JSON.stringify({ type: "resize", cols, rows }));
+      return;
+    } catch {
+      try { socket.close(); } catch { /* Le repli REST prend le relais. */ }
+    }
   }
   if (socket?.readyState === WebSocket.CONNECTING || remoteStartingTerminals.has(id)) return;
   const route = remoteTerminalRoutes.get(id) ?? defaultRemoteRoute();
-  void apiAt(route, "POST", `/api/terminals/${id}/resize`, { cols, rows }).catch(() => undefined);
+  void apiAt(route, "POST", `/api/terminals/${remoteTerminalServerId(id)}/resize`, { cols, rows }).catch((error) => {
+    if (remoteEndedTerminals.has(id) || remoteStoppingTerminals.has(id)) return;
+    emitTerminalTransportError(id, route, error);
+    if (/session terminal introuvable|terminal introuvable ou inaccessible/i.test(String(error))) {
+      remoteEndedTerminals.add(id);
+      clearRemoteTerminalReconnectTimer(id);
+      remoteTerminalReconnectAttempts.delete(id);
+      remotePendingTerminalInput.clear(id);
+      forgetRemoteTerminalId(id);
+      emit("pty-exit", { id });
+    }
+  });
 }
 
 async function stopRemoteTerminal(id: number) {
   const route = remoteTerminalRoutes.get(id) ?? defaultRemoteRoute();
+  const serverId = remoteTerminalServerId(id);
   remoteStoppingTerminals.add(id);
+  remoteEndedTerminals.add(id);
+  const heartbeatTimer = remoteTerminalHeartbeatTimers.get(id);
+  if (heartbeatTimer !== undefined) window.clearInterval(heartbeatTimer);
+  remoteTerminalHeartbeatTimers.delete(id);
   clearRemoteTerminalReconnectTimer(id);
   remoteTerminalReconnectAttempts.delete(id);
   remotePendingTerminalInput.clear(id);
+  // Laisser les POST deja partis terminer avant le DELETE evite qu'une frappe
+  // retardee atteigne le PTY pendant ou juste apres son arret. Les nouvelles
+  // frappes sont bloquees par `remoteStoppingTerminals`.
+  const pendingWrites = [
+    remoteTerminalPendingWrites.get(id),
+    remoteTerminalSocketWrites.get(id),
+  ].filter((promise): promise is Promise<void> => !!promise);
+  if (pendingWrites.length > 0) {
+    await Promise.race([
+      Promise.allSettled(pendingWrites).then(() => undefined),
+      platformSleep(3_000),
+    ]);
+  }
+  remoteTerminalPendingWrites.delete(id);
+  remoteTerminalSocketWrites.delete(id);
   const socket = remoteSockets.get(id);
   if (socket?.readyState === WebSocket.OPEN) {
-    socket.send(JSON.stringify({ type: "stop" }));
+    try { socket.send(JSON.stringify({ type: "stop" })); } catch { /* DELETE confirme l'arrêt. */ }
   }
-  socket?.close();
+  try { socket?.close(); } catch { /* Le serveur reste joignable par REST. */ }
   remoteSockets.delete(id);
-  remoteTerminalRoutes.delete(id);
   remoteTerminalOutput.delete(id);
-  try {
-    await apiAt(route, "DELETE", `/api/terminals/${id}`);
-  } catch {
-    // La fermeture locale reste effective meme si le noeud est deja parti.
-  } finally {
-    remoteStoppingTerminals.delete(id);
+
+  let lastError: unknown = null;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      await apiAt(route, "DELETE", `/api/terminals/${serverId}`);
+      lastError = null;
+      break;
+    } catch (error) {
+      lastError = error;
+      // 404 signifie que le PTY est deja termine (socket ou processus lecteur) :
+      // c'est un succès idempotent. Les autres erreurs meritent deux reprises
+      // afin de ne pas laisser Freebuff vivant après une coupure passagère.
+      if ((error as { httpStatus?: number } | null)?.httpStatus === 404) {
+        lastError = null;
+        break;
+      }
+      if (attempt < 2) await platformSleep(250 * 2 ** attempt);
+    }
   }
+
+  if (lastError) {
+    // Garder `stopping` masque le terminal d'une readoption prematuree. Le
+    // retry continue meme si le premier lot de DELETE a rencontre une coupure.
+    scheduleRemoteTerminalStopRetry(id, route, serverId);
+    throw lastError;
+  }
+  remoteStoppingTerminals.delete(id);
+  clearRemoteTerminalStopRetry(id);
+  forgetRemoteTerminalId(id);
 }
 
 function queuePendingTerminalInput(id: number, data: string) {
@@ -2285,6 +2916,33 @@ function clearRemoteTerminalReconnectTimer(id: number) {
   remoteTerminalReconnectTimers.delete(id);
 }
 
+function clearRemoteTerminalStopRetry(id: number) {
+  const timer = remoteTerminalStopRetryTimers.get(id);
+  if (timer !== undefined) window.clearTimeout(timer);
+  remoteTerminalStopRetryTimers.delete(id);
+}
+
+function scheduleRemoteTerminalStopRetry(
+  id: number,
+  route: RemoteTerminalRoute,
+  serverId: number,
+) {
+  if (remoteTerminalStopRetryTimers.has(id)) return;
+  const timer = window.setTimeout(async () => {
+    remoteTerminalStopRetryTimers.delete(id);
+    if (!remoteStoppingTerminals.has(id)) return;
+    try {
+      await apiAt(route, "DELETE", `/api/terminals/${serverId}`);
+      remoteStoppingTerminals.delete(id);
+      remoteEndedTerminals.add(id);
+      forgetRemoteTerminalId(id);
+    } catch {
+      scheduleRemoteTerminalStopRetry(id, route, serverId);
+    }
+  }, 5_000);
+  remoteTerminalStopRetryTimers.set(id, timer);
+}
+
 function scheduleRemoteTerminalReconnect(id: number, route: RemoteTerminalRoute) {
   if (
     remoteStoppingTerminals.has(id) ||
@@ -2294,25 +2952,15 @@ function scheduleRemoteTerminalReconnect(id: number, route: RemoteTerminalRoute)
     return;
   }
 
-  const attempt = (remoteTerminalReconnectAttempts.get(id) ?? 0) + 1;
+  const { attempt, delayMs } = terminalReconnectPlan(
+    remoteTerminalReconnectAttempts.get(id) ?? 0,
+  );
   remoteTerminalReconnectAttempts.set(id, attempt);
-  if (attempt > REMOTE_TERMINAL_MAX_RECONNECTS) {
-    remoteTerminalRoutes.delete(id);
-    remotePendingTerminalInput.clear(id);
-    emit("pty-data", {
-      id,
-      data: "\r\nConnexion au terminal perdue. Ouvre un nouveau terminal pour continuer.\r\n",
-    });
-    emit("pty-exit", { id });
-    return;
-  }
-
-  const delay = Math.min(5_000, 250 * 2 ** (attempt - 1));
   const timer = window.setTimeout(() => {
     remoteTerminalReconnectTimers.delete(id);
     if (!remoteTerminalRoutes.has(id) || remoteStoppingTerminals.has(id)) return;
     openTerminalSocket(id, remoteTerminalRoutes.get(id) ?? route);
-  }, delay);
+  }, delayMs);
   remoteTerminalReconnectTimers.set(id, timer);
 }
 
