@@ -317,7 +317,8 @@ test("le flux de build/export produit un bundle avec un moteur Docker simulé", 
 });
 
 test("le paquet skill standard et le manifeste intégré restent cohérents", async () => {
-  const skill = await readFile(resolve("public/skills/dockerize-git/SKILL.md"), "utf8");
+  const skill = (await readFile(resolve("public/skills/dockerize-git/SKILL.md"), "utf8"))
+    .replace(/\r\n/g, "\n");
   const metadata = await readFile(resolve("public/skills/dockerize-git/agents/openai.yaml"), "utf8");
   const index = JSON.parse(await readFile(resolve("public/skills/index.json"), "utf8"));
   const tauri = JSON.parse(await readFile(resolve("src-tauri/tauri.conf.json"), "utf8"));
