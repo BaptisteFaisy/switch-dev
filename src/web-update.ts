@@ -43,6 +43,24 @@ const refreshToLatestBuild = async () => {
   try {
     const registration = await navigator.serviceWorker?.getRegistration();
     await registration?.update();
+    // Un index.html perime garde en cache par le service worker est la cause
+    // classique d'une boucle de rechargement : la sonde detecte le nouveau
+    // build, le reload retombe sur l'ancien HTML en cache (reseau coupe,
+    // fallback network-first), et ainsi de suite. Purger l'entree de
+    // navigation de tous les caches garantit que le reload reparte du HTML
+    // frais servi par le serveur, ou de /offline.html sans sonde.
+    if ("caches" in window) {
+      const cacheKeys = await caches.keys();
+      await Promise.all(
+        cacheKeys.map(async (key) => {
+          const cache = await caches.open(key);
+          await Promise.all([
+            cache.delete("/"),
+            cache.delete(new Request(window.location.origin + "/")),
+          ]);
+        }),
+      );
+    }
   } catch {
     // Le HTML est servi en no-cache : le reload suffit meme sans service worker.
   }

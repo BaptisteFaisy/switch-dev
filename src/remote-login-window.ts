@@ -149,7 +149,12 @@ const renderTerminalState = (
 export const stripRemoteLoginControlSequences = (value: string): string =>
   value
     .replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, "")
-    .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "")
+    // Les sequences de positionnement curseur du TUI (ex. \x1b[14;1H)
+    // deplacent le curseur sans laisser d'espace : les supprimer purement
+    // collerait le code appareil au texte de la ligne suivante
+    // (GALF-0YAWSContinue...) et casserait les regex \b du parseur. On les
+    // remplace donc par une espace pour preserver les limites de mots.
+    .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, " ")
     .replaceAll("\r", "");
 
 export const parseRemoteCodexLoginOutput = (value: string) => {

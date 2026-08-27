@@ -17,8 +17,21 @@ fn main() {
 
     // Recompile quand le commit injecte change, ou quand HEAD bouge en dev.
     println!("cargo:rerun-if-env-changed=CST_GIT_COMMIT");
-    if std::path::Path::new("../.git/HEAD").exists() {
-        println!("cargo:rerun-if-changed=../.git/HEAD");
+    // `.git/HEAD` ne change pas quand un commit ou un reset bouge la branche
+    // (il contient toujours `ref: refs/heads/main`). Sans le suivi de la ref
+    // resolue, cargo garde un `CST_GIT_COMMIT` perime d'un build precedent, et
+    // le serveur annonce un ancien commit : la sonde web-update detecte le
+    // mismatch et recharge la page en boucle. On declare la ref resolue comme
+    // entree du build script pour qu'elle declenche une recompilation.
+    if let Ok(head) = std::fs::read_to_string("../.git/HEAD") {
+        let resolved = head
+            .trim()
+            .strip_prefix("ref: ")
+            .map(|reference| format!("../.git/{reference}"))
+            .unwrap_or_else(|| "../.git/HEAD".to_string());
+        if std::path::Path::new(&resolved).exists() {
+            println!("cargo:rerun-if-changed={resolved}");
+        }
     }
 
     // Build Tauri standard : regenere les manifestes ACL (gen/schemas), embarque

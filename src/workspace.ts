@@ -113,12 +113,20 @@ export const userEnvironmentPathExcluding = (
   return environment;
 };
 
-/** Un environnement distant est toujours un chemin Unix absolu du serveur. */
+/**
+ * Un environnement distant est un chemin absolu du serveur : Unix (`/...`)
+ * ou Windows (`X:\...`) selon le systeme du noeud. Les chemins relatifs ou
+ * techniques (vides, `%VAR%`) ne sont jamais des environnements.
+ */
 export const remoteEnvironmentPath = (
   path: string | null | undefined,
 ): string | null => {
   const environment = userEnvironmentPath(path);
-  return environment?.startsWith("/") ? environment : null;
+  if (!environment) return null;
+  const normalized = normalizeWorkspacePath(environment);
+  return normalized.startsWith("/") || /^[a-z]:\//.test(normalized)
+    ? environment
+    : null;
 };
 
 /** Identite canonique d'une cible d'execution distante (actuellement son URL). */

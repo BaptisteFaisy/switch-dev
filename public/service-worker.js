@@ -5,7 +5,7 @@ const CACHE_PREFIX = "codex-terminal-static-";
 // celui installe. C'est le levier qui sort un onglet d'un cache PWA fige sans
 // aucune manipulation de l'utilisateur, meme si l'URL enregistree pointe encore
 // vers un ancien build.
-const SW_VERSION = "5";
+const SW_VERSION = "6";
 const BUILD_ID = new URL(self.location.href).searchParams.get("build") || "legacy";
 const CACHE_NAME = `${CACHE_PREFIX}${BUILD_ID}`;
 const NAVIGATION_NETWORK_TIMEOUT_MS = 5_000;
