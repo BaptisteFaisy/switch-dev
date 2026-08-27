@@ -25,6 +25,7 @@
 //! - les appels sortants n'ajoutent jamais le cookie à une autre origine que
 //!   freebuff.com.
 
+use base64::Engine as _;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -48,9 +49,11 @@ const AGENT_RUNS_STREAM_PATH: &str = "/api/agent-runs/stream";
 /// ce nom est réappliqué avant d'envoyer l'en-tête `Cookie`.
 const SESSION_COOKIE_NAME: &str = "__Secure-next-auth.session-token";
 
-/// Durée de vie maximale accordée au token Convex en cache (secondes).
-/// Le serveur le révoque quand il veut ; 401 déclenche un rafraîchissement.
-const CONVEX_TOKEN_CACHE_SECS: u64 = 50 * 60;
+/// Durée de vie maximale accordée au token Convex en cache (secondes). Le JWT
+/// délivré expire après 10 minutes : on le rafraîchit bien avant (4 minutes)
+/// pour éviter les 401 en vol. Un 401 éventuel déclenche quand même un
+/// rafraîchissement.
+const CONVEX_TOKEN_CACHE_SECS: u64 = 4 * 60;
 const HTTP_TIMEOUT_SECS: u64 = 30;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -186,6 +189,33 @@ fn pick_string<'a>(value: &'a Value, paths: &[&str]) -> Option<String> {
             .filter(|field| !field.is_empty())
             .map(ToString::to_string)
     })
+}
+
+/// Profil minimal porté par le JWT du token Convex (claims `email` et `name`).
+#[derive(Debug, Clone, Default)]
+struct ConvexTokenProfile {
+    email: Option<String>,
+    name: Option<String>,
+}
+
+/// `/api/web/freebuff-session` n'expose pas le profil utilisateur : l'e-mail et
+/// le nom sont portés par le JWT du token Convex. On décode son payload sans
+/// vérifier la signature — l'affichage seul en dépend, l'autorisation reste
+/// portée par le cookie de session.
+fn convex_token_profile(token: &str) -> ConvexTokenProfile {
+    let Some(payload) = token.split('.').nth(1) else {
+        return ConvexTokenProfile::default();
+    };
+    let Ok(decoded) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(payload) else {
+        return ConvexTokenProfile::default();
+    };
+    let Ok(value) = serde_json::from_slice::<Value>(&decoded) else {
+        return ConvexTokenProfile::default();
+    };
+    ConvexTokenProfile {
+        email: pick_string(&value, &["/email"]),
+        name: pick_string(&value, &["/name"]),
+    }
 }
 
 fn extract_user_profile(session: &Value) -> (Option<String>, Option<String>, Option<String>, Option<String>) {
@@ -390,8 +420,17 @@ pub async fn connect(session_cookie: String) -> Result<FreebuffCloudConnectView,
         return Err("Colle le cookie de session freebuff.com".to_string());
     }
     let session = fetch_session(&cookie).await?;
-    let (email, name, github, instance_id) = extract_user_profile(&session);
+    let (mut email, mut name, github, instance_id) = extract_user_profile(&session);
     let token = fetch_convex_token(&cookie).await?;
+    if email.is_none() || name.is_none() {
+        let profile = convex_token_profile(&token);
+        if email.is_none() {
+            email = profile.email;
+        }
+        if name.is_none() {
+            name = profile.name;
+        }
+    }
     let mut store = FreebuffCloudStore::default();
     store.session_cookie = Some(cookie);
     store.convex_token = Some(token);
@@ -447,7 +486,14 @@ pub fn status() -> FreebuffCloudStatusView {
 /// Liste des projets de l'utilisateur (fonction Convex `project:getUserProjects`).
 #[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn projects() -> Result<Vec<Value>, String> {
-    let value = convex_call("query", "project:getUserProjects", json!({})).await?;
+    // Mêmes arguments que l'application freebuff.com/cloud : la liste cloud,
+    // sans les projets archivés.
+    let value = convex_call(
+        "query",
+        "project:getUserProjects",
+        json!({ "surface": "cloud", "archivedOnly": false }),
+    )
+    .await?;
     match value {
         Value::Array(projects) => Ok(projects),
         Value::Null => Ok(Vec::new()),

@@ -55,6 +55,8 @@ let creating = false;
 let createError = "";
 let streamingProjectId: string | null = null;
 
+const FREEBUFF_CLOUD_PROJECT_BASE = "https://freebuff.com/cloud/project";
+
 const escapeHtml = (value: unknown) =>
   String(value ?? "")
     .replaceAll("&", "&amp;")
@@ -352,6 +354,9 @@ const renderProjectCard = (project: ProjectRecord) => `
       <span class="freebuff-cloud-pill is-${statusTone(project.status)}"><i data-lucide="circle-dot"></i><span>${escapeHtml(statusLabel(project.status))}</span></span>
     </div>
     <div class="freebuff-cloud-project-actions">
+      ${project.semanticIdentifier
+        ? `<a class="freebuff-cloud-button primary" href="${escapeHtml(`${FREEBUFF_CLOUD_PROJECT_BASE}/${encodeURIComponent(project.semanticIdentifier)}`)}" target="_blank" rel="noreferrer"><i data-lucide="external-link"></i><span>Ouvrir le projet</span></a>`
+        : ""}
       ${project.previewUrl
         ? `<a class="freebuff-cloud-button secondary" href="${escapeHtml(project.previewUrl)}" target="_blank" rel="noreferrer"><i data-lucide="external-link"></i><span>Preview</span></a>`
         : ""}

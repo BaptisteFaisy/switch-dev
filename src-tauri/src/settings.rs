@@ -2,7 +2,7 @@ use chrono::{SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     env, fs,
     io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
@@ -33,6 +33,9 @@ pub enum Provider {
     Freebuff,
     /// Compte AIHubMix utilisant son endpoint OpenAI-compatible.
     Aihubmix,
+    /// Compte OpenAI-compatible generique : nom libre, endpoint /v1, cle API
+    /// securisee cote serveur, catalogue /models scanne, intensite reglable.
+    OpenAiCompatible,
 }
 
 impl Provider {
@@ -44,6 +47,7 @@ impl Provider {
             Provider::OpenCode => "opencode",
             Provider::Freebuff => "freebuff",
             Provider::Aihubmix => "aihubmix",
+            Provider::OpenAiCompatible => "openai-compatible",
         }
     }
 }
@@ -98,6 +102,14 @@ pub struct AccountProfile {
     /// anciennes configurations => mode normal, sans surconsommation.
     #[serde(default)]
     pub fast_mode: bool,
+    /// Endpoint /v1 d'un fournisseur OpenAI-compatible (voir Provider::OpenAiCompatible).
+    /// Vide hors de ce provider. Stocke cote serveur, jamais expose dans l'UI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    /// Nom exact du champ JSON qui porte l'intensite sur cet endpoint
+    /// (`reasoning_effort`, `effort`...). Vide = l'API decide elle-meme.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort_field: Option<String>,
     /// Jour civil local (`YYYY-MM-DD`) ou le compte a ete marque termine.
     /// Le frontend ignore automatiquement une date anterieure au jour courant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -342,6 +354,11 @@ const OPENCODE_AGENT_ID: &str = "opencode";
 /// peut pas alimenter le flux de chat, son CLI n'acceptant ni prompt en
 /// argument ni sortie structuree (seulement `login` et `--continue`).
 const FREEBUFF_AGENT_ID: &str = "freebuff";
+/// Agent CLI AIHubMix. Même profil que l'agent Freebuff : son `login` ouvre
+/// le terminal sécurisé où la clé API du compte est saisie, et la reprise de
+/// session passe par `--session <id>`. Sans cet agent intégré, le frontend
+/// retombe sur `codex login` quand on connecte un compte AIHubMix.
+const AIHUBMIX_AGENT_ID: &str = "aihubmix";
 /// Freebuff Desktop, lance comme app externe (`kind = "ide"`) sur le dossier
 /// projet. C'est le seul canal ou le mode agent MAX est joignable : le CLI
 /// freebuff est fige sur LITE par un flag compile dans son binaire.
@@ -391,6 +408,12 @@ const RATE_LIMIT_CACHE_TTL_SECS: u64 = 60;
 const MODEL_CATALOG_TIMEOUT_SECS: u64 = 12;
 const OPENROUTER_MODELS_USER_URL: &str = "https://openrouter.ai/api/v1/models/user";
 const OPENROUTER_MODEL_CATALOG_TIMEOUT_SECS: u64 = 20;
+/// Timeout du scan /models d'un compte OpenAI-compatible. Court : le
+/// catalogue n'est pas un flux critique et ne doit pas bloquer l'UI.
+const OPENAI_COMPATIBLE_CATALOG_TIMEOUT_SECS: u64 = 15;
+/// Temps de vie du cache de catalogue : un /models relu trop souvent
+/// gaspille les credits du fournisseur. Invalide au changement de compte/base_url.
+const OPENAI_COMPATIBLE_CATALOG_CACHE_TTL_SECS: i64 = 10 * 60;
 const OPENROUTER_MODEL_PAGE_LIMIT: usize = 1000;
 const OPENROUTER_MODEL_MAX_PAGES: usize = 100;
 const OPENROUTER_MODEL_ID_MAX_CHARS: usize = 160;
@@ -713,6 +736,8 @@ fn ensure_special_bai_account_from(
         reasoning_effort: Some(BAI_REASONING_EFFORT.to_string()),
         fast_mode: false,
         completed_on: None,
+        base_url: None,
+        reasoning_effort_field: None,
         api_key: None,
     };
     seed_bai_account_auth(&account.codex_home, key)?;
@@ -1076,6 +1101,8 @@ mod tests {
             reasoning_effort: None,
             fast_mode: false,
             completed_on: None,
+            base_url: None,
+            reasoning_effort_field: None,
             api_key: None,
         }
     }
@@ -1879,6 +1906,35 @@ mod tests {
             .expect("freebuff desktop agent seeded");
         assert_eq!(desktop.kind, "ide");
         assert!(desktop.command.contains("%LOCALAPPDATA%"));
+    }
+
+    /// Sans l'agent integre AIHubMix, le frontend retombe sur `codex login`
+    /// quand on connecte un compte aihubmix (providerAgentId inconnu) : la clé
+    /// API ne peut alors plus etre saisie dans le terminal securise.
+    #[test]
+    fn ensure_agents_seeds_the_aihubmix_agent() {
+        let mut settings = empty_settings("codex", Vec::new(), None);
+
+        let changed = ensure_agents(&mut settings);
+
+        assert!(changed);
+        let agent = settings
+            .agents
+            .iter()
+            .find(|agent| agent.id == AIHUBMIX_AGENT_ID)
+            .expect("aihubmix agent seeded");
+        assert!(agent.builtin);
+        assert_eq!(agent.command, "aihubmix");
+        assert_eq!(agent.kind, "cli");
+        assert_eq!(agent.provider, Provider::Aihubmix);
+        assert_eq!(agent.login_command.as_deref(), Some("login"));
+        assert_eq!(agent.status_command, None);
+        assert_eq!(agent.doctor_command, None);
+        // Le lancement pilote par le provider passe bien par le CLI aihubmix.
+        assert_eq!(
+            command_for_provider(&settings, Provider::Aihubmix),
+            "aihubmix"
+        );
     }
 
     /// `command_for_provider` retient le premier agent integre du provider. Les
@@ -2796,6 +2852,28 @@ fn ensure_agents(settings: &mut AppSettings) -> bool {
         changed = true;
     }
 
+    // Agent CLI AIHubMix : indispensable pour que la connexion d'un compte
+    // aihubmix ouvre `aihubmix login` (saisie de la clé API dans le terminal
+    // sécurisé) au lieu de retomber sur `codex login` faute d'agent dédié.
+    if !settings
+        .agents
+        .iter()
+        .any(|agent| agent.id == AIHUBMIX_AGENT_ID)
+    {
+        settings.agents.push(AgentProfile {
+            id: AIHUBMIX_AGENT_ID.to_string(),
+            label: "AIHubMix".to_string(),
+            command: "aihubmix".to_string(),
+            provider: Provider::Aihubmix,
+            kind: "cli".to_string(),
+            builtin: true,
+            login_command: Some("login".to_string()),
+            status_command: None,
+            doctor_command: None,
+        });
+        changed = true;
+    }
+
     // Freebuff Desktop : application externe ouverte sur le dossier projet
     // (`kind = "ide"`, comme Kombai). C'est le seul canal ou le mode agent MAX
     // est disponible, le CLI etant fige sur LITE par un flag compile dans son
@@ -3295,6 +3373,8 @@ fn merge_discovered_profiles(settings: &mut AppSettings) -> Result<bool, String>
                 reasoning_effort: None,
                 fast_mode: false,
                 completed_on: None,
+                base_url: None,
+                reasoning_effort_field: None,
                 api_key: None,
             });
             account_paths.insert(normalized);
@@ -3353,6 +3433,14 @@ fn stable_id(prefix: &str, input: &str) -> String {
 }
 
 pub fn account_has_auth_tokens(account: &AccountProfile) -> bool {
+    // OpenAI-compatible : la cle API vit sur le compte (cote serveur), pas
+    // dans un home. Sa presence suffit pour considerer le compte authentifie.
+    if account.provider == Provider::OpenAiCompatible {
+        return account
+            .api_key
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty());
+    }
     let Ok(home) = expand_home(&account.codex_home) else {
         return false;
     };
@@ -3379,6 +3467,8 @@ pub fn command_for_provider(settings: &AppSettings, provider: Provider) -> Strin
             Provider::OpenCode => "opencode".to_string(),
             Provider::Freebuff => "freebuff".to_string(),
             Provider::Aihubmix => "aihubmix".to_string(),
+            // Pas de CLI local : le chat OpenAI-compatible est un appel HTTP.
+            Provider::OpenAiCompatible => String::new(),
         })
 }
 
@@ -3923,6 +4013,9 @@ pub async fn load_account_model_catalog(account_id: &str) -> Result<Vec<AccountM
         })
         .await
         .map_err(|_| "Lecture du catalogue Codex interrompue".to_string())?,            Provider::OpenCode | Provider::Claude | Provider::Aihubmix => Ok(Vec::new()),
+        Provider::OpenAiCompatible => {
+            load_openai_compatible_model_catalog(&account, &settings).await
+        }
     }
 }
 
@@ -4076,6 +4169,180 @@ async fn fetch_openrouter_model_catalog(
     }
 
     Err("Catalogue OpenRouter trop volumineux".to_string())
+}
+
+/// Cache en memoire du catalogue /models d'un compte OpenAI-compatible.
+/// Cle = URL `base/models` normalisee ; expire apres `OPENAI_COMPATIBLE_CATALOG_CACHE_TTL_SECS`.
+static OPENAI_COMPATIBLE_CATALOG_CACHE: OnceLock<
+    Mutex<HashMap<String, (i64, Vec<AccountModelView>)>>,
+> = OnceLock::new();
+
+/// Limite de longueur d'un identifiant de modele OpenAI-compatible.
+const OPENAI_COMPATIBLE_MODEL_ID_MAX_CHARS: usize = 240;
+
+/// Recupere le catalogue `/models` d'un compte OpenAI-compatible, avec cache
+/// TTL. La cle API ne traverse jamais le client : elle reste dans
+/// `account.api_key` (tournee cote serveur) et est seulement utilisee pour
+/// authentifier la requete HTTP.
+async fn load_openai_compatible_model_catalog(
+    account: &AccountProfile,
+    settings: &AppSettings,
+) -> Result<Vec<AccountModelView>, String> {
+    let base_url = account
+        .base_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "Compte OpenAI-compatible sans endpoint /v1".to_string())?;
+    let api_key = account
+        .api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "Compte OpenAI-compatible sans cle API".to_string())?;
+
+    let endpoint = openai_compatible_models_url(base_url)?;
+    let cache_key = endpoint.as_str().to_string();
+    let now = now_unix();
+
+    // Cache hot.
+    {
+        if let Some(cache) = OPENAI_COMPATIBLE_CATALOG_CACHE.get() {
+            if let Ok(guard) = cache.lock() {
+                if let Some((cached_at, models)) = guard.get(&cache_key) {
+                    if now - *cached_at < OPENAI_COMPATIBLE_CATALOG_CACHE_TTL_SECS {
+                        return Ok(models.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    let proxy_url = proxy_url_for_account(account, settings);
+    let client = openai_compatible_client(proxy_url.as_deref())?;
+    let response = client
+        .get(endpoint.clone())
+        .bearer_auth(api_key)
+        .header("Accept", "application/json")
+        .send()
+        .await
+        // Erreur reqwest : message neutre, jamais l'URL (qui peut porter des
+        // identifiants deproxy) ni la cle.
+        .map_err(|_| "Lecture du catalogue OpenAI-compatible impossible".to_string())?;
+    let status = response.status();
+    if !status.is_success() {
+        let message = match status.as_u16() {
+            401 | 403 => "Cle API refusee pour ce compte".to_string(),
+            429 => "Catalogue temporairement limite".to_string(),
+            code => format!("Catalogue OpenAI-compatible indisponible (HTTP {code})"),
+        };
+        return Err(message);
+    }
+    let payload = response
+        .json::<Value>()
+        .await
+        .map_err(|_| "Reponse du catalogue OpenAI-compatible illisible".to_string())?;
+    let models = parse_openai_compatible_catalog(&payload);
+
+    // Cache froid.
+    if let Ok(mut cache) = OPENAI_COMPATIBLE_CATALOG_CACHE.get_or_init(|| Mutex::new(HashMap::new())).lock()
+    {
+        cache.insert(cache_key, (now, models.clone()));
+    }
+    Ok(models)
+}
+
+/// Construit l'URL `/models` (ou la garde telle quelle si l'utilisateur a deja
+/// fourni un chemin se terminant par `/models`), et refuse une base non-HTTP(S).
+fn openai_compatible_models_url(base_url: &str) -> Result<Url, String> {
+    let mut url = Url::parse(base_url)
+        .map_err(|_| "Endpoint OpenAI-compatible invalide".to_string())?;
+    match url.scheme() {
+        "https" => {}
+        "http" => {}
+        other => return Err(format!("Endpoint OpenAI-compatible invalide (HTTPS requis, recu {other})")),
+    }
+    if url.username().is_empty() && url.password().is_none() && url.fragment().is_none() {
+        // ok
+    } else {
+        return Err("Endpoint OpenAI-compatible invalide".to_string());
+    }
+    if !url.path().ends_with("/models") {
+        let path = url.path();
+        let joined = if path.is_empty() || path == "/" {
+            "/models".to_string()
+        } else {
+            format!("{}/models", path.trim_end_matches('/'))
+        };
+        url.set_path(&joined);
+    }
+    // Aucune requete ne doit emporter la cle ou un query utilitaire.
+    url.set_query(None);
+    url.set_fragment(None);
+    Ok(url)
+}
+
+fn openai_compatible_client(proxy_url: Option<&str>) -> Result<reqwest::Client, String> {
+    let mut builder = reqwest::Client::builder()
+        .timeout(Duration::from_secs(OPENAI_COMPATIBLE_CATALOG_TIMEOUT_SECS))
+        .redirect(reqwest::redirect::Policy::none())
+        .user_agent(concat!("codex-switch-terminal/", env!("CARGO_PKG_VERSION")));
+    if let Some(proxy_url) = proxy_url {
+        builder = builder.proxy(
+            reqwest::Proxy::all(proxy_url)
+                .map_err(|_| "proxy OpenAI-compatible invalide".to_string())?,
+        );
+    }
+    builder
+        .build()
+        .map_err(|_| "client OpenAI-compatible indisponible".to_string())
+}
+
+/// Normalise la reponse `/models` (objet `{ "data": [{ "id", "name", ... }] }`)
+/// vers `AccountModelView`. Deduplication, filtrage des identifiants vides ou
+/// mal formes. Les capacites d'intensite sont laissees vides : le frontend les
+/// propose selon `reasoning_effort_field` du compte.
+fn parse_openai_compatible_catalog(payload: &Value) -> Vec<AccountModelView> {
+    let entries = payload
+        .get("data")
+        .and_then(Value::as_array);
+    let Some(entries) = entries else {
+        return Vec::new();
+    };
+    let mut seen = HashSet::new();
+    entries
+        .iter()
+        .filter_map(|entry| {
+            let id = entry
+                .get("id")
+                .or_else(|| entry.get("model"))
+                .and_then(Value::as_str)?;
+            let id = id.trim();
+            if id.is_empty()
+                || id.chars().count() > OPENAI_COMPATIBLE_MODEL_ID_MAX_CHARS
+                || id.chars().any(char::is_control)
+            {
+                return None;
+            }
+            if !seen.insert(id.to_string()) {
+                return None;
+            }
+            let display_name = entry
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or(id)
+                .to_string();
+            Some(AccountModelView {
+                id: id.to_string(),
+                display_name,
+                default_reasoning_effort: None,
+                supported_reasoning_efforts: Vec::new(),
+                supports_fast_mode: false,
+            })
+        })
+        .collect()
 }
 
 fn openrouter_page_url(endpoint: &Url, offset: usize) -> Url {
@@ -4580,6 +4847,10 @@ fn local_snapshot_matches_current_credentials(
         Provider::OpenCode => home.join("data").join("opencode").join("auth.json"),
         Provider::Freebuff => crate::provider::freebuff_config_dir(&home).join("credentials.json"),
         Provider::Aihubmix => home.join(".config").join("aihubmix").join("credentials.json"),
+        Provider::OpenAiCompatible => home
+            .join(".config")
+            .join("openai-compatible")
+            .join("credentials.json"),
     };
     let Some(modified_at) = fs::metadata(credentials)
         .ok()
@@ -5560,6 +5831,8 @@ fn import_single_account(
                 reasoning_effort: reasoning_effort.clone(),
                 fast_mode: false,
                 completed_on: None,
+                base_url: None,
+                reasoning_effort_field: None,
                 api_key: None,
             });
             (bypass_default, model, reasoning_effort, false)

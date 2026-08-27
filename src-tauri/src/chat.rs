@@ -2615,6 +2615,8 @@ fn configure_provider_command_with_images_and_scope(
                 }
             }
         }
+        // HTTP : aucun binaire CLI a configurer (voir le runner dedie).
+        Provider::OpenAiCompatible => {}
     }
 }
 
@@ -2994,6 +2996,12 @@ fn selected_reasoning_effort(
             request.or_else(|| fallback.map(str::trim).filter(|value| !value.is_empty()))
         }
         Provider::OpenCode | Provider::Freebuff | Provider::Aihubmix => return Ok(None),
+        // OpenAI-compatible : l'intensite est injectee dans le corps HTTP
+        // (champ `reasoning_effort_field`). La requete prime, puis le defaut
+        // persiste du compte.
+        Provider::OpenAiCompatible => {
+            request.or_else(|| fallback.map(str::trim).filter(|value| !value.is_empty()))
+        }
     };
     let Some(value) = value else {
         return Ok(None);
@@ -3007,7 +3015,10 @@ fn selected_reasoning_effort(
 fn validate_session_id(provider: Provider, session_id: &str) -> Result<(), String> {
     let valid = match provider {
         Provider::Codex | Provider::Claude => Uuid::parse_str(session_id).is_ok(),
-        Provider::OpenCode | Provider::Freebuff | Provider::Aihubmix => {
+        Provider::OpenCode
+        | Provider::Freebuff
+        | Provider::Aihubmix
+        | Provider::OpenAiCompatible => {
             let len = session_id.chars().count();
             (1..=160).contains(&len)
                 && session_id.chars().all(|character| {
@@ -4576,6 +4587,7 @@ fn provider_label(provider: Provider) -> &'static str {
         Provider::OpenCode => "OpenCode",
         Provider::Freebuff => "Freebuff",
         Provider::Aihubmix => "AIHubMix",
+        Provider::OpenAiCompatible => "OpenAI Compatible",
     }
 }
 

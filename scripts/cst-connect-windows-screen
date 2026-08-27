@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# Pont securise conteneur -> poste Windows pour le controle d'ecran Switch.
+# Relaie la demande JSON recue sur stdin vers la commande SSH forcee
+# `agent-screen-client.mjs` du poste (sshd ignore le nom de commande demande)
+# et retransmet la reponse JSON sur stdout. Usage en developpement uniquement.
+set -euo pipefail
+
+host="${CST_WINDOWS_SCREEN_HOST:-${CST_SSH_LOCAL_HOST:-host.docker.internal}}"
+port="${CST_WINDOWS_SCREEN_PORT:-${CST_SSH_LOCAL_PORT:-2222}}"
+user="${CST_WINDOWS_SCREEN_USER:-${CST_SSH_LOCAL_USER:-jeanp}}"
+key="${CST_WINDOWS_SCREEN_KEY:-/srv/cst/ssh-keys/windows_screen_ed25519}"
+known_hosts="${CST_WINDOWS_KNOWN_HOSTS:-/srv/cst/ssh-keys/windows_known_hosts}"
+
+if [[ ! -r "$key" ]]; then
+  echo "{\"ok\":false,\"error\":\"Cle SSH ecran absente du conteneur: $key\"}" >&2
+  exit 2
+fi
+if [[ ! -r "$known_hosts" ]]; then
+  echo "{\"ok\":false,\"error\":\"Fichier windows_known_hosts absent du conteneur: $known_hosts\"}" >&2
+  exit 2
+fi
+
+exec ssh -T \
+  -o BatchMode=yes \
+  -o IdentitiesOnly=yes \
+  -o ClearAllForwardings=yes \
+  -o ForwardAgent=no \
+  -o StrictHostKeyChecking=yes \
+  -o HostKeyAlias=windows-pc \
+  -o UserKnownHostsFile="$known_hosts" \
+  -o ConnectTimeout=8 \
+  -i "$key" \
+  -p "$port" \
+  "$user@$host" \
+  switch-agent-screen

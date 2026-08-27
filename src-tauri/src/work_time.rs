@@ -113,6 +113,8 @@ fn build_dashboard(settings: &settings::AppSettings) -> WorkTimeDashboard {
             settings::Provider::OpenCode => {}
             // freebuff tient son propre historique, non expose par Switch.
             settings::Provider::Freebuff | settings::Provider::Aihubmix => {}
+            // HTTP : pas de fichiers locaux a scanner.
+            settings::Provider::OpenAiCompatible => {}
         }
     }
 

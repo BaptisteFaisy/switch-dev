@@ -1,4 +1,4 @@
-import { invoke } from "./platform";
+import { hasRemoteAuth, invoke, remoteBaseUrl, saveRemoteConfig } from "./platform";
 import "./duello-bank.css";
 
 type DuelloBankWallet = {
@@ -69,6 +69,9 @@ const readableError = (cause: unknown) => {
   }
   return redacted;
 };
+
+const isAdminTokenError = (cause: unknown) =>
+  /token admin|authentification|unauthorized|401/i.test(String(cause instanceof Error ? cause.message : cause));
 
 const safeHttpsUrl = (value: string, expectedHost?: string) => {
   try {
@@ -174,8 +177,22 @@ const externalLink = (
   ? `<a class="${className}" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer"><span>${escapeHtml(label)}</span><i data-lucide="${escapeHtml(icon)}"></i></a>`
   : `<span class="${className} is-disabled" aria-disabled="true"><span>${escapeHtml(label)}</span><i data-lucide="circle-slash-2"></i></span>`;
 
+const adminUnlockForm = () => `<form class="duello-bank-admin-unlock" data-duello-bank-admin-unlock>
+  <div><i data-lucide="lock-keyhole"></i><span><strong>Déverrouiller avec le jeton administrateur</strong><small>Cette vue exige le jeton administrateur du serveur Switch. Il reste dans la configuration locale.</small></span></div>
+  <label><span>Jeton admin</span><input name="adminToken" type="password" autocomplete="current-password" required /></label>
+  <button type="submit" class="duello-bank-button primary"><i data-lucide="lock-open"></i><span>Déverrouiller</span></button>
+</form>`;
+
 export async function refreshDuelloBankPanel(rerender: () => void, silent = false) {
   if (loading) return;
+  if (!hasRemoteAuth()) {
+    // Sans jeton administrateur, la route renverrait 401 en boucle. On affiche
+    // directement le formulaire de déverrouillage, comme l'onglet VPS.
+    loading = false;
+    loadError = "";
+    if (!silent) rerender();
+    return;
+  }
   loading = true;
   if (!silent) loadError = "";
   if (!silent) rerender();
@@ -200,7 +217,15 @@ const renderLoadFailure = () => `<section class="duello-bank-dashboard duello-ba
   <span class="duello-bank-state-icon"><i data-lucide="circle-alert"></i></span>
   <strong>Banque Duello indisponible</strong>
   <small>${escapeHtml(loadError)}</small>
+  ${isAdminTokenError(loadError) ? adminUnlockForm() : ""}
   <button type="button" class="duello-bank-button primary" data-refresh-duello-bank><i data-lucide="refresh-cw"></i><span>Réessayer</span></button>
+</section>`;
+
+const renderAdminUnlock = () => `<section class="duello-bank-dashboard duello-bank-state" role="status">
+  <span class="duello-bank-state-icon"><i data-lucide="lock-keyhole"></i></span>
+  <strong>Jeton administrateur requis</strong>
+  <small>Déverrouille la Banque Duello avec le jeton administrateur du serveur Switch.</small>
+  ${adminUnlockForm()}
 </section>`;
 
 const renderCreditModal = (wallets: DuelloBankWallet[]) => {
@@ -248,6 +273,7 @@ const renderCreditModal = (wallets: DuelloBankWallet[]) => {
 };
 
 export function renderDuelloBankPanel(): string {
+  if (!hasRemoteAuth()) return renderAdminUnlock();
   if (!snapshot && !loadError) return renderLoading();
   if (!snapshot && loadError) return renderLoadFailure();
 
@@ -326,10 +352,27 @@ export function bindDuelloBankPanel({ rerender, renderIcons }: DuelloBankPanelBi
   const root = document.querySelector<HTMLElement>(".duello-bank-dashboard");
   if (!root) return;
 
-  if (!snapshot && !loading) void refreshDuelloBankPanel(rerender);
+  // Sans jeton admin, le formulaire de déverrouillage est déjà rendu : ne pas
+  // relancer de refresh (il re-rendrerait en boucle). Le déverrouillage, les
+  // clics "Réessayer" et le bouton d'actualisation lancent le fetch.
+  if (!snapshot && !loading && !loadError && hasRemoteAuth()) void refreshDuelloBankPanel(rerender);
 
   root.querySelectorAll<HTMLButtonElement>("[data-refresh-duello-bank]").forEach((button) => {
     button.addEventListener("click", () => void refreshDuelloBankPanel(rerender));
+  });
+
+  root.querySelector<HTMLFormElement>("[data-duello-bank-admin-unlock]")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const input = root.querySelector<HTMLInputElement>("[data-duello-bank-admin-unlock] input[name='adminToken']");
+    const token = input?.value.trim() ?? "";
+    if (!token) {
+      input?.setCustomValidity("Jeton administrateur requis");
+      input?.reportValidity();
+      return;
+    }
+    saveRemoteConfig(remoteBaseUrl(), token, undefined);
+    loadError = "";
+    void refreshDuelloBankPanel(rerender);
   });
 
   root.querySelectorAll<HTMLButtonElement>("[data-open-duello-bank-credit]").forEach((button) => {

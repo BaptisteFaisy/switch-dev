@@ -705,3 +705,70 @@
   .duello-bank-state-icon svg,
   .duello-bank-dashboard .is-spinning { animation: none; }
 }
+
+.duello-bank-admin-unlock {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(210px, .7fr) auto;
+  align-items: end;
+  gap: 12px;
+  max-width: 860px;
+  margin: 18px auto 0;
+  padding: 14px;
+  border: 1px solid var(--duello-bank-border);
+  border-radius: 12px;
+  background: var(--duello-bank-surface-muted);
+  text-align: left;
+}
+
+.duello-bank-admin-unlock > div {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.duello-bank-admin-unlock > div > svg {
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  color: var(--accent, #fff);
+}
+
+.duello-bank-admin-unlock > div > span {
+  display: grid;
+  gap: 2px;
+}
+
+.duello-bank-admin-unlock strong {
+  font-size: 13px;
+}
+
+.duello-bank-admin-unlock small {
+  color: var(--muted-2, #777);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.duello-bank-admin-unlock label {
+  display: grid;
+  gap: 5px;
+  font-size: 11px;
+  font-weight: 650;
+  color: var(--muted-2, #777);
+}
+
+.duello-bank-admin-unlock input {
+  min-height: 36px;
+  padding: 7px 10px;
+  border: 1px solid var(--duello-bank-border);
+  border-radius: 8px;
+  background: var(--duello-bank-surface);
+  color: var(--fg, #eee);
+  font: 400 13px var(--font-body, Inter, sans-serif);
+}
+
+@media (max-width: 720px) {
+  .duello-bank-admin-unlock {
+    grid-template-columns: minmax(0, 1fr);
+    align-items: stretch;
+  }
+}

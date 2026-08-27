@@ -1521,6 +1521,35 @@
   border-color: rgba(154, 107, 18, 0.4);
 }
 
+:root[data-theme="light"] .expert-terminal-external-notice {
+  background: linear-gradient(180deg, #fdf3d8, #f9ecc8);
+  border-bottom-color: #e2cf9a;
+  color: #8a6420;
+}
+
+:root[data-theme="light"] .expert-terminal-external-notice > i[data-lucide] {
+  color: #a8791d;
+}
+
+:root[data-theme="light"] .expert-terminal-external-notice-copy strong {
+  color: #7a5610;
+}
+
+:root[data-theme="light"] .expert-terminal-external-notice-copy span {
+  color: #96702a;
+}
+
+:root[data-theme="light"] .expert-terminal-external-switch {
+  border-color: #d0b063;
+  background: #f4e3b0;
+  color: #6f4f0e;
+}
+
+:root[data-theme="light"] .expert-terminal-external-switch:hover {
+  background: #edda9f;
+  border-color: #c09c45;
+}
+
 :root[data-theme="light"] .freebuff-terminal-account-switch select {
   border-color: var(--line);
   background: #fbfcfa;

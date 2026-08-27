@@ -2418,7 +2418,16 @@ async function startRemoteTerminal<T>(args: Record<string, any>): Promise<T> {
     const candidates = await terminalNodeCandidates(targetNodeId);
     for (const route of candidates) {
       try {
-        const response = await apiAt<RemoteStartResponse>(route, "POST", "/api/terminals", payload);
+        // Timeout de 120 s : un noeud sature ne doit jamais laisser le client
+        // sur « Preparation… » indefiniment. Le serveur repond lui-meme 504
+        // apres 90 s ; ce garde couvre aussi les coupures silencieuses.
+        const response = await apiAt<RemoteStartResponse>(
+          route,
+          "POST",
+          "/api/terminals",
+          payload,
+          120_000,
+        );
         const virtualId = registerRemoteTerminalId(response.id, route);
         remoteEndedTerminals.delete(virtualId);
         if (Number.isFinite(requestedId) && requestedId !== virtualId) {
@@ -2492,8 +2501,9 @@ async function attachRemoteTerminal<T>(args: Record<string, unknown>): Promise<T
     // Ne remplace ni la route ni le socket existants avant la sonde. Si le
     // rattachement echoue, une reconnexion concurrente doit continuer a viser
     // l'ancien noeud et l'ancien ID, pas le terminal restaure qui vient d'etre
-    // declare disparu.
-    await apiAt(route, "POST", `/api/terminals/${serverId}/resize`, { cols, rows });
+    // declare disparu. La sonde porte un timeout court : un rattachement
+    // muet ne doit pas bloquer l'interface plus de 20 secondes.
+    await apiAt(route, "POST", `/api/terminals/${serverId}/resize`, { cols, rows }, 20_000);
   } catch (error) {
     if (previousRoute) scheduleRemoteTerminalReconnect(id, previousRoute);
     throw error;

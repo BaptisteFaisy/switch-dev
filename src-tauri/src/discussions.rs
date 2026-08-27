@@ -519,6 +519,8 @@ fn discussion_files(home: &Path, provider: settings::Provider) -> Vec<PathBuf> {
             files
         }
         settings::Provider::Aihubmix => Vec::new(),
+        // Chats portes par Switch, pas par des fichiers du home.
+        settings::Provider::OpenAiCompatible => Vec::new(),
         settings::Provider::OpenCode => {
             let root = home.join("data").join("opencode");
             ["opencode.db", "opencode.db-wal", "opencode.db-shm"]
@@ -743,6 +745,8 @@ fn scan_account(account: &AccountProfile, provider_command: &str) -> DiscussionA
         }
         settings::Provider::Freebuff => (scan_freebuff_discussions(&home, account), None),
         settings::Provider::Aihubmix => (Vec::new(), None),
+        // Chats portes par Switch : aucun dossier local a scanner.
+        settings::Provider::OpenAiCompatible => (Vec::new(), None),
     };
     let session_busy = account.provider == settings::Provider::Freebuff
         && crate::provider::freebuff_instance_busy(&home);
@@ -837,7 +841,10 @@ pub fn rename_discussion_for_account(
         .cloned()
         .ok_or_else(|| "Compte introuvable".to_string())?;
     let valid_id = match account.provider {
-        settings::Provider::OpenCode | settings::Provider::Freebuff | settings::Provider::Aihubmix => {
+        settings::Provider::OpenCode
+        | settings::Provider::Freebuff
+        | settings::Provider::Aihubmix
+        | settings::Provider::OpenAiCompatible => {
             valid_opencode_session_id(&session_id)
         }
         settings::Provider::Codex | settings::Provider::Claude => is_uuid_shaped(&session_id),
@@ -2100,7 +2107,9 @@ pub fn move_discussion_for_account(
         settings::Provider::OpenCode => {
             Err("Le deplacement des sessions OpenCode n'est pas encore pris en charge".to_string())
         }
-        settings::Provider::Freebuff | settings::Provider::Aihubmix => {
+        settings::Provider::Freebuff
+        | settings::Provider::Aihubmix
+        | settings::Provider::OpenAiCompatible => {
             Err("Les sessions de ce fournisseur ne sont pas exposees par Switch".to_string())
         }
     }
@@ -2336,7 +2345,10 @@ pub fn delete_discussion_for_account(
         .ok_or_else(|| "Compte introuvable".to_string())?;
 
     let valid_id = match account.provider {
-        settings::Provider::OpenCode | settings::Provider::Freebuff | settings::Provider::Aihubmix => {
+        settings::Provider::OpenCode
+        | settings::Provider::Freebuff
+        | settings::Provider::Aihubmix
+        | settings::Provider::OpenAiCompatible => {
             valid_opencode_session_id(&session_id)
         }
         settings::Provider::Codex | settings::Provider::Claude => is_uuid_shaped(&session_id),
@@ -2359,6 +2371,10 @@ pub fn delete_discussion_for_account(
             delete_freebuff_discussion_impl(&account, &session_id, archive)
         }
         settings::Provider::Aihubmix => Err("Les sessions AIHubMix ne sont pas encore exposees par Switch".to_string()),
+        // Chats portes par Switch : pas de fichier natif a supprimer ici.
+        settings::Provider::OpenAiCompatible => {
+            Err("Les sessions OpenAI-compatible sont gerees par Switch".to_string())
+        }
     }
 }
 
@@ -3045,6 +3061,7 @@ fn collect_transcript_turns(
             extract_opencode_semantic_transcript(&load_opencode_export(account_id, session_id)?)
         }
         settings::Provider::Freebuff | settings::Provider::Aihubmix => Vec::new(),
+        settings::Provider::OpenAiCompatible => Vec::new(),
     })
 }
 
@@ -3065,7 +3082,9 @@ fn discussion_source_for_account(
     let home = expand_home(&account.codex_home)?;
 
     let file = match account.provider {
-        settings::Provider::Freebuff | settings::Provider::Aihubmix => {
+        settings::Provider::Freebuff
+        | settings::Provider::Aihubmix
+        | settings::Provider::OpenAiCompatible => {
             return Err("Les sessions de ce fournisseur ne sont pas exposees par Switch".to_string())
         }
         settings::Provider::Codex => {
@@ -3326,6 +3345,7 @@ pub fn transcript_for_account(
             None,
         ),
         settings::Provider::Freebuff | settings::Provider::Aihubmix => (Vec::new(), None),
+        settings::Provider::OpenAiCompatible => (Vec::new(), None),
     };
     Ok(DiscussionTranscript {
         session_id,

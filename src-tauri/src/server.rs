@@ -5340,7 +5340,7 @@ async fn api_start_terminal(
     let owner_id = actor.owner_id().to_string();
     let identity = actor.user().cloned();
     let start_state = state.clone();
-    match tokio::task::spawn_blocking(move || {
+    let spawn = tokio::task::spawn_blocking(move || {
         let login_only = request.login_only;
         let value = start_state.terminals.start(
             &start_state.config,
@@ -5365,14 +5365,22 @@ async fn api_start_terminal(
             }
         }
         Ok::<_, String>(value)
-    })
-    .await
-    {
-        Ok(Ok(value)) => json_response(value),
-        Ok(Err(error)) => api_error(agent_start_status(&error), &error, &state.config),
-        Err(error) => api_error(
+    });
+    // Un noeud sature (CPU, threads bloquants, tests lancés à cote) ne doit
+    // jamais laisser le client dans un « Preparation » indefini : au-dela de
+    // 90 secondes, on repond 504 avec un message clair. La tache de fond
+    // s'acheve seule ; un nouvel essai client verra alors « deja vivant ».
+    match tokio::time::timeout(Duration::from_secs(90), spawn).await {
+        Ok(Ok(Ok(value))) => json_response(value),
+        Ok(Ok(Err(error))) => api_error(agent_start_status(&error), &error, &state.config),
+        Ok(Err(error)) => api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             &format!("spawn terminal interrompu: {error}"),
+            &state.config,
+        ),
+        Err(_elapsed) => api_error(
+            StatusCode::GATEWAY_TIMEOUT,
+            "demarrage du terminal trop long (90 s) : serveur surcharge, reessayez",
             &state.config,
         ),
     }

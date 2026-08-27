@@ -150,6 +150,8 @@ impl Provider {
                     "HOME"
                 }
             }
+            // Fournisseur HTTP : aucune isolation par home n'est necessaire.
+            Provider::OpenAiCompatible => "CST_OPENAI_COMPATIBLE_BASE_URL",
         }
     }
 
@@ -187,6 +189,8 @@ impl Provider {
                 ("USERPROFILE", home.to_path_buf()),
             ],
             Provider::Aihubmix => vec![("HOME", home.to_path_buf()), ("USERPROFILE", home.to_path_buf())],
+            // Aucune variable de home : le compte ne pilote pas de CLI local.
+            Provider::OpenAiCompatible => Vec::new(),
         }
     }
 
@@ -200,6 +204,8 @@ impl Provider {
             // pratique : le bypass n'est applique que par le runtime de chat,
             // que freebuff ne peut pas alimenter.
             Provider::Freebuff | Provider::Aihubmix => "",
+            // HTTP : pas de flag CLI a passer.
+            Provider::OpenAiCompatible => "",
         }
     }
 
@@ -215,6 +221,8 @@ impl Provider {
             // reste selectionnable mais il est premium.
             Provider::Freebuff => "deepseek/deepseek-v4-flash",
             Provider::Aihubmix => "",
+            // Le modele par defaut vient du catalogue /models scannes.
+            Provider::OpenAiCompatible => "",
         }
     }
 
@@ -229,6 +237,7 @@ impl Provider {
             // freebuff: <home>/.config/manicode/projects, comme Claude Code.
             Provider::Freebuff => freebuff_config_dir(home).join("projects"),
             Provider::Aihubmix => home.join(".config").join("aihubmix").join("sessions"),
+            Provider::OpenAiCompatible => home.join(".config").join("openai-compatible"),
         }
     }
 
@@ -241,6 +250,8 @@ impl Provider {
             Provider::OpenCode => format!("{cli} --session {session_id}"),
             Provider::Freebuff => format!("{cli} --continue {session_id}"),
             Provider::Aihubmix => format!("{cli} --session {session_id}"),
+            // Non atteint : le chat HTTP ne reprend pas via un CLI local.
+            Provider::OpenAiCompatible => format!("{cli} --session {session_id}"),
         }
     }
 
@@ -273,6 +284,8 @@ impl Provider {
                     || name.starts_with("freebuff_")
             }
             Provider::Aihubmix => false,
+            // Toujours cree explicitement, jamais decouvert automatiquement.
+            Provider::OpenAiCompatible => false,
         }
     }
 
@@ -284,6 +297,9 @@ impl Provider {
             Provider::OpenCode => opencode_has_auth(home, inference_provider),
             Provider::Freebuff => freebuff_has_auth(home),
             Provider::Aihubmix => home.join(".config").join("aihubmix").join("credentials.json").is_file(),
+            // La cle vit sur l'account (cote serveur), pas dans le home.
+            // `account_has_auth_tokens` la teste par `api_key.present`.
+            Provider::OpenAiCompatible => home.join(".config").join("openai-compatible").is_dir(),
         }
     }
 
@@ -309,6 +325,7 @@ impl Provider {
             Provider::OpenCode => ensure_opencode_account_home(home),
             Provider::Freebuff => ensure_freebuff_account_config(home, model),
             Provider::Aihubmix => ensure_aihubmix_account_config(home, model),
+            Provider::OpenAiCompatible => fs::create_dir_all(home),
         }
     }
 }

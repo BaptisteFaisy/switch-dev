@@ -23791,6 +23791,23 @@ const renderFreebuffTerminalAccountSwitch = (session: TerminalSession): string =
   </label>`;
 };
 
+// Terminal Freebuff Desktop synchronise depuis le poste : Switch le liste et
+// l'affiche en miroir, mais le PTY appartient a Freebuff Desktop. Le bandeau
+// rend la lecture seule explicite et propose la seule action utile : ouvrir un
+// terminal pilote par Switch pour le meme compte.
+const renderExternalTerminalNotice = (session: TerminalSession): string => `
+  <div class="expert-terminal-external-notice" role="status">
+    <i data-lucide="lock" aria-hidden="true"></i>
+    <div class="expert-terminal-external-notice-copy">
+      <strong>Terminal Freebuff Desktop — lecture seule</strong>
+      <span>Ce terminal tourne dans Freebuff Desktop sur ton poste : Switch l'affiche en miroir mais ne peut pas y envoyer de frappes.</span>
+    </div>
+    <button type="button" class="expert-terminal-external-switch" data-external-open-switch="${escapeAttr(session.key)}">
+      <i data-lucide="server" aria-hidden="true"></i>
+      <span>Ouvrir un terminal Switch pour ce compte</span>
+    </button>
+  </div>`;
+
 const renderExpertTerminalPane = (session: TerminalSession, index: number): string => {
   const chatSidebarHidden = displayedChatSidebarWidth() === 0;
   const sessionAgentLabel = agentById(session.agentId)?.label ?? session.agentId;
@@ -23801,7 +23818,7 @@ const renderExpertTerminalPane = (session: TerminalSession, index: number): stri
   const accountSwitch = renderFreebuffTerminalAccountSwitch(session);
   const newChatButton = session.loginOnly ? "" : `<button type="button" class="expert-pane-new-chat" data-new-chat-terminal="${escapeAttr(session.key)}" title="Ouvrir un autre chat dans cet environnement" aria-label="Ouvrir un autre chat dans cet environnement"><i data-lucide="message-square-plus"></i></button>`;
   return `
-    <article class="expert-terminal-pane ${session.key === activeTerminalKey ? "active" : ""} ${session.running ? "running" : ""} ${session.key === expertTerminalFullscreenKey ? "is-fullscreen" : ""}" data-expert-terminal-pane="${escapeAttr(session.key)}">
+    <article class="expert-terminal-pane ${session.key === activeTerminalKey ? "active" : ""} ${session.running ? "running" : ""} ${session.key === expertTerminalFullscreenKey ? "is-fullscreen" : ""} ${session.externalSync ? "has-external-notice" : ""}" data-expert-terminal-pane="${escapeAttr(session.key)}">
       <header class="expert-terminal-pane-head ${accountSwitch ? "has-freebuff-account-switch" : ""} ${newChatButton ? "has-new-chat" : ""}">
         <button type="button" class="expert-pane-mobile-menu" data-toggle-chat-sidebar title="Afficher le menu de gauche" aria-label="Afficher le menu de gauche" aria-controls="chatAppSidebar">
           <span class="expert-pane-mobile-menu-arrow" aria-hidden="true"></span>
@@ -23830,6 +23847,7 @@ const renderExpertTerminalPane = (session: TerminalSession, index: number): stri
           <i data-lucide="x"></i>
         </button>
       </header>
+      ${session.externalSync ? renderExternalTerminalNotice(session) : ""}
       <div class="expert-terminal-host" data-terminal-host="${escapeAttr(session.key)}"></div>
       ${termInputProbeActive() ? `<div class="probe-term-status" data-probe-status="${escapeAttr(session.key)}">…</div>` : ""}
     </article>
@@ -30592,6 +30610,11 @@ const bindUi = () => {
         (candidate) => candidate.key === badge.dataset.terminalKeyboard,
       );
       if (!session) return;
+      if (session.externalSync) {
+        statusText = "Terminal Freebuff Desktop en lecture seule : utilise « Ouvrir un terminal Switch pour ce compte » pour taper.";
+        render();
+        return;
+      }
       if (session.running && session.ptyId !== null) {
         focusExpertSession(session, true);
         window.requestAnimationFrame(() => session.terminal.focus());
@@ -30600,6 +30623,19 @@ const bindUi = () => {
       // Session non rattachee : le clic relance la reconciliation serveur puis
       // restaure le focus si le PTY repond encore.
       void recoverActiveTerminalInput();
+    });
+  });
+
+  document.querySelectorAll<HTMLButtonElement>("[data-external-open-switch]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const session = terminalSessions.find(
+        (candidate) => candidate.key === button.dataset.externalOpenSwitch,
+      );
+      if (!session) return;
+      // Cree un terminal pilote par Switch pour le meme compte Freebuff : la
+      // seule maniere de taper depuis le dashboard. Le serveur refuse (409) si
+      // Freebuff Desktop tient encore le compte ; le message s'affiche alors.
+      void createNewTerminal(session.accountId);
     });
   });
 
@@ -32900,8 +32936,8 @@ const terminalKeyboardBadgeState = (
   if (session.externalSync) {
     return {
       tone: "off",
-      label: "Synchro",
-      title: "Terminal Freebuff Desktop synchronisé : Switch l'affiche mais n'a aucun clavier à piloter. Ouvre un nouveau terminal Switch pour taper.",
+      label: "Lecture seule",
+      title: "Terminal Freebuff Desktop synchronisé : Switch l'affiche en miroir mais n'a aucun clavier à piloter. Utilise « Ouvrir un terminal Switch pour ce compte » pour taper.",
     };
   }
   if (!session.running) {
