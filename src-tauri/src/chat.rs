@@ -2456,6 +2456,16 @@ fn configure_provider_command_with_images_and_scope(
         Provider::Freebuff | Provider::Aihubmix => {}
         Provider::Codex => {
             command.arg("exec");
+            if matches!(
+                filesystem_scope,
+                ChatFilesystemScope::ReviewProofArtifacts
+                    | ChatFilesystemScope::OrchestrationWorkspace
+            ) {
+                // `-C` appartient a `codex exec`, pas a son sous-commande
+                // `resume`. Il doit donc preceder `resume`, sinon le CLI refuse
+                // le tour avant meme de demarrer le sous-chat.
+                command.arg("-C").arg(".");
+            }
             if session_id.is_some() {
                 command.arg("resume");
             }
@@ -2494,8 +2504,6 @@ fn configure_provider_command_with_images_and_scope(
                 // autorise donc la capture sans rendre le projet parent
                 // modifiable, meme si le compte utilise normalement le bypass.
                 command
-                    .arg("-C")
-                    .arg(".")
                     .arg("-c")
                     .arg("sandbox_mode=\"workspace-write\"")
                     .arg("-c")
@@ -2503,7 +2511,6 @@ fn configure_provider_command_with_images_and_scope(
                     .arg("-c")
                     .arg("sandbox_workspace_write.network_access=false");
             } else if filesystem_scope == ChatFilesystemScope::OrchestrationWorkspace {
-                command.arg("-C").arg(".");
                 if matches!(mode, ChatTurnMode::Plan | ChatTurnMode::Ask) {
                     command
                         .arg("-c")
@@ -5400,6 +5407,45 @@ mod tests {
         assert!(!args
             .iter()
             .any(|arg| arg == "--dangerously-bypass-approvals-and-sandbox"));
+    }
+
+    #[test]
+    fn codex_orchestration_resume_keeps_exec_cd_before_resume() {
+        let account = test_account(Provider::Codex);
+        let session_id = "0199a213-81c0-7800-8aa1-bbab2a035a53";
+        let mut command = Command::new("codex");
+        configure_provider_command_with_images_and_scope(
+            &mut command,
+            &account,
+            Some(session_id),
+            ChatTurnMode::Build,
+            None,
+            None,
+            None,
+            false,
+            None,
+            None,
+            None,
+            &[],
+            ChatFilesystemScope::OrchestrationWorkspace,
+        );
+
+        let args = command_args(&command);
+        let cd = args
+            .windows(2)
+            .position(|pair| pair == ["-C", "."])
+            .expect("le cwd d'orchestration doit etre explicite");
+        let resume = args
+            .iter()
+            .position(|argument| argument == "resume")
+            .expect("la session doit etre reprise");
+        let session = args
+            .iter()
+            .position(|argument| argument == session_id)
+            .expect("l'identifiant de session doit etre transmis");
+        assert_eq!(args.first().map(String::as_str), Some("exec"));
+        assert!(cd < resume, "-C doit appartenir a codex exec");
+        assert!(resume < session, "la session suit la sous-commande resume");
     }
 
     #[test]
