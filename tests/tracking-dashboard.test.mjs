@@ -17,19 +17,17 @@ test("the Duello shell exposes the tracking view", async () => {
   assert.match(main, /renderTrackingPanel/);
 });
 
-test("the remote platform maps tracking management endpoints", async () => {
-  const platform = await source("src/platform.ts");
-
-  assert.match(platform, /case "tracking_links"[\s\S]*GET", "\/api\/tracking-links"/);
-  assert.match(platform, /case "create_tracking_link"[\s\S]*POST", "\/api\/tracking-links"/);
-});
-
-test("the tracking dashboard applies the five-click day rule", async () => {
+test("the tracking dashboard reads every wallet from the protected Duello backend", async () => {
   const view = await source("src/tracking-view.ts");
 
-  assert.match(view, /Math\.floor\(link\.clickCount \/ clicksPerDay\)/);
-  assert.match(view, /\$\{clicksPerDay\} clics = 1 jour/);
-  assert.match(view, /\/t\/\$\{encodeURIComponent\(slug\)\}/);
+  assert.match(view, /invoke<DuelloTrackingSnapshot>\("duello_bank_snapshot"/);
+  assert.match(view, /hasRemoteAuth\(\)/);
+  assert.match(view, /wallets\.map\(\(wallet\)/);
+  assert.match(view, /wallet\.clickCount/);
+  assert.match(view, /formatMoney\(wallet\.availableMinor, wallet\.currency\)/);
+  assert.match(view, /https:\/\/duello\.fr\/l\/\$\{encodeURIComponent\(referralCode\)\}/);
+  assert.match(view, /Solde disponible/);
+  assert.doesNotMatch(view, /create_tracking_link|5 clics = 1 jour/);
 });
 
 test("the server exposes protected management and public redirect routes", async () => {

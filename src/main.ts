@@ -25596,8 +25596,8 @@ const renderChatFirstShell = () => {
           ${isRemoteMode() ? `<button type="button" id="socialToggle" class="${activeView === "social" ? "active" : ""}" title="Vues quotidiennes des comptes Instagram et TikTok" ${activeView === "social" ? 'aria-current="page"' : ""}>
             <span class="chat-context-icon"><i data-lucide="clapperboard"></i></span><span class="chat-context-copy"><strong>Réseaux sociaux</strong><small>Vues par jour · IG & TikTok</small></span>
           </button>` : ""}
-          ${isRemoteMode() ? `<button type="button" id="trackingToggle" class="${activeView === "tracking" ? "active" : ""}" title="Liens de tracking Duello" ${activeView === "tracking" ? 'aria-current="page"' : ""}>
-            <span class="chat-context-icon"><i data-lucide="route"></i></span><span class="chat-context-copy"><strong>Tracking</strong><small>5 clics · 1 jour</small></span>
+          ${isRemoteMode() ? `<button type="button" id="trackingToggle" class="${activeView === "tracking" ? "active" : ""}" title="Comptes, tracking et soldes Duello" ${activeView === "tracking" ? 'aria-current="page"' : ""}>
+            <span class="chat-context-icon"><i data-lucide="route"></i></span><span class="chat-context-copy"><strong>Tracking</strong><small>Comptes · clics · soldes</small></span>
           </button>` : ""}
           ${isRemoteMode() ? `<button type="button" id="duelloBankToggle" class="${activeView === "duello-bank" ? "active" : ""}" title="Créditer et suivre les portefeuilles Duello" ${activeView === "duello-bank" ? 'aria-current="page"' : ""}>
             <span class="chat-context-icon"><i data-lucide="landmark"></i></span><span class="chat-context-copy"><strong>Banque Duello</strong><small>Crédits · Stripe Connect</small></span>
