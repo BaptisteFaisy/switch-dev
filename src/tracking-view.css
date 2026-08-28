@@ -83,12 +83,17 @@
 .tracking-table-card td > strong { color: #fff; font: 650 11px var(--font-head); }
 .tracking-table-card td > small { margin-left: 7px; color: #686868; font: 9px var(--font-mono); }
 .tracking-table-card code { color: #bdbdbd; font: 9px var(--font-mono); }
+.tracking-personal-link { display: inline-flex; max-width: 330px; align-items: center; gap: 7px; color: #bdbdbd; text-decoration: none; }
+.tracking-personal-link code { overflow: hidden; text-overflow: ellipsis; }
+.tracking-personal-link svg { width: 12px; height: 12px; flex: 0 0 auto; }
+.tracking-personal-link:hover, .tracking-personal-link:hover code { color: #fff; }
 .tracking-user { display: flex; align-items: center; gap: 9px; }
 .tracking-user > span:last-child { display: grid; gap: 3px; }
 .tracking-user strong { color: #fff; font: 650 10px var(--font-head); }
 .tracking-user small { color: #707070; font-size: 8px; }
 .tracking-avatar { display: grid; width: 34px; height: 34px; flex: 0 0 auto; place-items: center; border: 1px solid #303030; border-radius: 50%; color: #fff; background: #111; font: 700 9px var(--font-head); }
 .tracking-day-pill { display: inline-flex; padding: 5px 9px; border: 1px solid #343434; border-radius: 999px; color: #fff; background: #121212; font: 650 9px var(--font-head); }
+.tracking-balance { display: inline-flex; padding: 5px 9px; border: 1px solid #343434; border-radius: 999px; color: #fff; background: #121212; font: 650 10px var(--font-head); font-variant-numeric: tabular-nums; }
 .tracking-row-actions { display: flex; justify-content: flex-end; gap: 5px; }
 .tracking-row-actions button, .tracking-row-actions a { width: 28px; height: 28px; }
 .tracking-empty { display: grid; min-height: 215px; place-items: center; align-content: center; gap: 7px; color: #777; text-align: center; }
@@ -111,6 +116,27 @@
 .tracking-rule-card > button { display: flex; width: 100%; min-height: 40px; align-items: center; justify-content: center; gap: 8px; margin-top: 22px; padding: 0 14px; border: 1px solid #303030; border-radius: 999px; color: #d0d0d0; background: #111; cursor: pointer; font: 650 10px var(--font-head); letter-spacing: 0; text-transform: none; }
 .tracking-rule-card > button:hover { color: #000; border-color: #fff; background: #fff; }
 .tracking-rule-card > button svg { width: 13px; height: 13px; }
+.tracking-rule-card > a { display: flex; width: 100%; min-height: 40px; align-items: center; justify-content: center; gap: 8px; margin-top: 22px; padding: 0 14px; border: 1px solid #303030; border-radius: 999px; color: #d0d0d0; background: #111; font: 650 10px var(--font-head); text-decoration: none; }
+.tracking-rule-card > a:hover { color: #000; border-color: #fff; background: #fff; }
+.tracking-rule-card > a svg { width: 13px; height: 13px; }
+.tracking-source-summary { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding: 10px 0; border-top: 1px solid var(--line); color: #777; font-size: 9px; }
+.tracking-source-summary strong { color: #fff; font: 650 12px var(--font-head); font-variant-numeric: tabular-nums; }
+
+.tracking-locked { min-height: 420px; place-items: center; align-content: center; color: #777; text-align: center; }
+.tracking-locked > h1 { margin: 8px 0 0; color: #fff; font: 650 clamp(25px, 3vw, 36px)/1.08 var(--font-head); }
+.tracking-locked > p { max-width: 580px; margin: 8px auto 18px; color: #858585; font-size: 11px; line-height: 1.55; }
+.tracking-state-icon { display: grid; width: 48px; height: 48px; margin-bottom: 6px; place-items: center; border: 1px solid #303030; border-radius: 50%; color: #fff; background: #101010; }
+.tracking-state-icon svg { width: 19px; height: 19px; }
+.tracking-admin-unlock { display: grid; width: min(100%, 540px); gap: 13px; margin-top: 6px; padding: 18px; border: 1px solid var(--line); border-radius: 12px; background: #0b0b0b; text-align: left; }
+.tracking-admin-unlock > div { display: flex; align-items: center; gap: 10px; }
+.tracking-admin-unlock > div > svg { width: 18px; height: 18px; flex: 0 0 auto; color: #fff; }
+.tracking-admin-unlock > div > span { display: grid; gap: 3px; }
+.tracking-admin-unlock strong { color: #fff; font: 650 11px var(--font-head); }
+.tracking-admin-unlock small { color: #777; font-size: 9px; line-height: 1.45; }
+.tracking-admin-unlock label { display: grid; gap: 7px; color: #888; font: 650 8px var(--font-head); letter-spacing: 0.09em; text-transform: uppercase; }
+.tracking-admin-unlock input { width: 100%; height: 42px; padding: 0 12px; border: 1px solid #303030; border-radius: 9px; outline: none; color: #fff; background: #050505; font: 11px var(--font-body); }
+.tracking-admin-unlock input:focus { border-color: #777; box-shadow: 0 0 0 3px rgba(255,255,255,.06); }
+.tracking-admin-unlock .tool-button { min-height: 42px; justify-content: center; }
 
 .tracking-modal-backdrop { position: fixed; z-index: 90; inset: 0; display: grid; padding: 20px; place-items: center; background: rgba(0, 0, 0, 0.78); backdrop-filter: blur(8px); }
 .tracking-modal { position: relative; width: min(100%, 455px); padding: 28px; border: 1px solid #313131; border-radius: 16px; background: #0b0b0b; box-shadow: 0 24px 80px rgba(0, 0, 0, 0.58); }
