@@ -642,6 +642,20 @@ fn ensure_freebuff_goal_skill(home: &Path) -> io::Result<()> {
     crate::fs_util::atomic_write(&path, FREEBUFF_GOAL_SKILL)
 }
 
+/// Modele Freebuff effectivement actif sur le home, lu dans `settings.json`
+/// du canal manicode (cle `freebuffModel`). Le binaire valide puis normalise
+/// le modele demande contre son propre catalogue au demarrage : comparer la
+/// valeur relue a celle demandee permet de detecter une normalisation.
+/// `None` si la cle est absente (le TUI applique alors son defaut).
+pub fn freebuff_active_model(home: &Path) -> Option<String> {
+    read_json(&freebuff_config_dir(home).join("settings.json"))?
+        .get("freebuffModel")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .map(ToString::to_string)
+}
+
 /// Ajoute le serveur MCP de goals a la configuration globale du home Freebuff.
 /// Le bearer reste une reference a l'environnement du processus et n'est
 /// jamais persiste sur disque.
@@ -999,6 +1013,39 @@ mod tests {
         assert!(agents.contains("global 200-agent user-visible budget"));
         assert!(agents.contains("file-picker` then `file-lister"));
         assert!(agents.contains("at most 16 visible agents concurrently"));
+        let _ = fs::remove_dir_all(home);
+    }
+
+    /// Le modele actif est relu depuis `settings.json` du canal manicode :
+    /// c'est la valeur effective du TUI (le binaire peut l'avoir normalisee
+    /// au demarrage), pas le modele demande cote Switch.
+    #[test]
+    fn freebuff_active_model_is_read_back_from_the_manicode_settings() {
+        let home = scratch("freebuff-active-model");
+        let config = freebuff_config_dir(&home);
+        fs::create_dir_all(&config).unwrap();
+
+        // Cle absente : le TUI applique son defaut.
+        fs::write(config.join("settings.json"), r#"{"mode": "DEFAULT"}"#).unwrap();
+        assert_eq!(freebuff_active_model(&home), None);
+
+        // Valeur normalisee par le binaire, differente de celle demandee.
+        fs::write(
+            config.join("settings.json"),
+            r#"{"freebuffModel": "deepseek/deepseek-v4-flash"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            freebuff_active_model(&home),
+            Some("deepseek/deepseek-v4-flash".to_string())
+        );
+
+        // Cle vide ou fichier absent : considere comme non epingle.
+        fs::write(config.join("settings.json"), r#"{"freebuffModel": "  "}"#).unwrap();
+        assert_eq!(freebuff_active_model(&home), None);
+        fs::remove_file(config.join("settings.json")).unwrap();
+        assert_eq!(freebuff_active_model(&home), None);
+
         let _ = fs::remove_dir_all(home);
     }
 

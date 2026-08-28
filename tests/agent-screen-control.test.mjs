@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import {
   MAX_AGENT_SCREEN_RESPONSE_BYTES,
   MAX_SCREENSHOT_BASE64,
@@ -15,6 +16,7 @@ import {
 import {
   SCREEN_TOOLS,
   handleMcpRequest,
+  resolveScreenBridge,
   screenSessionIdFromEnvironment,
 } from "../scripts/cst-agent-screen-mcp.mjs";
 
@@ -45,7 +47,11 @@ test("les demandes ecran valides sont acceptees pour chaque action", () => {
     { action: "scroll", amount: -2, x: 400, y: 300 },
     { action: "windows" },
     { action: "open", command: 'chrome "https://www.google.com/search?q=meteo+Paris"' },
+    { action: "open", command: "powershell -File helper.ps1", hidden: true },
     { action: "screenshot", window: 123456 },
+    { action: "uia_fields", window: 123456 },
+    { action: "uia_fields", window: 123456, index: 2 },
+    { action: "type", text: "Bonjour", window: 555, mode: "uia", uiaIndex: 1 },
     { action: "locate", text: "Type a message" },
     { action: "locate", text: "Reprendre", window: 555 },
     { action: "locate", text: "x", index: 2 },
@@ -107,6 +113,13 @@ test("les demandes ecran invalides sont refusees", () => {
     validRequest({ action: "locate", text: "x", index: 51 }),
     validRequest({ action: "locate", text: "x", index: "deux" }),
     validRequest({ action: "locate", text: "x", window: 0 }),
+    validRequest({ action: "uia_fields" }),
+    validRequest({ action: "uia_fields", window: 0 }),
+    validRequest({ action: "uia_fields", window: 555, index: -1 }),
+    validRequest({ action: "uia_fields", window: 555, index: 100 }),
+    validRequest({ action: "type", text: "x", mode: "uia" }),
+    validRequest({ action: "type", text: "x", window: 555, mode: "uia", uiaIndex: -1 }),
+    validRequest({ action: "type", text: "x", window: 555, mode: "uia", uiaIndex: 100 }),
     validRequest({ action: "type", text: "x", window: 555, mode: "autre" }),
     validRequest({ action: "press", key: "Tab", window: 555, mode: "autre" }),
   ];
@@ -131,6 +144,17 @@ test("les touches autorisees ont toutes une sequence de codes virtuels Windows",
   assert.ok(SCREEN_ACTIONS.size >= 13);
   assert.ok(SCREEN_ACTIONS.has("arm") && SCREEN_ACTIONS.has("disarm"));
   assert.ok(SCREEN_ACTIONS.has("windows") && SCREEN_ACTIONS.has("open"));
+});
+
+test("l'action open accepte hidden : helper console sans aucune fenetre", () => {
+  const request = validateAgentScreenRequest(
+    validRequest({ action: "open", command: "powershell -File helper.ps1", hidden: true }),
+  );
+  assert.equal(request.hidden, true);
+  const plain = validateAgentScreenRequest(validRequest({ action: "open", command: "notepad" }));
+  assert.equal(plain.hidden, undefined);
+  const core = readFileSync(new URL("../scripts/agent-screen-core.mjs", import.meta.url), "utf8");
+  assert.match(core, /0x08000000/); // CREATE_NO_WINDOW
 });
 
 test("le texte sensible n'est jamais saisissable par le chat", () => {
@@ -178,6 +202,7 @@ test("les confirmations Windows locales couvrent les actions mutantes, pas l'arm
   assert.equal(requiresScreenApproval("press", "Win"), false);
   assert.equal(requiresScreenApproval("screenshot"), false);
   assert.equal(requiresScreenApproval("locate"), false);
+  assert.equal(requiresScreenApproval("uia_fields"), false);
   assert.equal(requiresScreenApproval("move"), false);
   assert.equal(requiresScreenApproval("scroll"), false);
 });
@@ -255,6 +280,13 @@ test("le script PowerShell compile les actions et le mapping des touches", () =>
   assert.ok(script.includes("AttachThreadInput"));
   assert.ok(script.includes("TypeFocusSteal"));
   assert.ok(script.includes("PressFocusSteal"));
+  // Saisie UI Automation : zero focus via ValuePattern + activation WM_GETOBJECT.
+  assert.ok(script.includes("UIAutomationClient"));
+  assert.ok(script.includes("ValuePattern"));
+  assert.ok(script.includes("Get-UiaValueElements"));
+  assert.ok(script.includes("SendGetObject"));
+  assert.ok(script.includes("ChromiumChildHandles"));
+  assert.ok(script.includes("'uia_fields'"));
   assert.ok(script.includes("ScrollWindowClient"));
   // Repérage visuel : OCR natif + dispatch locate.
   assert.ok(script.includes("Find-OcrCandidates"));
@@ -311,12 +343,71 @@ test("le serveur MCP ecran expose ses outils et leur schema", async () => {
   assert.ok(locate);
   assert.deepEqual(locate.inputSchema.required, ["text"]);
   assert.equal(locate.inputSchema.properties.index.maximum, 50);
+  const uiaFields = tools.result.tools.find((tool) => tool.name === "screen_uia_fields");
+  assert.ok(uiaFields);
+  assert.deepEqual(uiaFields.inputSchema.required, ["window"]);
+  const screenType = tools.result.tools.find((tool) => tool.name === "screen_type");
+  assert.deepEqual(screenType.inputSchema.properties.mode.enum, ["messages", "focus", "uia"]);
+  assert.ok(screenType.inputSchema.properties.uiaIndex.maximum === 99);
   const open = tools.result.tools.find((tool) => tool.name === "screen_open");
   assert.deepEqual(open.inputSchema.required, ["command"]);
   assert.ok(open.description.includes("SANS prendre le focus"));
   // Le parametre window est accepte sur les actions ciblables.
   assert.ok(click.inputSchema.properties.window);
   assert.ok(!tools.result.tools.find((tool) => tool.name === "screen_move").inputSchema.properties.window);
+});
+
+test("le pont ecran bascule sur le transport local quand le pont VPS est absent", () => {
+  const local = resolveScreenBridge(undefined, () => false);
+  assert.equal(local.args.length, 1);
+  assert.ok(local.args[0].endsWith("agent-screen-client.mjs"));
+  assert.ok(local.file.endsWith("node.exe") || local.file === process.execPath || local.file.includes("node"));
+  const remote = resolveScreenBridge("C:/pont/cst-connect-windows-screen", () => true);
+  assert.equal(remote.file, "C:/pont/cst-connect-windows-screen");
+  assert.deepEqual(remote.args, []);
+});
+
+test("screen_open transmet hidden au relais : helper sans aucune fenetre", async () => {
+  let received = null;
+  const result = await handleMcpRequest(
+    {
+      jsonrpc: "2.0",
+      id: 9,
+      method: "tools/call",
+      params: {
+        name: "screen_open",
+        arguments: { command: "powershell -File helper.ps1", hidden: true },
+      },
+    },
+    {
+      screenSessionId: sessionId,
+      invoke: async (request) => {
+        received = request;
+        return { ok: true, action: "open" };
+      },
+    }
+  );
+  assert.equal(result.result.isError, undefined);
+  assert.equal(received.hidden, true);
+  assert.equal(received.action, "open");
+  // Sans hidden : la cle n'est pas ajoutee.
+  let plain = null;
+  await handleMcpRequest(
+    {
+      jsonrpc: "2.0",
+      id: 10,
+      method: "tools/call",
+      params: { name: "screen_open", arguments: { command: "notepad" } },
+    },
+    {
+      screenSessionId: sessionId,
+      invoke: async (request) => {
+        plain = request;
+        return { ok: true, action: "open" };
+      },
+    }
+  );
+  assert.equal(plain.hidden, undefined);
 });
 
 test("le serveur MCP retourne la capture en image avec l'echelle", async () => {

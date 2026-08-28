@@ -51,7 +51,9 @@ const SCRCPY_EMBED_ORIGIN = "http://127.0.0.1:8000";
 const SCRCPY_EMBED_PATH = "/embed.html";
 const SCRCPY_EMBED_URL_PREFIX = "http://127.0.0.1:8000/embed.html?device=";
 const SCRCPY_EMBED_LOAD_TIMEOUT_MS = 12_000;
-const WS_SCRCPY_START_TIMEOUT_MS = 25_000;
+// Couvre aussi la première installation automatique (téléchargement d'environ
+// 80 Mo + extraction) déclenchée par le connecteur Windows.
+const WS_SCRCPY_START_TIMEOUT_MS = 150_000;
 
 let snapshot: AndroidDevicesSnapshot | null = null;
 let snapshotSignature = "";
@@ -447,7 +449,7 @@ const renderAndroidEmbed = (): string => {
       ? `<div class="android-control-service-error" role="alert"><i data-lucide="circle-alert"></i><span>${escapeHtml(wsScrcpyServiceError)}</span></div>`
       : ""}
     ${snapshot && !snapshot.wsScrcpyAvailable && serviceState !== "online"
-      ? `<div class="android-control-service-help" role="note"><i data-lucide="info"></i><span>ws-scrcpy-web n’est pas installé ou <code>CST_WS_SCRCPY_PATH</code> n’est pas configuré sur le PC Windows.</span></div>`
+      ? `<div class="android-control-service-help" role="note"><i data-lucide="info"></i><span>ws-scrcpy-web n’est pas encore installé — il sera téléchargé et installé automatiquement au premier démarrage du service.</span></div>`
       : ""}
     ${!isOpen
       ? `<div class="android-control-embed-empty">
@@ -595,12 +597,14 @@ const startWsScrcpyService = async (options: AndroidControlUiOptions): Promise<v
     return;
   }
   if (snapshot?.wsScrcpyAvailable !== true) {
-    wsScrcpyServiceState = "error";
-    wsScrcpyServiceError =
-      "ws-scrcpy-web est introuvable sur le PC Windows. Installez-le ou configurez CST_WS_SCRCPY_PATH.";
-    feedback = { tone: "error", message: wsScrcpyServiceError };
-    options.rerender();
-    return;
+    // Premier lancement possible : le connecteur Windows provisionne
+    // ws-scrcpy-web automatiquement (téléchargement vérifié par SHA-256)
+    // si aucun lanceur n'est configuré ni installé.
+    feedback = {
+      tone: "warning",
+      message:
+        "ws-scrcpy-web n'est pas encore installé sur le PC Windows — téléchargement et installation automatiques au premier démarrage.",
+    };
   }
 
   wsScrcpyServiceState = "starting";

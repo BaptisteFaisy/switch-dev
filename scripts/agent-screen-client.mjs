@@ -1,4 +1,5 @@
 import { createConnection } from "node:net";
+import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 import {
@@ -19,7 +20,39 @@ const readStdin = async () => {
   return Buffer.concat(chunks).toString("utf8");
 };
 
-export const requestAgentScreen = (payload) => new Promise((resolveRequest, rejectRequest) => {
+const BROKER_SCRIPT = fileURLToPath(new URL("./agent-screen-broker.mjs", import.meta.url));
+
+const probeBroker = () => new Promise((done) => {
+  const socket = createConnection(AGENT_SCREEN_PIPE);
+  socket.once("connect", () => { socket.destroy(); done(true); });
+  socket.once("error", () => done(false));
+});
+
+// Le controle d'ecran doit etre utilisable par TOUS les chats, sans demarrage
+// manuel : si le relais ne tourne pas, il est lance en arriere-plan (cache,
+// sans console — rien a fermer ensuite) puis attendu. Une seconde instance
+// s'arrete d'elle-meme si le pipe est deja pris (mono-instance par conception).
+export const ensureBrokerRunning = async ({ spawnImpl = spawn, waitMs = 8000 } = {}) => {
+  if (await probeBroker()) return;
+  try {
+    const child = spawnImpl(process.execPath, [BROKER_SCRIPT], {
+      detached: true,
+      stdio: "ignore",
+      windowsHide: true,
+    });
+    child.unref?.();
+  } catch {
+    // La sonde ci-dessous arbitre : si le broker repond, on continue.
+  }
+  const deadline = Date.now() + waitMs;
+  while (Date.now() < deadline) {
+    await new Promise((resolveWait) => setTimeout(resolveWait, 250));
+    if (await probeBroker()) return;
+  }
+  throw new Error("Le relais ecran Switch n'a pas pu demarrer automatiquement.");
+};
+
+const requestAgentScreenOnce = (payload) => new Promise((resolveRequest, rejectRequest) => {
   const socket = createConnection(AGENT_SCREEN_PIPE);
   let response = "";
   let settled = false;
@@ -50,6 +83,20 @@ export const requestAgentScreen = (payload) => new Promise((resolveRequest, reje
   });
   socket.once("connect", () => socket.write(`${payload}\n`));
 });
+
+// Demande publique : si le relais est absent (premier appel d'un chat, PC
+// redemarre), le broker est demarre automatiquement puis la demande repartie
+// une seule fois. Les depassements de temps ne sont jamais retentes.
+export const requestAgentScreen = async (payload, { autoStart = true } = {}) => {
+  try {
+    return await requestAgentScreenOnce(payload);
+  } catch (error) {
+    const message = String(error instanceof Error ? error.message : error);
+    if (!autoStart || !message.includes("indisponible")) throw error;
+    await ensureBrokerRunning();
+    return requestAgentScreenOnce(payload);
+  }
+};
 
 export const runAgentScreenClient = async () => {
   const raw = await readStdin();

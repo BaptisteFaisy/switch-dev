@@ -1189,6 +1189,11 @@ async function remoteInvoke<T>(command: string, args: Record<string, any>): Prom
         "GET",
         `/api/chat/models?accountId=${encodeURIComponent(String(args.accountId))}`,
       );
+    case "freebuff_active_model":
+      return api<T>(
+        "GET",
+        `/api/accounts/freebuff-active-model?codexHome=${encodeURIComponent(String(args.codexHome))}`,
+      );
     case "start_chat_turn":
       return startRemoteChatTurn<T>(args);
     case "process_voice_input":

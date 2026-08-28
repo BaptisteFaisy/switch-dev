@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 
@@ -127,6 +128,20 @@ export const SCREEN_TOOLS = [
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
   {
+    name: "screen_uia_fields",
+    description:
+      "Liste les champs editables (UI Automation ValuePattern) d'une fenetre cible : index, nom, type, valeur actuelle. L'activation accessibilite est envoyee automatiquement (WM_GETOBJECT) — pour les apps Chromium/WebView2. Lecture seule, aucune confirmation. Sert a choisir uiaIndex pour screen_type mode 'uia' (saisie sans aucun focus).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        window: windowProperty,
+        index: { type: "integer", minimum: 0, maximum: 99, description: "Selectionne et renvoie le detail du champ a cet index." },
+      },
+      required: ["window"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "screen_locate",
     description:
       "Repere un texte a l'ecran (ou dans une fenetre cible via window) par OCR Windows et renvoie ses coordonnees de clic PRETES (clickX/clickY dans le meme espace que screen_click : ecran sans window, CLIENT avec window). Selectionnez un candidat avec index si plusieurs correspondent. Lecture seule, aucune confirmation.",
@@ -144,11 +159,12 @@ export const SCREEN_TOOLS = [
   {
     name: "screen_open",
     description:
-      "Lance une application en arriere-plan SANS prendre le focus (fenetre creee reduite et non activee). La commande est lancee directement par CreateProcess, sans intermediaire shell. Exemple : chrome \"https://www.google.com/search?q=meteo+Paris\". Utiliser ensuite screen_windows pour retrouver la fenetre cible et screen_snapshot pour la voir.",
+      "Lance une application en arriere-plan SANS prendre le focus (fenetre creee reduite et non activee). La commande est lancee directement par CreateProcess, sans intermediaire shell. Exemple : chrome \"https://www.google.com/search?q=meteo+Paris\". Utiliser ensuite screen_windows pour retrouver la fenetre cible et screen_snapshot pour la voir. Avec hidden:true, lance un helper console sans AUCUNE fenetre (rien a fermer ensuite).",
     inputSchema: {
       type: "object",
       properties: {
         command: { type: "string", maxLength: 512, description: "Ligne de commande complete (executable + arguments), sans caracteres de controle." },
+        hidden: { type: "boolean", description: "Si true : aucune fenetre (helper console invisible, pour scripts/scripts d'aide)." },
       },
       required: ["command"],
       additionalProperties: false,
@@ -256,7 +272,8 @@ export const SCREEN_TOOLS = [
       properties: {
         text: { type: "string", description: "Texte non sensible a saisir (2000 caracteres max)." },
         window: windowProperty,
-        mode: { type: "string", enum: ["messages", "focus"], description: "Strategie de saisie cible : messages (defaut) ou focus (universel)." },
+        mode: { type: "string", enum: ["messages", "focus", "uia"], description: "Strategie : messages (defaut), focus (universel, 200 ms) ou uia (ValuePattern, zero focus — exige screen_uia_fields pour choisir le champ)." },
+        uiaIndex: { type: "integer", minimum: 0, maximum: 99, description: "Index du champ cible pour mode 'uia' (voir screen_uia_fields)." },
       },
       required: ["text"],
       additionalProperties: false,
@@ -328,6 +345,7 @@ const TOOL_ACTIONS = new Map([
   ["screen_scroll", "scroll"],
   ["screen_windows", "windows"],
   ["screen_locate", "locate"],
+  ["screen_uia_fields", "uia_fields"],
   ["screen_open", "open"],
   ["browser_list", "browser"],
   ["browser_screenshot", "browser"],
@@ -359,12 +377,13 @@ const TOOL_ARGUMENT_KEYS = new Map([
   ["screen_click", new Set(["x", "y", "window"])],
   ["screen_double_click", new Set(["x", "y", "window"])],
   ["screen_right_click", new Set(["x", "y", "window"])],
-  ["screen_type", new Set(["text", "window", "mode"])],
+  ["screen_type", new Set(["text", "window", "mode", "uiaIndex"])],
   ["screen_press", new Set(["key", "window", "mode"])],
   ["screen_scroll", new Set(["amount", "x", "y", "window"])],
   ["screen_windows", new Set()],
   ["screen_locate", new Set(["text", "index", "window"])],
-  ["screen_open", new Set(["command"])],
+  ["screen_uia_fields", new Set(["window", "index"])],
+  ["screen_open", new Set(["command", "hidden"])],
   ["browser_list", new Set(["window", "cdpPort"])],
   ["browser_screenshot", new Set(["window", "cdpPort"])],
   ["browser_navigate", new Set(["window", "cdpPort", "url"])],
@@ -389,11 +408,25 @@ const boundedToolArguments = (name, value) => {
   return Object.fromEntries(Object.entries(args).filter(([key]) => allowed.has(key)));
 };
 
-export const invokeWindowsScreen = (request, {
-  bridge = process.env.CST_WINDOWS_AGENT_SCREEN_BRIDGE || "/usr/local/bin/cst-connect-windows-screen",
-  spawnImpl = spawn,
-} = {}) => new Promise((resolveRequest, rejectRequest) => {
-  const child = spawnImpl(bridge, [], { stdio: ["pipe", "pipe", "ignore"] });
+const LOCAL_CLIENT_SCRIPT = resolve(fileURLToPath(import.meta.url), "..", "agent-screen-client.mjs");
+const DEFAULT_REMOTE_BRIDGE = "/usr/local/bin/cst-connect-windows-screen";
+
+// Sur le serveur VPS, le pont securise existe et relaie vers le PC distant.
+// Sur le PC Windows local (chats de l'application), ce pont est absent : le
+// transport est alors le client du pipe local, qui demarre lui-meme le broker
+// s'il ne tourne pas. Les deux chemins produisent le meme contrat une ligne
+// JSON sur stdout.
+export const resolveScreenBridge = (
+  bridgePath = process.env.CST_WINDOWS_AGENT_SCREEN_BRIDGE || DEFAULT_REMOTE_BRIDGE,
+  exists = existsSync,
+) => (bridgePath && exists(bridgePath)
+  ? { file: bridgePath, args: [] }
+  : { file: process.execPath, args: [LOCAL_CLIENT_SCRIPT] });
+
+export const invokeWindowsScreen = (request, { bridge, spawnImpl = spawn } = {}) => {
+  const target = resolveScreenBridge(bridge);
+  return new Promise((resolveRequest, rejectRequest) => {
+  const child = spawnImpl(target.file, target.args, { stdio: ["pipe", "pipe", "ignore"] });
   let stdout = "";
   let settled = false;
   const finishError = (message) => {
@@ -427,7 +460,8 @@ export const invokeWindowsScreen = (request, {
     }
   });
   child.stdin.end(`${JSON.stringify(request)}\n`);
-});
+  });
+};
 
 const rpcError = (id, code, message) => ({ jsonrpc: "2.0", id, error: { code, message } });
 
@@ -436,6 +470,18 @@ const rpcError = (id, code, message) => ({ jsonrpc: "2.0", id, error: { code, me
 const resultContent = (result) => {
   const parts = [];
   const { screenshot: _screenshot, ...summary } = result;
+  if (result.ok && result.fields && Array.isArray(result.fields)) {
+    // Resultat de screen_uia_fields : liste lisible des champs editables.
+    const lines = [
+      `Champs editables UIA de la fenetre ${result.window} : ${result.fields.length}`,
+      ...result.fields.slice(0, 20).map((f) =>
+        `[${f.index}] « ${(f.name || "(sans nom)").slice(0, 50)} » type=${f.type} value=« ${(f.value || "").slice(0, 60)} »`),
+      result.selected ? `Selectionne (index ${result.selected.index})` : "",
+      "Pour ecrire dans un champ sans aucun focus : screen_type mode 'uia' avec uiaIndex et la meme window.",
+    ].filter(Boolean);
+    parts.push({ type: "text", text: lines.join("\n") });
+    return { content: parts };
+  }
   if (result.ok && result.candidates && Array.isArray(result.candidates)) {
     // Resultat de screen_locate : liste lisible des candidats + candidat choisi.
     const space = result.space === "client"

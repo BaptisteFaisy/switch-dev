@@ -482,10 +482,12 @@ import {
   ChevronLeft,
   ChevronRight,
   ChevronUp,
+  CornerDownLeft,
   Circle,
   CircleAlert,
   CircleCheck,
   CircleDollarSign,
+  CircleSlash,
   CircleX,
   Archive,
   Cloud,
@@ -584,6 +586,7 @@ import {
   MessageCircleQuestion,
   MessageCircle,
   MessageSquare,
+  MessageSquareReply,
   MessageSquarePlus,
   MessageSquareText,
   MessageSquareWarning,
@@ -617,6 +620,7 @@ import {
   UserX,
   Zap,
   Gift,
+  HardDrive,
   Landmark,
   createElement as createLucideElement,
   type IconNode,
@@ -735,6 +739,28 @@ const loadScheduledChatsViewModule = (): Promise<ScheduledChatsViewModule> => {
       });
   }
   return scheduledChatsViewModulePromise;
+};
+
+type FreebuffRelayViewModule = typeof import("./freebuff-relay-view");
+
+let freebuffRelayViewModule: FreebuffRelayViewModule | null = null;
+let freebuffRelayViewModulePromise: Promise<FreebuffRelayViewModule> | null = null;
+
+const loadFreebuffRelayViewModule = (): Promise<FreebuffRelayViewModule> => {
+  if (freebuffRelayViewModule) return Promise.resolve(freebuffRelayViewModule);
+  if (!freebuffRelayViewModulePromise) {
+    freebuffRelayViewModulePromise = import("./freebuff-relay-view")
+      .then((module) => {
+        freebuffRelayViewModule = module;
+        return module;
+      })
+      .catch((error) => {
+        freebuffRelayViewModulePromise = null;
+        scheduleStaleChunkRecovery(error);
+        throw error;
+      });
+  }
+  return freebuffRelayViewModulePromise;
 };
 
 type SkillsViewModule = typeof import("./skills-view");
@@ -1755,6 +1781,7 @@ type AppView =
   | "tasks"
   | "prompts"
   | "scheduled-chat"
+  | "freebuff-relay"
   | "mail"
   | "pool"
   | "limits"
@@ -1800,6 +1827,7 @@ const lazyModuleViews = new Set<AppView>([
   "prompts",
   "history",
   "scheduled-chat",
+  "freebuff-relay",
   "mail",
   "skills",
   "forum",
@@ -3095,6 +3123,7 @@ const lucideIcons = {
   LogIn,
   Mail,
   MessageSquare,
+  MessageSquareReply,
   MessageSquarePlus,
   AppWindow,
   ArrowLeft,
@@ -3113,10 +3142,12 @@ const lucideIcons = {
   ChevronLeft,
   ChevronRight,
   ChevronUp,
+  CornerDownLeft,
   Circle,
   CircleAlert,
   CircleCheck,
   CircleDollarSign,
+  CircleSlash,
   CircleX,
   Archive,
   Cloud,
@@ -3235,6 +3266,7 @@ const lucideIcons = {
   UserX,
   Zap,
   Gift,
+  HardDrive,
   Landmark,
 };
 
@@ -7172,6 +7204,15 @@ const setActiveView = (view: AppView) => {
       });
     return;
   }
+  if (view === "freebuff-relay" && !freebuffRelayViewModule) {
+    void loadFreebuffRelayViewModule()
+      .then(() => setActiveView(view))
+      .catch((error) => {
+        statusText = `Relais Freebuff indisponible : ${String(error)}`;
+        render();
+      });
+    return;
+  }
   if (view === "skills" && !skillsViewModule) {
     void loadSkillsViewModule()
       .then(() => setActiveView(view))
@@ -8934,6 +8975,9 @@ const findFreebuffDiscussionForTerminal = async (
   return null;
 };
 
+// Applique un nouveau modele Freebuff au terminal : le modele est sauvegarde
+// sur le compte, la config `freebuffModel` reecrite, puis le TUI redemarre sur
+// la conversation en cours (le CLI Freebuff ne lit le modele qu'au demarrage).
 const switchFreebuffTerminalAccount = async (
   session: TerminalSession,
   targetAccountId: string,
@@ -8975,6 +9019,62 @@ const discussionHasRunningTurn = (discussion: DiscussionSummary): boolean =>
       && pane.discussion.sessionId === discussion.sessionId
       && chatTurnIsBusy(pane.turn?.status),
   );
+
+// Applique un nouveau modele Freebuff au terminal : le modele est sauvegarde
+// sur le compte, la config `freebuffModel` reecrite, puis le TUI redemarre sur
+// la conversation en cours (le CLI Freebuff ne lit le modele qu'au demarrage).
+const applyFreebuffTerminalModel = async (
+  session: TerminalSession,
+  model: string,
+): Promise<boolean> => {
+  const normalized = model.trim();
+  const account = accountById(session.accountId);
+  if (!account || accountProvider(account) !== "freebuff") {
+    throw new Error("ce terminal n'est pas un terminal Freebuff");
+  }
+  if (!normalized || normalized === accountModel(account)) return false;
+  if (terminalActivityStatus(session) === "running") {
+    const confirmed = window.confirm(
+      "Le terminal Freebuff est en train de travailler. Redémarrer maintenant pour appliquer le nouveau modèle ?",
+    );
+    if (!confirmed) return false;
+  }
+  statusText = `Application du modèle Freebuff ${normalized}…`;
+  render();
+  try {
+    account.model = normalized;
+    settings = await invoke<AppSettings>("save_settings", { settings });
+    await provisionAccountHome(account);
+    const discussion = await findFreebuffDiscussionForTerminal(session);
+    const folderPath = userEnvironmentPath(
+      discussion ? discussionFolderPath(discussion) : session.folderPath ?? session.workspacePath,
+    );
+    if (!folderPath) {
+      throw new Error("la conversation n'a pas d'environnement associé");
+    }
+    await closeTerminalSession(session.key);
+    if (discussion) {
+      discussion.folderPath = folderPath;
+      await launchFreebuffDiscussionTerminal(discussion, account, folderPath);
+    } else {
+      const fresh = await createNewTerminal(
+        account.id,
+        false,
+        null,
+        providerAgentId("freebuff"),
+        null,
+        folderPath,
+      );
+      if (!fresh || !fresh.running || fresh.ptyId === null) {
+        throw new Error("le nouveau terminal Freebuff n'a pas pu être créé");
+      }
+    }
+    statusText = `Modèle Freebuff appliqué : ${normalized}`;
+    return true;
+  } finally {
+    render();
+  }
+};
 
 // Deplacement persistant utilise par le drag-and-drop de la barre laterale.
 // Le backend reecrit le cwd (et relocalise la session Claude si necessaire),
@@ -16270,6 +16370,12 @@ function syncMobileChrome(): void {
       : String(privateMessageUnreadCount);
     messagingBadge.hidden = privateMessageUnreadCount === 0;
   }
+  const mailUnreadCount = gmailUnreadCount();
+  const mailBadge = chrome.querySelector<HTMLElement>("[data-gmail-nav-count]");
+  if (mailBadge) {
+    mailBadge.textContent = mailUnreadCount > 99 ? "99+" : String(mailUnreadCount);
+    mailBadge.hidden = mailUnreadCount === 0;
+  }
   const chatContext = activeView === "chat" || activeView === "discussions";
   chrome.classList.toggle("is-chat-context", chatContext);
   chrome.querySelectorAll<HTMLElement>(".m-tab[data-view]").forEach((tab) => {
@@ -16428,6 +16534,7 @@ function ensureMobileChrome(): void {
       <button class="m-tab" type="button" data-view="chat"><i data-lucide="messages-square"></i><span>Chats</span></button>
       <button class="m-tab" type="button" data-view="terminal"><i data-lucide="square-terminal"></i><span>Terminal</span></button>
       <button class="m-tab" type="button" data-view="messaging"><i data-lucide="mail"></i><span>Messages</span><b data-messaging-nav-count hidden></b></button>
+      <button class="m-tab" type="button" data-view="mail"><i data-lucide="inbox"></i><span>Mail</span><b data-gmail-nav-count hidden></b></button>
       <button class="m-tab" type="button" data-view="forum"><i data-lucide="messages-square"></i><span>Forum</span></button>
       <button class="m-tab" type="button" data-m="menu" aria-haspopup="menu" aria-expanded="false" aria-controls="mobileActionSheet"><i data-lucide="layout-grid"></i><span>Menu</span></button>
     </nav>
@@ -22430,6 +22537,8 @@ const appViewTitle = (view: AppView): string => {
       return "Bibliothèque de prompts";
     case "scheduled-chat":
       return "Chat planifié";
+    case "freebuff-relay":
+      return "Relais Freebuff";
     case "limits":
       return "Limites";
     case "dashboard":
@@ -22441,7 +22550,7 @@ const appViewTitle = (view: AppView): string => {
     case "freebuff-cloud":
       return "Freebuff Cloud";
     case "mail":
-      return "Boîte Gmail";
+      return "Boîte Mail";
     case "video":
       return "Studio IA";
     case "transcription":
@@ -23773,6 +23882,91 @@ const scheduledChatsPanelOptions = (): ScheduledChatsPanelOptions => ({
   defaultAccountId: selectedAccountId ?? settings?.defaultAccountId ?? null,
 });
 
+// --- Relais Freebuff ------------------------------------------------------
+// Un chat dont chaque message est transmis au TUI Freebuff ouvert (PTY) et
+// dont la sortie revient dans le fil. Le pont fournit au module la liste des
+// terminaux Freebuff pilotables, l'ecriture dans leur PTY et le flux de
+// sortie relaye depuis l'evenement `pty-data` (voir ci-dessous).
+let freebuffRelayPendingTarget: string | null = null;
+const freebuffRelayOutputListeners = new Set<(key: string, data: string) => void>();
+
+const openFreebuffRelayForTerminal = (key: string): void => {
+  freebuffRelayPendingTarget = key;
+  setActiveView("freebuff-relay");
+};
+
+const freebuffRelaySessions = (): Array<{
+  key: string;
+  title: string;
+  accountLabel: string;
+  accountId: string;
+  model: string;
+  ptyId: number | null;
+  running: boolean;
+}> => terminalSessions
+  .filter((session) => !session.loginOnly && !session.externalSync)
+  .filter((session) => accountProvider(accountById(session.accountId)) === "freebuff")
+  .map((session) => {
+    const account = accountById(session.accountId);
+    return {
+      key: session.key,
+      title: terminalTitle(session),
+      accountLabel: account?.label ?? session.accountId,
+      accountId: session.accountId,
+      model: accountModel(account),
+      ptyId: session.ptyId,
+      running: session.running,
+    };
+  });
+
+const freebuffRelayPanelOptions = () => ({
+  storage: accountScopedStorage,
+  pendingTargetKey: freebuffRelayPendingTarget,
+  bridge: {
+    sessions: freebuffRelaySessions,
+    // Les seuls identifiants acceptes par le validateur de modele freebuff.
+    models: () => [...FREEBUFF_MODEL_SUGGESTIONS],
+    write: async (ptyId: number, data: string): Promise<boolean> => {
+      try {
+        await invoke("write_terminal", { id: ptyId, data });
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    subscribeOutput: (listener: (key: string, data: string) => void) => {
+      freebuffRelayOutputListeners.add(listener);
+      return () => freebuffRelayOutputListeners.delete(listener);
+    },
+    applyModel: async (sessionKey: string, model: string) => {
+      const session = terminalSessions.find((candidate) => candidate.key === sessionKey);
+      if (!session) return { ok: false, error: "Terminal introuvable." };
+      try {
+        await applyFreebuffTerminalModel(session, model);
+        return { ok: true };
+      } catch (error) {
+        return { ok: false, error: String(error) };
+      }
+    },
+    // Modele effectivement actif sur le TUI, relu depuis le settings.json du
+    // canal manicode : permet de voir si le binaire a normalise le modele.
+    activeModel: async (sessionKey: string) => {
+      const session = terminalSessions.find((candidate) => candidate.key === sessionKey);
+      if (!session) return null;
+      const account = accountById(session.accountId);
+      if (!account || accountProvider(account) !== "freebuff") return null;
+      try {
+        return await invoke<string | null>("freebuff_active_model", {
+          codexHome: account.codexHome,
+        });
+      } catch {
+        return null;
+      }
+    },
+    onOpenTerminalView: () => setActiveView("terminal"),
+  },
+});
+
 const renderActiveAppPanel = (): string => {
   switch (activeView) {
     case "tutorial":
@@ -23791,6 +23985,8 @@ const renderActiveAppPanel = (): string => {
       return promptLibraryModule?.renderPromptLibraryPanel(accountScopedStorage) ?? "";
     case "scheduled-chat":
       return scheduledChatsViewModule?.renderScheduledChatsPanel(scheduledChatsPanelOptions()) ?? "";
+    case "freebuff-relay":
+      return freebuffRelayViewModule?.renderFreebuffRelayPanel(freebuffRelayPanelOptions()) ?? "";
     case "mail":
       return gmailModule?.renderGmailPanel() ?? "";
     case "limits":
@@ -24125,9 +24321,14 @@ const renderExpertTerminalPane = (session: TerminalSession, index: number): stri
   const workspaceLabel = workspaceBaseName(workspaceDetail);
   const accountSwitch = renderFreebuffTerminalAccountSwitch(session);
   const newChatButton = session.loginOnly ? "" : `<button type="button" class="expert-pane-new-chat" data-new-chat-terminal="${escapeAttr(session.key)}" title="Ouvrir un autre chat dans cet environnement" aria-label="Ouvrir un autre chat dans cet environnement"><i data-lucide="message-square-plus"></i></button>`;
+  // Le TUI Freebuff ne peut pas etre pilote par un prompt en argument : le
+  // bouton relais ouvre le chat dedie qui ecrit dans ce terminal.
+  const relayButton = !session.loginOnly && accountProvider(accountById(session.accountId)) === "freebuff"
+    ? `<button type="button" class="expert-pane-new-chat" data-relay-terminal="${escapeAttr(session.key)}" title="Discuter avec ce terminal Freebuff (relais)" aria-label="Discuter avec ce terminal Freebuff (relais)"><i data-lucide="message-square-reply"></i></button>`
+    : "";
   return `
     <article class="expert-terminal-pane ${session.key === activeTerminalKey ? "active" : ""} ${session.running ? "running" : ""} ${session.key === expertTerminalFullscreenKey ? "is-fullscreen" : ""} ${session.externalSync ? "has-external-notice" : ""}" data-expert-terminal-pane="${escapeAttr(session.key)}">
-      <header class="expert-terminal-pane-head ${accountSwitch ? "has-freebuff-account-switch" : ""} ${newChatButton ? "has-new-chat" : ""}">
+      <header class="expert-terminal-pane-head ${accountSwitch ? "has-freebuff-account-switch" : ""} ${newChatButton || relayButton ? "has-new-chat" : ""}">
         <button type="button" class="expert-pane-mobile-menu" data-toggle-chat-sidebar title="Afficher le menu de gauche" aria-label="Afficher le menu de gauche" aria-controls="chatAppSidebar">
           <span class="expert-pane-mobile-menu-arrow" aria-hidden="true"></span>
         </button>
@@ -24141,6 +24342,7 @@ const renderExpertTerminalPane = (session: TerminalSession, index: number): stri
         </button>
         ${accountSwitch}
         ${newChatButton}
+        ${relayButton}
         <span class="expert-pane-status" data-terminal-status="${escapeAttr(session.key)}">
           <button type="button" class="expert-terminal-keyboard-badge" data-terminal-keyboard="${escapeAttr(session.key)}" data-terminal-keyboard-tone="off" title="État du clavier de ce terminal"><span class="expert-terminal-keyboard-dot" aria-hidden="true"></span><span data-terminal-keyboard-label>Clavier</span></button>
           <span class="expert-pane-status-text">${escapeHtml(session.ptyId ? `PTY ${session.ptyId}` : session.status)}</span>
@@ -24660,8 +24862,8 @@ const renderChatFirstShell = () => {
           <button type="button" id="messagingToggle" class="${activeView === "messaging" ? "active" : ""}" title="Messages privés entre utilisateurs" ${activeView === "messaging" ? 'aria-current="page"' : ""}>
             <span class="chat-context-icon"><i data-lucide="mail"></i></span><span class="chat-context-copy"><strong>Messages</strong><small><span>Messagerie</span> privée</small></span><b class="chat-side-task-count messaging-nav-count" ${privateMessageUnreadCount ? "" : "hidden"} aria-label="${privateMessageUnreadCount} message${privateMessageUnreadCount === 1 ? "" : "s"} non lu${privateMessageUnreadCount === 1 ? "" : "s"}">${privateMessageUnreadCount > 99 ? "99+" : privateMessageUnreadCount}</b>
           </button>
-          <button type="button" id="mailToggle" class="${activeView === "mail" ? "active" : ""}" title="Boîte Gmail du compte connecté" ${activeView === "mail" ? 'aria-current="page"' : ""}>
-            <span class="chat-context-icon"><i data-lucide="inbox"></i></span><span class="chat-context-copy"><strong>Mail</strong><small>Boîte Gmail</small></span><b class="chat-side-task-count gmail-nav-count" data-gmail-nav-count ${gmailUnreadCount() ? "" : "hidden"} aria-label="${gmailUnreadCount()} non lu">${gmailUnreadCount() > 99 ? "99+" : gmailUnreadCount()}</b>
+          <button type="button" id="mailToggle" class="${activeView === "mail" ? "active" : ""}" title="Boîtes Gmail et Outlook du compte connecté" ${activeView === "mail" ? 'aria-current="page"' : ""}>
+            <span class="chat-context-icon"><i data-lucide="inbox"></i></span><span class="chat-context-copy"><strong>Mail</strong><small>Gmail et Outlook</small></span><b class="chat-side-task-count gmail-nav-count" data-gmail-nav-count ${gmailUnreadCount() ? "" : "hidden"} aria-label="${gmailUnreadCount()} non lu">${gmailUnreadCount() > 99 ? "99+" : gmailUnreadCount()}</b>
           </button>
           <button type="button" id="tiktokToggle" class="${activeView === "tiktok" ? "active" : ""}" title="Connecter et sélectionner les comptes émetteurs TikTok" ${activeView === "tiktok" ? 'aria-current="page"' : ""}>
             <span class="chat-context-icon"><i data-lucide="music-2"></i></span><span class="chat-context-copy"><strong>TikTok</strong><small>Comptes émetteurs</small></span>
@@ -24677,6 +24879,9 @@ const renderChatFirstShell = () => {
           </button>
           <button type="button" id="scheduledChatToggle" class="${activeView === "scheduled-chat" ? "active" : ""}" title="Gérer les chats planifiés" ${activeView === "scheduled-chat" ? 'aria-current="page"' : ""}>
             <span class="chat-context-icon"><i data-lucide="calendar-clock"></i></span><span class="chat-context-copy"><strong>Planifiés</strong><small>Chats à venir</small></span><b class="chat-side-task-count" data-scheduled-chat-nav-count ${scheduledChatCount ? "" : "hidden"} aria-label="${scheduledChatCount} chat${scheduledChatCount === 1 ? "" : "s"} planifié${scheduledChatCount === 1 ? "" : "s"}">${scheduledChatCount > 99 ? "99+" : scheduledChatCount}</b>
+          </button>
+          <button type="button" id="freebuffRelayToggle" class="${activeView === "freebuff-relay" ? "active" : ""}" title="Chat relié au terminal Freebuff" ${activeView === "freebuff-relay" ? 'aria-current="page"' : ""}>
+            <span class="chat-context-icon"><i data-lucide="message-square-reply"></i></span><span class="chat-context-copy"><strong>Relais Freebuff</strong><small>Chat vers le TUI</small></span>
           </button>
 
           <span class="chat-context-section-label">Ressources</span>
@@ -30833,6 +31038,11 @@ const bindUi = () => {
     onItemsChanged: () => armScheduledChatTimer(),
     onRequestDispatch: () => void dispatchDueScheduledChats(),
   });
+  freebuffRelayViewModule?.mountFreebuffRelayPanel({
+    ...freebuffRelayPanelOptions(),
+    renderIcons,
+  });
+  freebuffRelayPendingTarget = null;
 
   document
     .querySelectorAll<HTMLButtonElement>("#chooseTerminalEnvironment, #chooseEnvironmentFromChat")
@@ -31050,6 +31260,15 @@ const bindUi = () => {
       setChatWorkspaceFilter(workspaceIdForPath(workspacePath));
       setActiveView("chat");
       openNewChatModal({ workspacePath, accountId: session.accountId });
+    });
+  });
+  document.querySelectorAll<HTMLButtonElement>("[data-relay-terminal]").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const session = terminalSessions.find((candidate) => candidate.key === button.dataset.relayTerminal);
+      if (!session) return;
+      activeTerminalKey = session.key;
+      openFreebuffRelayForTerminal(session.key);
     });
   });
   const focusExpertSession = (session: TerminalSession, focus = false) => {
@@ -32302,6 +32521,11 @@ const bindUi = () => {
     setActiveView("scheduled-chat");
   });
 
+  document.querySelector<HTMLButtonElement>("#freebuffRelayToggle")?.addEventListener("click", () => {
+    freebuffRelayPendingTarget = null;
+    setActiveView("freebuff-relay");
+  });
+
   document.querySelector<HTMLButtonElement>("#promptsToggle")?.addEventListener("click", () => {
     setActiveView("prompts");
   });
@@ -33151,7 +33375,10 @@ const readSettingsForm = () => {
       account.proxyId = proxySelect?.value || null;
     }
     if (accountBypass) account.bypass = accountBypass.checked;
-    if (accountModelInput) account.model = accountModelInput.value.trim() || DEFAULT_CODEX_MODEL;
+    if (accountModelInput) {
+      account.model = accountModelInput.value.trim()
+        || providerDefaultModel(accountProvider(account));
+    }
     if (accountReasoningEffortSelect) {
       account.reasoningEffort = normalizeCodexReasoningEffort(accountReasoningEffortSelect.value);
     }
@@ -34481,6 +34708,11 @@ const setupEvents = async () => {
       // pour chaque fragment PTY réduit les micro-freezes pendant le streaming.
       session.terminal.write(event.payload.data);
       terminalActivity.record(session.key, event.payload.data);
+      // Le relais Freebuff suit la sortie du terminal cible pour la renvoyer
+      // dans son fil de chat.
+      freebuffRelayOutputListeners.forEach((listener) => {
+        listener(session.key, event.payload.data);
+      });
     }
     if (session?.loginOnly) {
       applyRemoteCodexLoginOutput(session, event.payload.data);

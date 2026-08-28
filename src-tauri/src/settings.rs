@@ -986,6 +986,15 @@ pub async fn account_model_catalog(account_id: String) -> Result<Vec<AccountMode
     load_account_model_catalog(&account_id).await
 }
 
+/// Modele Freebuff effectivement actif sur le home du compte, lu dans
+/// `settings.json` du canal manicode (cle `freebuffModel`). `None` si la cle
+/// est absente : le TUI applique alors son modele par defaut.
+#[cfg_attr(feature = "desktop", tauri::command)]
+pub fn freebuff_active_model(codex_home: String) -> Result<Option<String>, String> {
+    let home = expand_home_local(&codex_home)?;
+    Ok(crate::provider::freebuff_active_model(&home))
+}
+
 #[cfg_attr(feature = "desktop", tauri::command)]
 pub fn import_account_docs(paths: Vec<String>) -> Result<AppSettings, String> {
     let settings_file = settings_path()?;

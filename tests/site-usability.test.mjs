@@ -189,13 +189,15 @@ test("le retour des vues administratives porte un nom accessible", () => {
   assert.match(main, /data-lucide="arrow-left" aria-hidden="true"/);
 });
 
-test("la navigation mobile expose cinq destinations et une action adaptee au chat", () => {
+test("la navigation mobile expose six destinations et une action adaptee au chat", () => {
   const start = main.indexOf("function ensureMobileChrome(): void");
   const end = main.indexOf("\ntype ChatWorkspaceSidebarGroup", start);
   assert.ok(start >= 0 && end > start, "coque mobile introuvable");
   const mobile = main.slice(start, end);
-  assert.equal([...mobile.matchAll(/class="m-tab"/g)].length, 5);
+  assert.equal([...mobile.matchAll(/class="m-tab"/g)].length, 6);
   assert.match(mobile, /data-view="chat"/);
+  assert.match(mobile, /data-view="mail"/);
+  assert.match(mobile, /data-gmail-nav-count/);
   assert.match(mobile, /activeView === "chat" \|\| activeView === "discussions"\) openNewChat\(\)/);
   assert.match(main, /newAction\.classList\.toggle\("is-placeholder", !available\)/);
   assert.match(main, /case "settings":\s*return "Paramètres";/);

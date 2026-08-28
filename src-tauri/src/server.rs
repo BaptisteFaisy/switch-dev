@@ -1953,6 +1953,7 @@ pub async fn run(config: ServerConfig) -> Result<(), String> {
         )
         .route("/accounts/import", post(api_import_account))
         .route("/accounts/home", post(api_ensure_account_home))
+        .route("/accounts/freebuff-active-model", get(api_freebuff_active_model))
         .route("/accounts/:id", delete(api_remove_account))
         .route("/limits", get(api_limits))
         .route("/usage", get(api_usage))
@@ -3704,6 +3705,24 @@ async fn api_ensure_account_home(
             Some(request.fast_mode),
         )
         .map(|_| json_response(json!({ "ok": true })))
+    })
+}
+
+#[derive(Debug, Deserialize)]
+struct FreebuffActiveModelQuery {
+    #[serde(rename = "codexHome")]
+    codex_home: String,
+}
+
+/// Modele Freebuff effectivement actif sur le home d'un compte, relu depuis
+/// le settings.json du canal manicode (cle `freebuffModel`).
+async fn api_freebuff_active_model(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Query(query): Query<FreebuffActiveModelQuery>,
+) -> Response {
+    auth_or(&state, &headers, || {
+        settings::freebuff_active_model(query.codex_home).map(json_response)
     })
 }
 

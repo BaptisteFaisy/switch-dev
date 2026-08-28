@@ -5564,7 +5564,7 @@ body {
     height: 20px;
   }
 
-  /* --- Navigation basse (5 onglets) --- */
+  /* --- Navigation basse (6 onglets) --- */
   .m-bottomnav {
     position: fixed;
     left: 0;
@@ -5572,7 +5572,7 @@ body {
     bottom: 0;
     z-index: 70;
     display: grid;
-    grid-template-columns: repeat(5, 1fr);
+    grid-template-columns: repeat(6, 1fr);
     height: calc(var(--m-bottomnav-h) + env(safe-area-inset-bottom));
     padding-right: env(safe-area-inset-right);
     padding-bottom: env(safe-area-inset-bottom);

@@ -81,9 +81,11 @@ pub fn run() {
     if let Ok(port) = std::env::var("CST_WEBVIEW_CDP_PORT") {
         let port = port.trim().to_string();
         if port.parse::<u16>().map(|value| value >= 1024).unwrap_or(false) {
+            // --force-renderer-accessibility : active l'arbre UI Automation du
+            // WebView2 (saisie/lecture sans focus par UIA en plus du CDP).
             std::env::set_var(
                 "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
-                format!("--remote-debugging-port={port} --remote-allow-origins=*"),
+                format!("--remote-debugging-port={port} --remote-allow-origins=* --force-renderer-accessibility"),
             );
         }
     }
@@ -174,6 +176,7 @@ pub fn run() {
             settings::remove_account,
             settings::account_limit_status,
             settings::account_model_catalog,
+            settings::freebuff_active_model,
             settings::pick_project_dir,
             git_docker_environment::create_git_docker_environment,
             metrics::usage_dashboard,

@@ -939,7 +939,9 @@ impl MicrosoftManager {
         match account_hint.map(str::trim).filter(|value| !value.is_empty()) {
             Some(hint) => links
                 .iter()
-                .find(|link| link.email.eq_ignore_ascii_case(hint))
+                .find(|link| {
+                    link.email.eq_ignore_ascii_case(hint) || link.oid.eq_ignore_ascii_case(hint)
+                })
                 .map(|link| link.oid.clone())
                 .ok_or_else(|| {
                     let available = links
@@ -2423,6 +2425,10 @@ async fn api_clear_provider(
 struct MailMessagesQuery {
     #[serde(default)]
     max: Option<u32>,
+    /// `oid` ou adresse e-mail de la boite a lire ; sans lui, la boite par
+    /// defaut du proprietaire.
+    #[serde(default)]
+    account: Option<String>,
 }
 
 async fn api_messages(
@@ -2435,7 +2441,7 @@ async fn api_messages(
         query: None,
         folder: None,
         limit: Some(query.max.unwrap_or(25)),
-        account: None,
+        account: query.account,
     };
     let value = manager
         .list_messages(&identity.id, &args)

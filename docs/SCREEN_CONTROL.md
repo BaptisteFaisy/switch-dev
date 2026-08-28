@@ -84,7 +84,8 @@ son PC : la fenetre active de l'utilisateur ne change jamais.
 - `browser_*` accepte un `cdpPort` explicite pour piloter un Chromium deja
   lance avec un port de debug — notamment le **WebView2 de l'app elle-meme** :
   lancer l'application avec `CST_WEBVIEW_CDP_PORT=9223` expose le protocole
-  DevTools sur ce port loopback, et `browser_list`/`browser_screenshot`/
+  DevTools sur ce port loopback (avec `--force-renderer-accessibility` pour
+  l'arbre UI Automation), et `browser_list`/`browser_screenshot`/
   `browser_eval`/`browser_click` naviguent alors le DOM de l'app sans aucun
   focus ni souris. Desactive par defaut (aucun port ouvert sans ce choix
   explicite).
@@ -94,17 +95,42 @@ son PC : la fenetre active de l'utilisateur ne change jamais.
 (`WM_CHAR`) quand leur fenetre est inactive — verifie en test sur l'app :
 le clic fantome passe (la fenetre reagit sans voler le focus) mais la saisie
 clavier n'atteint pas le composeur. Les applications classiques (Boite de
-dialogue, console, fenetres Win32 natives) repondent bien ; Chrome, Edge et
-l'app elle-meme sont pilotes par CDP (ci-dessous), beaucoup plus fiable.
+dialogue, console, fenetres Win32 natives) repondent bien ; pour les autres,
+les deux modes ci-dessous prennent le relais.
+
+### Saisie universelle : trois modes pour `screen_type` / `screen_press`
+
+Le parametre `mode` choisit la strategie de saisie, de la moins intrusive a la
+plus universelle :
+
+- **`messages`** (defaut) : `WM_CHAR`/messages cibles dans la fenetre. Aucun
+  contact avec le focus. Fiable sur le Win32 classique ; ignore par les
+  applications modernes inactives (limite ci-dessus).
+- **`focus`** : `AttachThreadInput` + `SetFocus` + `SendInput` — le focus
+  clavier est emprunte quelques centaines de millisecondes (le z-order et la
+  fenetre active au premier plan restent inchanges) puis rendu. Accepte par
+  tout ce qui accepte un clavier (Win32, WinUI, Chromium, WebView2). Necessite
+  un caret dans la cible (un clic fantome ou CDP le place avant). Les
+  processus eleves (admin) refusent l'attachement (UIPI).
+- **`uia`** : **UI Automation** — ecrit dans un champ par
+  `ValuePattern.SetValue`, **sans aucun focus ni aucun clavier envoye**.
+  `screen_uia_fields` liste d'abord les champs editables d'une fenetre (type,
+  nom, valeur actuelle, index), puis `screen_type` avec `mode:"uia"` et
+  `uiaIndex` ecrit dans le champ choisi ; la relecture de l'arbre apres
+  ecriture renvoie `verified` + `fieldValue`. L'activation d'accessibilite
+  (`WM_GETOBJECT`) est automatique pour les Chromium ; l'app elle-meme
+  l'expose quand elle est lancee avec `CST_WEBVIEW_CDP_PORT` (voir ci-dessous).
 
 ### Pilotage navigateur Chrome/Edge par CDP (`browser_*`)
 
 Pour Chrome/Edge, `screen_open` ajoute automatiquement : un **profil isole**
 (dossier temporaire, sans comptes ni mots de passe de l'utilisateur),
-`--remote-debugging-port=0` (port aleatoire, lu dans `DevToolsActivePort`) et
+`--remote-debugging-port=0` (port aleatoire, lu dans `DevToolsActivePort`),
 `--start-minimized` (la fenetre demarre reduite : aucun focus vole, Chrome
-active sinon sa premiere fenetre malgre `SW_SHOWNOACTIVATE`). La commande
-renvoie `debugPort`.
+active sinon sa premiere fenetre malgre `SW_SHOWNOACTIVATE`) et
+`--disable-features=CalculateNativeWinOcclusion` (sans quoi Windows suspend
+les renderers d'arriere-plan : l'arbre UIA n'est plus construit ni mis a jour
+et la relecture retarde). La commande renvoie `debugPort`.
 
 Les outils `browser_list`, `browser_screenshot`, `browser_navigate`,
 `browser_eval`, `browser_click`, `browser_type` et `browser_key` pilotent
@@ -201,10 +227,11 @@ l'entree MCP au prochain provisionnement du compte.
 - `cst-agent-screen-mcp.mjs` expose les outils `screen_snapshot`,
   `screen_move`, `screen_click`, `screen_double_click`, `screen_right_click`,
   `screen_type`, `screen_press`, `screen_scroll`, `screen_windows`,
-  `screen_open`, `screen_arm`, `screen_disarm`, `screen_health` et les outils
-  navigateur `browser_list`, `browser_screenshot`, `browser_navigate`,
-  `browser_eval`, `browser_click`, `browser_type`, `browser_key`. Il relaie
-  chaque demande au pont `cst-connect-windows-screen`
+  `screen_locate`, `screen_uia_fields`, `screen_open`, `screen_arm`,
+  `screen_disarm`, `screen_health` et les outils navigateur `browser_list`,
+  `browser_screenshot`, `browser_navigate`, `browser_eval`, `browser_click`,
+  `browser_type`, `browser_key`. Il relaie chaque demande au pont
+  `cst-connect-windows-screen`
   (`/usr/local/bin/cst-connect-windows-screen`), qui ouvre le SSH force vers
   le poste avec la cle `windows_screen_ed25519` et le known hosts partage.
 - La capture est renvoyee en contenu image (`image/jpeg`) accompagnee d'un
@@ -216,6 +243,24 @@ l'entree MCP au prochain provisionnement du compte.
   `CST_AGENT_SCREEN_SESSION_SEED` (graine stable de session par terminal) et,
   cote pont, `CST_WINDOWS_SCREEN_HOST/PORT/USER/KEY` et
   `CST_WINDOWS_KNOWN_HOSTS`.
+
+### Chats locaux de l'application (PC Windows lui-meme)
+
+Sur le poste Windows local, le pont VPS n'existe pas : `resolveScreenBridge`
+bascule automatiquement sur le client du pipe local
+(`agent-screen-client.mjs`), qui **demarre le broker tout seul** s'il ne tourne
+pas (cache, mono-instance, sans console — rien a fermer ensuite). Le serveur
+MCP est donc utilisable par tous les chats sans demarrage manuel :
+
+- Le `.mcp.json` du projet declare le serveur `Switch-PC-Screen`
+  (`node scripts/cst-agent-screen-mcp.mjs`) : chaque nouveau chat ou agent du
+  workspace recoit les 22 outils (15 `screen_*` + 7 `browser_*`).
+- Chaque instance MCP derive un identifiant de session unique
+  (`switch-<uuid>`) : l'armement d'un chat n'affecte pas les autres chats.
+- Les memes garde-fous s'appliquent : confirmations Windows locales hors
+  session armee, refus du texte sensible, armement borne dans le temps.
+- `screen_open` accepte `hidden: true` pour lancer un helper console sans
+  AUCUNE fenetre (CREATE_NO_WINDOW) — rien a fermer ensuite.
 
 ## Plafonds
 

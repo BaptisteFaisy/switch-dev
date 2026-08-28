@@ -25,7 +25,10 @@ use std::{
 };
 
 const STORE_VERSION: u32 = 1;
-const CLAIM_LEASE_SECONDS: i64 = 120;
+// Le bail doit couvrir la premiere installation de ws-scrcpy-web (telechargement
+// du ZIP d'environ 80 Mo + extraction) : 10 minutes laissent une grosse marge
+// meme sur une connexion lente, sans risquer de reclamer un job encore actif.
+const CLAIM_LEASE_SECONDS: i64 = 600;
 const CONNECTOR_STALE_SECONDS: i64 = 30;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -829,15 +832,10 @@ impl TikTokDmManager {
                     .to_string(),
             ));
         }
-        if request.action == TikTokSenderSetupActionKind::StartWsScrcpy
-            && !connector.ws_scrcpy_available
-            && !connector.ws_scrcpy_online
-        {
-            return Err(TikTokDmError::Conflict(
-                "ws-scrcpy-web est arrete et son lanceur est introuvable sur le poste Windows. Configurez CST_WS_SCRCPY_PATH ou installez WsScrcpyWeb."
-                    .to_string(),
-            ));
-        }
+        // Note : contrairement a scrcpy, aucun garde-fou d'installation n'est
+        // oppose ici a StartWsScrcpy : le connecteur Windows provisionne
+        // ws-scrcpy-web automatiquement (telechargement verifie par SHA-256)
+        // au premier demarrage quand aucun lanceur n'est configure.
         let device_serial = if request.action == TikTokSenderSetupActionKind::StartWsScrcpy {
             String::new()
         } else {
@@ -1807,21 +1805,50 @@ pub async fn run_tiktok_connector() {
             if let Some(job_value) = value.get("job").filter(|value| !value.is_null()) {
                 match serde_json::from_value::<TikTokSenderSetupJob>(job_value.clone()) {
                     Ok(job) => {
-                        let report = process_tiktok_sender_setup(
-                            &client,
-                            &receipts_path,
-                            &connector_id,
-                            &job,
-                        )
-                        .await;
-                        let _ = post_server_json::<Value>(
-                            &client,
-                            &base_url,
-                            &token,
-                            "/api/tiktok/connector/sender-setup/report",
-                            &report,
-                        )
-                        .await;
+                        if job.action == TikTokSenderSetupActionKind::StartWsScrcpy {
+                            // La premiere installation de ws-scrcpy-web telecharge
+                            // environ 80 Mo : on traite ce job en arriere-plan pour
+                            // que les heartbeats continuent et que le connecteur ne
+                            // soit pas marque hors ligne pendant le telechargement.
+                            let client = client.clone();
+                            let base_url = base_url.clone();
+                            let token = token.clone();
+                            let receipts_path = receipts_path.clone();
+                            let connector_id = connector_id.clone();
+                            tokio::task::spawn(async move {
+                                let report = process_tiktok_sender_setup(
+                                    &client,
+                                    &receipts_path,
+                                    &connector_id,
+                                    &job,
+                                )
+                                .await;
+                                let _ = post_server_json::<Value>(
+                                    &client,
+                                    &base_url,
+                                    &token,
+                                    "/api/tiktok/connector/sender-setup/report",
+                                    &report,
+                                )
+                                .await;
+                            });
+                        } else {
+                            let report = process_tiktok_sender_setup(
+                                &client,
+                                &receipts_path,
+                                &connector_id,
+                                &job,
+                            )
+                            .await;
+                            let _ = post_server_json::<Value>(
+                                &client,
+                                &base_url,
+                                &token,
+                                "/api/tiktok/connector/sender-setup/report",
+                                &report,
+                            )
+                            .await;
+                        }
                         submitted_work = true;
                     }
                     Err(error) => {
@@ -2266,7 +2293,12 @@ fn tikmatrix_android_device(value: &Value) -> Option<TikTokAndroidDevice> {
 #[cfg(feature = "desktop")]
 fn inspect_local_android() -> LocalAndroidSnapshot {
     let scrcpy_available = resolve_scrcpy_path().is_some();
-    let ws_scrcpy_available = resolve_ws_scrcpy_path().is_some();
+    // Le connecteur est considere comme capable de fournir ws-scrcpy-web des
+    // qu'un lanceur est configure ou que l'installation geree est en place
+    // (elle est provisionnee automatiquement au premier demarrage si besoin).
+    let ws_scrcpy_available = resolve_ws_scrcpy_path().is_some()
+        || managed_ws_scrcpy_root()
+            .is_ok_and(|root| managed_ws_scrcpy_is_valid(&root));
     let candidates = adb_candidates();
     if candidates.is_empty() {
         return LocalAndroidSnapshot {
@@ -2484,6 +2516,23 @@ fn resolve_scrcpy_path() -> Option<PathBuf> {
 #[cfg(feature = "desktop")]
 const WS_SCRCPY_EMBED_URL: &str = "http://127.0.0.1:8000/embed.html";
 
+// Version pinnee de ws-scrcpy-web provisionnee automatiquement par le
+// connecteur Windows quand aucun lanceur n'est configure ni installe. Le ZIP
+// portable embarque son propre runtime Node (current/seed/node) et son propre
+// start.cmd relocatable ; on applique seulement le correctif de port 8000
+// (cette beta ignore WS_SCRCPY_WEB_PORT et choisit parfois un port ephemere).
+#[cfg(feature = "desktop")]
+const WS_SCRCPY_RELEASE_TAG: &str = "v0.1.30-beta.82";
+#[cfg(feature = "desktop")]
+const WS_SCRCPY_ZIP_FILENAME: &str = "WsScrcpyWeb-beta-Portable.zip";
+#[cfg(feature = "desktop")]
+const WS_SCRCPY_DOWNLOAD_BASE: &str =
+    "https://github.com/bilbospocketses/ws-scrcpy-web/releases/download";
+#[cfg(feature = "desktop")]
+const WS_SCRCPY_PORT_FIX_FROM: &str = "i.listen(r,()=>{Qr.printListeningMsg(n,r,ts)})";
+#[cfg(feature = "desktop")]
+const WS_SCRCPY_PORT_FIX_TO: &str = "i.listen(8000,()=>{Qr.printListeningMsg(n,8000,ts)})";
+
 #[cfg(feature = "desktop")]
 fn push_ws_scrcpy_directory_candidates(candidates: &mut Vec<PathBuf>, root: &Path) {
     candidates.push(root.join("ws-scrcpy-web.exe"));
@@ -2551,7 +2600,192 @@ async fn probe_ws_scrcpy() -> bool {
 }
 
 #[cfg(feature = "desktop")]
-fn launch_ws_scrcpy() -> Result<(), String> {
+fn managed_ws_scrcpy_root() -> Result<PathBuf, String> {
+    crate::settings::runtime_data_path("ws-scrcpy-web")
+}
+
+#[cfg(feature = "desktop")]
+fn managed_ws_scrcpy_is_valid(root: &Path) -> bool {
+    let entry = root.join("dist").join("index.js");
+    let node = root.join("seed").join("node").join("node.exe");
+    let start = root.join("start.cmd");
+    if !entry.is_file() || !node.is_file() || !start.is_file() {
+        return false;
+    }
+    fs::read_to_string(&entry)
+        .is_ok_and(|content| content.contains(WS_SCRCPY_PORT_FIX_TO))
+}
+
+#[cfg(feature = "desktop")]
+fn sha256_hex(path: &Path) -> Result<String, String> {
+    use sha2::{Digest, Sha256};
+    let bytes = fs::read(path)
+        .map_err(|error| format!("Lecture du fichier telecharge impossible : {error}"))?;
+    let digest = Sha256::digest(&bytes);
+    Ok(digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
+}
+
+#[cfg(feature = "desktop")]
+fn ws_scrcpy_sha256_from_sums(sums: &str, file_name: &str) -> Option<String> {
+    sums.lines().find_map(|line| {
+        let line = line.trim();
+        if line.is_empty() {
+            return None;
+        }
+        let (hash, name) = line.split_once(char::is_whitespace)?;
+        let name = name.trim_start_matches('*').trim();
+        (name == file_name).then(|| hash.to_ascii_lowercase())
+    })
+}
+
+#[cfg(feature = "desktop")]
+fn apply_ws_scrcpy_port_fix(root: &Path) -> Result<(), String> {
+    let entry = root.join("dist").join("index.js");
+    let content = fs::read_to_string(&entry)
+        .map_err(|error| format!("Lecture de {} impossible : {error}", entry.display()))?;
+    if content.contains(WS_SCRCPY_PORT_FIX_TO) {
+        return Ok(());
+    }
+    let patched = content.replace(WS_SCRCPY_PORT_FIX_FROM, WS_SCRCPY_PORT_FIX_TO);
+    if patched == content {
+        return Err(format!(
+            "La version telechargee de ws-scrcpy-web ne contient pas le point d'ecoute attendu. Version pinnee : {WS_SCRCPY_RELEASE_TAG}."
+        ));
+    }
+    fs::write(&entry, patched)
+        .map_err(|error| format!("Ecriture de {} impossible : {error}", entry.display()))
+}
+
+/// Provisionne ws-scrcpy-web dans le dossier gere de l'application quand aucun
+/// lanceur n'est configure (CST_WS_SCRCPY_PATH) ni installe (Program Files).
+/// Telecharge le ZIP portable officiel, verifie son SHA-256 contre SHA256SUMS,
+/// extrait, applique le correctif de port 8000 puis cree le start.cmd.
+#[cfg(feature = "desktop")]
+async fn provision_ws_scrcpy(root: &Path) -> Result<(), String> {
+    let parent = root
+        .parent()
+        .ok_or_else(|| "Dossier de donnees de l'application invalide".to_string())?;
+    fs::create_dir_all(parent)
+        .map_err(|error| format!("Creation de {} impossible : {error}", parent.display()))?;
+    let zip_path = parent.join(WS_SCRCPY_ZIP_FILENAME);
+    let sums_path = parent.join("SHA256SUMS");
+    let staging = parent.join("ws-scrcpy-web-staging");
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(20))
+        .build()
+        .map_err(|error| format!("Client HTTP impossible : {error}"))?;
+    let zip_url = format!(
+        "{WS_SCRCPY_DOWNLOAD_BASE}/{WS_SCRCPY_RELEASE_TAG}/{WS_SCRCPY_ZIP_FILENAME}"
+    );
+    let sums_url = format!("{WS_SCRCPY_DOWNLOAD_BASE}/{WS_SCRCPY_RELEASE_TAG}/SHA256SUMS");
+    let zip_bytes = client
+        .get(&zip_url)
+        .send()
+        .await
+        .map_err(|error| format!("Telechargement de ws-scrcpy-web impossible : {error}"))?
+        .error_for_status()
+        .map_err(|error| format!("Telechargement de ws-scrcpy-web refuse : {error}"))?
+        .bytes()
+        .await
+        .map_err(|error| format!("Lecture du ZIP ws-scrcpy-web impossible : {error}"))?;
+    let sums_text = client
+        .get(&sums_url)
+        .send()
+        .await
+        .map_err(|error| format!("Telechargement de SHA256SUMS impossible : {error}"))?
+        .error_for_status()
+        .map_err(|error| format!("Telechargement de SHA256SUMS refuse : {error}"))?
+        .text()
+        .await
+        .map_err(|error| format!("Lecture de SHA256SUMS impossible : {error}"))?;
+    let expected = ws_scrcpy_sha256_from_sums(&sums_text, WS_SCRCPY_ZIP_FILENAME)
+        .ok_or_else(|| {
+            format!(
+                "SHA256SUMS ne contient aucune entree pour {WS_SCRCPY_ZIP_FILENAME}"
+            )
+        })?;
+    fs::write(&zip_path, &zip_bytes).map_err(|error| {
+        format!("Ecriture du ZIP ws-scrcpy-web impossible : {error}")
+    })?;
+    let actual = sha256_hex(&zip_path)?;
+    if actual != expected {
+        let _ = fs::remove_file(&zip_path);
+        return Err(format!(
+            "Echec de verification SHA-256 de ws-scrcpy-web : attendu {expected}, obtenu {actual}. Telechargement abandonne."
+        ));
+    }
+    let _ = fs::write(&sums_path, &sums_text);
+
+    if staging.exists() {
+        fs::remove_dir_all(&staging)
+            .map_err(|error| format!("Nettoyage de {} impossible : {error}", staging.display()))?;
+    }
+    fs::create_dir_all(&staging)
+        .map_err(|error| format!("Creation de {} impossible : {error}", staging.display()))?;
+    let extraction = Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-Command",
+            &format!(
+                "Expand-Archive -LiteralPath '{}' -DestinationPath '{}' -Force",
+                zip_path.display(),
+                staging.display()
+            ),
+        ])
+        .output()
+        .map_err(|error| format!("Extraction de ws-scrcpy-web impossible : {error}"))?;
+    if !extraction.status.success() {
+        let detail = String::from_utf8_lossy(&extraction.stderr).trim().to_string();
+        return Err(format!(
+            "Extraction de ws-scrcpy-web impossible : {}",
+            if detail.is_empty() {
+                "Expand-Archive a echoue".to_string()
+            } else {
+                detail
+            }
+        ));
+    }
+    let extracted = staging.join("current");
+    if !extracted.is_dir() {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(
+            "Le ZIP ws-scrcpy-web ne contient pas le dossier current attendu.".to_string(),
+        );
+    }
+    if root.exists() {
+        fs::remove_dir_all(root)
+            .map_err(|error| format!("Remplacement de {} impossible : {error}", root.display()))?;
+    }
+    fs::rename(&extracted, root).map_err(|error| {
+        format!("Installation de ws-scrcpy-web dans {} impossible : {error}", root.display())
+    })?;
+    let _ = fs::remove_dir_all(&staging);
+    let _ = fs::remove_file(&zip_path);
+    let _ = fs::remove_file(&sums_path);
+    apply_ws_scrcpy_port_fix(root)?;
+    Ok(())
+}
+
+/// Choisit le lanceur ws-scrcpy-web : configuration explicite ou installation
+/// existante d'abord, sinon provisionnement automatique dans le dossier gere.
+#[cfg(feature = "desktop")]
+async fn resolve_or_provision_ws_scrcpy_launcher() -> Result<PathBuf, String> {
+    if let Some(launcher) = resolve_ws_scrcpy_path() {
+        return Ok(launcher);
+    }
+    let root = managed_ws_scrcpy_root()?;
+    if managed_ws_scrcpy_is_valid(&root) {
+        return Ok(root.join("start.cmd"));
+    }
+    provision_ws_scrcpy(&root).await?;
+    Ok(root.join("start.cmd"))
+}
+
+#[cfg(feature = "desktop")]
+fn launch_ws_scrcpy_at(launcher: &Path) -> Result<(), String> {
     #[cfg(not(target_os = "windows"))]
     {
         Err(
@@ -2562,10 +2796,6 @@ fn launch_ws_scrcpy() -> Result<(), String> {
 
     #[cfg(target_os = "windows")]
     {
-        let launcher = resolve_ws_scrcpy_path().ok_or_else(|| {
-            "Le lanceur ws-scrcpy-web est introuvable. Configurez CST_WS_SCRCPY_PATH ou installez WsScrcpyWeb."
-                .to_string()
-        })?;
         let current_dir = launcher
             .parent()
             .ok_or_else(|| "Le dossier du lanceur ws-scrcpy-web est invalide".to_string())?;
@@ -2612,7 +2842,9 @@ async fn ensure_ws_scrcpy_started() -> Result<String, String> {
     if probe_ws_scrcpy().await {
         return Ok(WS_SCRCPY_EMBED_URL.to_string());
     }
-    tokio::task::spawn_blocking(launch_ws_scrcpy)
+    let launcher = resolve_or_provision_ws_scrcpy_launcher().await?;
+    let launcher_clone = launcher.clone();
+    tokio::task::spawn_blocking(move || launch_ws_scrcpy_at(&launcher_clone))
         .await
         .map_err(|error| format!("Lancement de ws-scrcpy-web interrompu : {error}"))??;
 

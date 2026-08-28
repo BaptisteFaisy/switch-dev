@@ -70,6 +70,7 @@ export const SCREEN_ACTIONS = new Set([
   "health",
   "screenshot",
   "locate",
+  "uia_fields",
   "move",
   "click",
   "double_click",
@@ -176,6 +177,17 @@ export const validateAgentScreenRequest = (value) => {
       if (window !== undefined) request.window = window;
       break;
     }
+    case "uia_fields": {
+      const window = asWindowId(value.window, "Fenetre cible");
+      if (window === undefined) {
+        throw new Error("Fenetre cible manquante pour uia_fields.");
+      }
+      request.window = window;
+      if (value.index !== undefined && value.index !== null && value.index !== "") {
+        request.index = asInteger(value.index, "Index du champ", 0, 99);
+      }
+      break;
+    }
     case "locate": {
       const text = asTrimmedString(value.text, "Texte a repérer", 80);
       if (!text) throw new Error("Le texte a repérer est requis.");
@@ -220,13 +232,19 @@ export const validateAgentScreenRequest = (value) => {
       // Chromium/WebView2 inactif.
       if (value.mode !== undefined && value.mode !== null && value.mode !== "") {
         const mode = asTrimmedString(value.mode, "Mode de saisie", 16);
-        if (mode !== "messages" && mode !== "focus") {
-          throw new Error("Mode de saisie invalide (messages ou focus)." );
+        if (mode !== "messages" && mode !== "focus" && mode !== "uia") {
+          throw new Error("Mode de saisie invalide (messages, focus ou uia)." );
         }
         request.mode = mode;
       }
+      if (value.uiaIndex !== undefined && value.uiaIndex !== null && value.uiaIndex !== "") {
+        request.uiaIndex = asInteger(value.uiaIndex, "Index UIA", 0, 99);
+      }
       const window = asWindowId(value.window, "Fenetre cible");
       if (window !== undefined) request.window = window;
+      if (request.mode === "uia" && request.window === undefined) {
+        throw new Error("La saisie mode uia exige une fenetre cible (window).");
+      }
       break;
     }
     case "press":
@@ -278,6 +296,9 @@ export const validateAgentScreenRequest = (value) => {
         throw new Error("La commande contient des caracteres de controle.");
       }
       request.command = command;
+      // hidden : helper (script console) lance sans aucune fenetre visible —
+      // evite les terminaux oublies ouvert sur le bureau de l'utilisateur.
+      if (value.hidden === true) request.hidden = true;
       break;
     }
     case "browser": {
@@ -511,6 +532,7 @@ public static class ScreenAgent
     public const uint WM_KEYDOWN = 0x0100;
     public const uint WM_KEYUP = 0x0101;
     public const uint WM_CHAR = 0x0102;
+    public const uint WM_GETOBJECT = 0x003D;
     public const uint WM_LBUTTONDOWN = 0x0201;
     public const uint WM_LBUTTONUP = 0x0202;
     public const uint WM_LBUTTONDBLCLK = 0x0203;
@@ -633,6 +655,31 @@ public static class ScreenAgent
     [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] public static extern bool CreateProcess(string lpApplicationName, string lpCommandLine, IntPtr lpProcessAttributes, IntPtr lpThreadAttributes, bool bInheritHandles, uint dwCreationFlags, IntPtr lpEnvironment, string lpCurrentDirectory, ref STARTUPINFO lpStartupInfo, out PROCESS_INFORMATION lpProcessInformation);
     [DllImport("kernel32.dll")] public static extern void CloseHandle(IntPtr hObject);
+    [DllImport("user32.dll")] public static extern bool EnumChildWindows(IntPtr hWnd, EnumWindowsProc cb, IntPtr lParam);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassName(IntPtr hWnd, StringBuilder sb, int max);
+
+    // Activation de l'accessibilite Chromium : WM_GETOBJECT/OBJID_CLIENT est
+    // le signal qui fait construire l'arbre UIA par le renderer (idempotent).
+    public static void SendGetObject(long hwnd)
+    {
+        SendMessage(new IntPtr(hwnd), WM_GETOBJECT, IntPtr.Zero, (IntPtr)(-4));
+    }
+
+    // Handles des fenetres enfants de classe Chromium (WebView2/Chrome) — les
+    // cibles du WM_GETOBJECT d'activation.
+    public static string[] ChromiumChildHandles(long hwnd)
+    {
+        var results = new System.Collections.Generic.List<string>();
+        EnumChildWindows(new IntPtr(hwnd), (h, l) =>
+        {
+            var sb = new StringBuilder(128);
+            GetClassName(h, sb, 128);
+            string cls = sb.ToString();
+            if (cls.Contains("Chrome")) results.Add(h.ToInt64().ToString(System.Globalization.CultureInfo.InvariantCulture) + "\u001F" + cls);
+            return true;
+        }, IntPtr.Zero);
+        return results.ToArray();
+    }
 
     // Resout le chemin complet d'un executable : si le premier mot contient un
     // separateur de chemin, il est utilise tel quel ; sinon on cherche dans le
@@ -671,7 +718,7 @@ public static class ScreenAgent
     // creee visible mais NON activee (SW_SHOWNOACTIVATE) — le premier plan de
     // l'utilisateur reste intact. L'agent pilote ensuite cette fenetre par
     // PostMessage/PrintWindow, en arriere-plan.
-    public static bool LaunchNoFocus(string commandLine)
+    public static bool LaunchNoFocus(string commandLine, bool hidden)
     {
         if (string.IsNullOrWhiteSpace(commandLine)) return false;
         string exe = ResolveExe(commandLine);
@@ -683,7 +730,10 @@ public static class ScreenAgent
         STARTUPINFO si = new STARTUPINFO();
         si.cb = Marshal.SizeOf(typeof(STARTUPINFO));
         si.dwFlags = (int)STARTF_USESHOWWINDOW;
-        si.wShowWindow = SW_SHOWNOACTIVATE;
+        // hidden : helper console sans AUCUNE fenetre (CREATE_NO_WINDOW + SW_HIDE)
+        // — rien a fermer ensuite ; sinon fenetre visible mais NON activee
+        // (SW_SHOWNOACTIVATE) : le premier plan de l'utilisateur reste intact.
+        si.wShowWindow = hidden ? (short)0 : SW_SHOWNOACTIVATE;
         // stdio de l'enfant redirige vers NUL : une app console (cmd...) ne
         // doit jamais ecrire dans le pipe de reponse du relais PowerShell.
         IntPtr nullHandle = IntPtr.Zero;
@@ -697,7 +747,7 @@ public static class ScreenAgent
             si.hStdError = nullHandle;
         }
         PROCESS_INFORMATION pi;
-        bool created = CreateProcess(null, full, IntPtr.Zero, IntPtr.Zero, nullHandle != IntPtr.Zero && nullHandle != (IntPtr)(-1), 0, IntPtr.Zero, null, ref si, out pi);
+        bool created = CreateProcess(null, full, IntPtr.Zero, IntPtr.Zero, nullHandle != IntPtr.Zero && nullHandle != (IntPtr)(-1), hidden ? 0x08000000u : 0u, IntPtr.Zero, null, ref si, out pi);
         if (nullHandle != IntPtr.Zero && nullHandle != (IntPtr)(-1)) CloseHandle(nullHandle);
         if (created)
         {
@@ -1095,6 +1145,35 @@ function Capture-Window([long]$targetWindow) {
     }
 }
 
+# UI Automation : champs editables (ValuePattern) d'une fenetre, sans focus.
+# L'activation WM_GETOBJECT est envoyee au top-level et a ses enfants Chromium
+# pour que le renderer construise l'arbre (Chrome/Edge/WebView2 l'exigent).
+function Get-UiaValueElements([long]$hwnd) {
+    Add-Type -AssemblyName UIAutomationClient
+    Add-Type -AssemblyName UIAutomationTypes
+    [ScreenAgent]::SendGetObject($hwnd)
+    foreach ($childLine in [ScreenAgent]::ChromiumChildHandles($hwnd)) {
+        $parts = $childLine -split [string][char]0x1F
+        [ScreenAgent]::SendGetObject([long]$parts[0])
+    }
+    Start-Sleep -Milliseconds 700
+    $root = [System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]$hwnd)
+    $all = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
+    $pairs = @()
+    foreach ($e in $all) {
+        $vp = $null
+        try { $vp = $e.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern) } catch { continue }
+        $name = ''; $ctype = ''; $value = ''
+        try { $name = [string]$e.Current.Name } catch { }
+        try { $ctype = [string]$e.Current.ControlType.ProgrammaticName } catch { }
+        try { $value = [string]$vp.Current.Value } catch { }
+        $pairs += @{ element = $e; pattern = $vp; name = $name; type = $ctype; value = $value }
+        if ($pairs.Count -ge 30) { break }
+    }
+    # La virgule unaire evite le deroulement du tableau au retour.
+    , $pairs
+}
+
 # OCR Windows natif : retourne les lignes texte avec leur rectangle (dans
 # l'espace de coordonnees du bitmap fourni, sans rescale). Le bitmap GDI+ est
 # exporte en PNG temporaire : RecognizeAsync exige un SoftwareBitmap WinRT et
@@ -1155,6 +1234,31 @@ try {
     switch ($action) {
         'health' {
             Write-Result @{ ok = $true; ready = $true }
+            break
+        }
+        'uia_fields' {
+            $hwnd = [long]$request.window
+            $pairs = Get-UiaValueElements $hwnd
+            $fields = @()
+            $i = 0
+            foreach ($p in $pairs) {
+                $fields += @{ index = $i; name = $p.name; type = $p.type; value = $p.value }
+                $i++
+            }
+            $selected = $null
+            if ($request.PSObject.Properties.Name -contains 'index' -and $null -ne $request.index) {
+                if ($fields.Count -eq 0) { throw 'Aucun champ editable UIA dans la fenetre cible.' }
+                if ([int]$request.index -ge $fields.Count) { throw 'Index de champ hors limite.' }
+                $selected = $fields[[int]$request.index]
+            }
+            Write-Result @{
+                ok = $true
+                count = $fields.Count
+                fields = @($fields)
+                selected = $selected
+                window = $hwnd
+                activeWindow = ([ScreenAgent]::ForegroundTitle())
+            }
             break
         }
         'locate' {
@@ -1339,6 +1443,44 @@ try {
             $windowMode = $request.PSObject.Properties.Name -contains 'window'
             $target = if ($windowMode) { [long]$request.window } else { $null }
             $mode = if ($request.PSObject.Properties.Name -contains 'mode') { [string]$request.mode } else { 'messages' }
+            if ($target -and $mode -eq 'uia') {
+                # Saisie par UI Automation ValuePattern : zero focus, la valeur
+                # du champ est posee par le provider de l'app elle-meme.
+                $pairs = Get-UiaValueElements $target
+                if ($pairs.Count -eq 0) { throw 'Aucun champ editable UIA dans la fenetre cible (arbre indisponible ou vide).' }
+                $idx = 0
+                if ($request.PSObject.Properties.Name -contains 'uiaIndex' -and $null -ne $request.uiaIndex) { $idx = [int]$request.uiaIndex }
+                if ($idx -ge $pairs.Count) { throw ('Index UIA hors limite ({0} champs).' -f $pairs.Count) }
+                $picked = $pairs[$idx]
+                $picked.pattern.SetValue($text)
+                # Chromium propage la valeur UIA de facon asynchrone ET sert
+                # des valeurs stale sur un element longuement detenu : la
+                # relecture re-walke l'arbre (elements neufs) avec retries.
+                $after = ''
+                $verified = $false
+                for ($try2 = 0; $try2 -lt 5; $try2++) {
+                    Start-Sleep -Milliseconds 400
+                    try {
+                        $freshPairs = Get-UiaValueElements $target
+                        if ($idx -lt $freshPairs.Count) {
+                            $after = [string]$freshPairs[$idx].pattern.Current.Value
+                        }
+                    } catch { $after = '' }
+                    if ($after -eq $text) { $verified = $true; break }
+                }
+                Write-Result @{
+                    ok = $true
+                    typed = $text.Length
+                    mode = 'uia'
+                    window = $target
+                    uiaIndex = $idx
+                    fieldName = $picked.name
+                    fieldValue = $after
+                    verified = $verified
+                    activeWindow = ([ScreenAgent]::ForegroundTitle())
+                }
+                break
+            }
             if ($target) {
                 if ($mode -eq 'focus') { [ScreenAgent]::TypeFocusSteal($target, $text) } else { [ScreenAgent]::TypeToWindow($target, $text) }
                 $capture = Capture-Window $target
@@ -1478,8 +1620,24 @@ try {
                     # (Google et d'autres sites verifient ce signal).
                     $command = $command + ' --disable-blink-features=AutomationControlled'
                 }
+                if ($command -notmatch '--force-renderer-accessibility') {
+                    # Construit l'arbre UIA du CONTENU web (champs de page
+                    # editables via ValuePattern) des le demarrage.
+                    $command = $command + ' --force-renderer-accessibility'
+                }
+                if ($command -notmatch '--disable-features=') {
+                    # CalculateNativeWinOcclusion : Windows marque les fenetres
+                    # d'arriere-plan comme occluses et Chrome SUSPEND leur
+                    # renderer — l'arbre UIA du contenu web n'existe alors
+                    # jamais (et les valeurs lues restent une generation de
+                    # retard). Desactiver l'occlusion garde le renderer vivant
+                    # en arriere-plan : UIA voit le document et ses champs.
+                    $command = $command + ' --disable-features=CalculateNativeWinOcclusion'
+                }
             }
-            $started = [ScreenAgent]::LaunchNoFocus($command)
+            $hidden = $false
+            if ($request.PSObject.Properties.Name -contains 'hidden') { $hidden = [bool]$request.hidden }
+            $started = [ScreenAgent]::LaunchNoFocus($command, $hidden)
             if (-not $started) { throw 'Le lancement sans focus a echoue.' }
             if ($isBrowser -and $profile) {
                 $portFile = Join-Path $profile 'DevToolsActivePort'

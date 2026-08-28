@@ -68,7 +68,7 @@ test("ws-scrcpy-web possède un bouton de démarrage et un état distinct de l'i
 test("le démarrage est mis en file puis confirmé par le heartbeat réel", () => {
   assert.match(view, /if \(wsScrcpyServiceState === "starting"\) return/);
   assert.match(view, /action: "start_ws_scrcpy"/);
-  assert.match(view, /WS_SCRCPY_START_TIMEOUT_MS = 25_000/);
+  assert.match(view, /WS_SCRCPY_START_TIMEOUT_MS = 150_000/);
   assert.match(view, /scheduleWsScrcpyStartTimeout\(options\)/);
   assert.match(view, /if \(next\.bridgeOnline && next\.wsScrcpyOnline\)/);
   assert.match(view, /wsScrcpyServiceState = "online"/);
@@ -99,6 +99,34 @@ test("le connecteur Windows lance et confirme réellement ws-scrcpy-web", () => 
   assert.match(server, /"wsScrcpyAvailable": ws_scrcpy_available/);
   assert.match(server, /"wsScrcpyOnline": ws_scrcpy_online/);
   assert.match(server, /let ws_scrcpy_online = bridge_online/);
+});
+
+test("le connecteur provisionne ws-scrcpy-web automatiquement quand il manque", () => {
+  // Le zip portable officiel, piné, est téléchargé et vérifié par SHA-256.
+  assert.match(backend, /WsScrcpyWeb-beta-Portable\.zip/);
+  assert.match(backend, /SHA256SUMS/);
+  assert.match(backend, /bilbospocketses\/ws-scrcpy-web\/releases\/download/);
+  assert.match(backend, /v0\.1\.30-beta\.82/);
+  // Le correctif de port 8000 est appliqué à l'entrée du bundle.
+  assert.match(backend, /i\.listen\(8000,\(\)=>\{Qr\.printListeningMsg\(n,8000,ts\)\}\)/);
+  // L'extraction passe par PowerShell et l'installation est gérée par l'app.
+  assert.match(backend, /Expand-Archive/);
+  assert.match(backend, /runtime_data_path\("ws-scrcpy-web"\)/);
+  assert.match(backend, /managed_ws_scrcpy_is_valid/);
+  // Le job de premier lancement est traité en arrière-plan pour ne pas couper
+  // les heartbeats pendant le téléchargement (~80 Mo).
+  assert.match(backend, /tokio::task::spawn\(async move \{\s*let report = process_tiktok_sender_setup/);
+  // Plus de refus serveur quand ws-scrcpy-web n'est pas encore installé :
+  // l'action est mise en file et le connecteur provisionne au besoin.
+  assert.doesNotMatch(backend, /StartWsScrcpy[\s\S]{0,200}introuvable sur le poste Windows/);
+  // Le heartbeat considère l'installation gérée comme disponible.
+  assert.match(backend, /managed_ws_scrcpy_root\(\)/);
+  assert.match(backend, /ws_scrcpy_available = resolve_ws_scrcpy_path\(\)\.is_some\(\)/);
+  // L'interface ne bloque plus sur « non installé » : elle prévient puis laisse
+  // le connecteur installer automatiquement.
+  assert.match(view, /téléchargement et installation automatiques au premier démarrage/);
+  assert.match(view, /il sera téléchargé et installé automatiquement au premier démarrage du service/);
+  assert.doesNotMatch(view, /ws-scrcpy-web est introuvable sur le PC Windows/);
 });
 
 test("l'iframe n'accepte que l'URL ws-scrcpy-web locale attendue", () => {

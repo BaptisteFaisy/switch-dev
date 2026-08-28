@@ -94,7 +94,7 @@ test("les confirmations, leases et recus locaux empechent les envois implicites 
   assert.match(backend, /pipeline\s*\.owned_recipient_allowlist\s*\.iter\(\)/);
   assert.match(backend, /scrape_to_dm_pipeline/);
   assert.match(backend, /prepared_campaign_id/);
-  assert.match(backend, /CLAIM_LEASE_SECONDS: i64 = 120/);
+  assert.match(backend, /CLAIM_LEASE_SECONDS: i64 = 600/);
   assert.match(backend, /owned_accounts_confirmed/);
   assert.match(backend, /send_confirmed/);
   assert.match(backend, /tiktok-connector-receipts\.json/);

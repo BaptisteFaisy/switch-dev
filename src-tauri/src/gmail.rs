@@ -44,7 +44,7 @@ use std::{
 use url::Url;
 use uuid::Uuid;
 
-const STORE_VERSION: u32 = 1;
+const STORE_VERSION: u32 = 2;
 const STORE_FILE: &str = "gmail-links.json";
 /// Cookie distinct de `cst_oauth_state` (connexion) et de `cst_ms_oauth_state`
 /// (Microsoft) : les flux ne s'ecrasent pas mutuellement.
@@ -87,13 +87,19 @@ impl Default for GmailStore {
     }
 }
 
-/// Une boite Gmail liee a un compte de l'application (`owner_id`). Une seule
-/// boite par proprietaire : l'onglet Mail affiche la boite de la personne
-/// connectee, et d'aucune autre.
+/// Une boite Gmail liee a un compte de l'application (`owner_id`). Un
+/// proprietaire peut lier autant de boites que souhaite : chaque liaison porte
+/// son propre `link_id` (immuable, genere a la liaison), c'est lui qui
+/// identifie la boite partout (messages, deconnexion), jamais l'adresse
+/// e-mail qui peut etre reattribuee.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct StoredLink {
     owner_id: String,
+    /// Identifiant stable de CETTE liaison. Vide dans les anciens fichiers :
+    /// la normalisation au chargement en genere un.
+    #[serde(default)]
+    link_id: String,
     email: String,
     access_token: String,
     refresh_token: String,
@@ -109,7 +115,26 @@ struct StoredLink {
     needs_relink: bool,
 }
 
+/// Une boite liee, telle que vue par l'interface. Jamais de jeton ici.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct GmailAccountView {
+    /// Identifiant de la liaison, a repasser en parametre `link` des routes
+    /// `messages` et `connection` (suppression).
+    link_id: String,
+    email: String,
+    needs_relink: bool,
+    scopes: Vec<String>,
+    linked_at: i64,
+    /// Premiere boite utilisable du proprietaire : cible des appels sans `link`.
+    is_default: bool,
+}
+
 /// Liaison telle que vue par l'interface. Jamais de jeton ici.
+///
+/// Les champs de tete (`email`, `linked_at`, `scopes`) refletent la boite par
+/// defaut : ils gardent l'interface d'avant le multi-comptes fonctionnelle.
+/// `accounts` porte la liste complete des boites liees.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct GmailConnectionView {
@@ -119,6 +144,7 @@ pub(crate) struct GmailConnectionView {
     needs_relink: bool,
     scopes: Vec<String>,
     linked_at: Option<i64>,
+    accounts: Vec<GmailAccountView>,
     /// URI de redirection a declarer dans Google Cloud Console, connue meme
     /// avant configuration : l'utilisateur en a besoin pour autoriser le flux.
     redirect_uri: String,
@@ -246,11 +272,34 @@ impl GmailManager {
         } else {
             GmailStore::default()
         };
-        // Une seule boite par proprietaire : on garde la plus recente.
+        // Multi-comptes : on conserve toutes les boites, en dedoublonnant par
+        // `link_id` (les anciens fichiers sans identifiant en recoivent un).
         let mut store = store;
+        let mut changed = false;
+        for link in store.links.iter_mut() {
+            if link.link_id.trim().is_empty() {
+                link.link_id = random_secret();
+                changed = true;
+            }
+        }
         store.links.sort_by_key(|link| std::cmp::Reverse(link.updated_at));
-        let mut seen_owners = std::collections::HashSet::new();
-        store.links.retain(|link| seen_owners.insert(link.owner_id.clone()));
+        let mut seen_links = std::collections::HashSet::new();
+        let previous_len = store.links.len();
+        store
+            .links
+            .retain(|link| seen_links.insert(link.link_id.clone()));
+        if store.links.len() != previous_len {
+            changed = true;
+        }
+        if changed {
+            if let Err(error) = fs_util::atomic_write(&store_path, serde_json::to_vec_pretty(&store).map_err(|e| e.to_string())?) {
+                return Err(format!(
+                    "ecriture de {} impossible: {error}",
+                    store_path.display()
+                ));
+            }
+            let _ = fs_util::restrict_private_file(&store_path);
+        }
 
         let provider = build_provider_config(public_base_url).map_err(|error| {
             // Une faute de frappe ne doit jamais empecher le noeud de demarrer :
@@ -320,26 +369,82 @@ impl GmailManager {
     fn connection_view(&self, owner_id: &str) -> Result<GmailConnectionView, GmailError> {
         let state = self.lock()?;
         let provider: Option<&ProviderConfig> = self.provider.as_ref().as_ref();
-        let link = state.store.links.iter().find(|link| link.owner_id == owner_id);
+        let links = state
+            .store
+            .links
+            .iter()
+            .filter(|link| link.owner_id == owner_id)
+            .collect::<Vec<_>>();
+        // Boite par defaut : la premiere utilisable, sinon la premiere liee.
+        let default = links
+            .iter()
+            .find(|link| !link.needs_relink)
+            .or_else(|| links.first())
+            .copied();
+        let default_link_id = default.map(|link| link.link_id.clone()).unwrap_or_default();
+        let accounts = links
+            .iter()
+            .map(|link| GmailAccountView {
+                link_id: link.link_id.clone(),
+                email: link.email.clone(),
+                needs_relink: link.needs_relink,
+                scopes: link.scopes.clone(),
+                linked_at: link.linked_at,
+                is_default: link.link_id == default_link_id,
+            })
+            .collect::<Vec<_>>();
         Ok(GmailConnectionView {
             configured: provider.is_some(),
-            connected: link.is_some_and(|link| !link.needs_relink),
-            email: link.map(|link| link.email.clone()),
-            needs_relink: link.is_some_and(|link| link.needs_relink),
-            scopes: link
+            connected: links.iter().any(|link| !link.needs_relink),
+            email: default.map(|link| link.email.clone()),
+            needs_relink: provider.is_some() && !links.iter().any(|link| !link.needs_relink) && !links.is_empty(),
+            scopes: default
                 .map(|link| link.scopes.clone())
                 .unwrap_or_else(|| {
                     provider
                         .map(|p| split_scopes(&p.scopes))
                         .unwrap_or_default()
                 }),
-            linked_at: link.map(|link| link.linked_at),
+            linked_at: default.map(|link| link.linked_at),
+            accounts,
             redirect_uri: provider
                 .map(|p| p.redirect_uri.clone())
                 .unwrap_or_else(|| "(non configure)".to_string()),
             client_id: provider.map(|p| p.client_id.clone()),
             login_url: provider.map(|p| p.login_url.clone()),
         })
+    }
+
+    /// Identifiant de la boite par defaut du proprietaire : premiere utilisable,
+    /// sinon premiere liee. Cible des appels qui ne precisent pas `link`.
+    fn default_link_id(&self, owner_id: &str) -> Result<String, GmailError> {
+        let state = self.lock()?;
+        state
+            .store
+            .links
+            .iter()
+            .filter(|link| link.owner_id == owner_id)
+            .find(|link| !link.needs_relink)
+            .or_else(|| {
+                state
+                    .store
+                    .links
+                    .iter()
+                    .find(|link| link.owner_id == owner_id)
+            })
+            .map(|link| link.link_id.clone())
+            .ok_or_else(|| GmailError::unauthorized("Aucune boite Gmail liee"))
+    }
+
+    fn find_link(&self, owner_id: &str, link_id: &str) -> Result<StoredLink, GmailError> {
+        let state = self.lock()?;
+        state
+            .store
+            .links
+            .iter()
+            .find(|link| link.owner_id == owner_id && link.link_id == link_id)
+            .cloned()
+            .ok_or_else(|| GmailError::not_found("Boite Gmail inconnue"))
     }
 
     // -----------------------------------------------------------------------
@@ -465,10 +570,12 @@ impl GmailManager {
             .ok_or_else(|| GmailError::new(StatusCode::BAD_GATEWAY, "Adresse Gmail absente"))?;
 
         let now = now_ts();
+        // Multi-comptes : on AJOUTE la nouvelle boite, on ne remplace pas une
+        // existante. L'utilisateur peut lier autant de boites que souhaite.
         let mut state = self.lock()?;
-        state.store.links.retain(|link| link.owner_id != identity.id);
         state.store.links.push(StoredLink {
             owner_id: identity.id.clone(),
+            link_id: random_secret(),
             email,
             access_token: token.access_token,
             refresh_token: refresh_token.to_string(),
@@ -483,10 +590,14 @@ impl GmailManager {
         Ok(())
     }
 
-    fn disconnect(&self, owner_id: &str) -> Result<(), GmailError> {
+    /// Retire la boite designee par `link_id` (et seulement celle-la).
+    fn disconnect(&self, owner_id: &str, link_id: &str) -> Result<(), GmailError> {
         let mut state = self.lock()?;
         let previous_len = state.store.links.len();
-        state.store.links.retain(|link| link.owner_id != owner_id);
+        state
+            .store
+            .links
+            .retain(|link| !(link.owner_id == owner_id && link.link_id == link_id));
         if state.store.links.len() != previous_len {
             self.persist_locked(&state).map_err(GmailError::internal)?;
         }
@@ -497,9 +608,10 @@ impl GmailManager {
     // Lecture de la boite
     // -----------------------------------------------------------------------
 
-    /// Jeton d'acces valide pour le proprietaire, en rafraichissant si besoin.
-    /// Renvoie (access_token, email) sans jamais exposer le refresh token.
-    async fn valid_tokens(&self, owner_id: &str) -> Result<(String, String), GmailError> {
+    /// Jeton d'acces valide pour la boite designee par `link_id`, en
+    /// rafraichissant si besoin. Renvoie (access_token, email) sans jamais
+    /// exposer le refresh token.
+    async fn valid_tokens(&self, owner_id: &str, link_id: &str) -> Result<(String, String), GmailError> {
         let provider = self.provider()?;
         let snapshot = {
             let state = self.lock()?;
@@ -507,7 +619,7 @@ impl GmailManager {
                 .store
                 .links
                 .iter()
-                .find(|link| link.owner_id == owner_id)
+                .find(|link| link.owner_id == owner_id && link.link_id == link_id)
                 .cloned()
                 .ok_or_else(|| GmailError::unauthorized("Aucune boite Gmail liee"))?;
             if link.needs_relink {
@@ -520,7 +632,7 @@ impl GmailManager {
         if snapshot.expires_at - REFRESH_MARGIN_SECS > now_ts() {
             return Ok((snapshot.access_token, snapshot.email));
         }
-        if !self.try_acquire_refresh_lock(owner_id)? {
+        if !self.try_acquire_refresh_lock(link_id)? {
             // Un autre appel est en train de rafraichir : on attend un instant
             // puis on relit l'etat plutot que de doubler l'echange.
             tokio::time::sleep(std::time::Duration::from_millis(400)).await;
@@ -529,7 +641,7 @@ impl GmailManager {
                 .store
                 .links
                 .iter()
-                .find(|link| link.owner_id == owner_id)
+                .find(|link| link.owner_id == owner_id && link.link_id == link_id)
                 .cloned()
                 .ok_or_else(|| GmailError::unauthorized("Aucune boite Gmail liee"))?;
             return Ok((link.access_token, link.email));
@@ -538,7 +650,7 @@ impl GmailManager {
         let refreshed = self
             .refresh_access_token(&provider, &snapshot.refresh_token)
             .await;
-        self.release_refresh_lock(owner_id);
+        self.release_refresh_lock(link_id);
         let (access_token, expires_at) = refreshed?;
 
         let email = {
@@ -547,7 +659,7 @@ impl GmailManager {
                 .store
                 .links
                 .iter_mut()
-                .find(|link| link.owner_id == owner_id)
+                .find(|link| link.owner_id == owner_id && link.link_id == link_id)
             else {
                 return Err(GmailError::unauthorized("Aucune boite Gmail liee"));
             };
@@ -561,22 +673,22 @@ impl GmailManager {
         Ok((access_token, email))
     }
 
-    fn try_acquire_refresh_lock(&self, owner_id: &str) -> Result<bool, GmailError> {
+    fn try_acquire_refresh_lock(&self, link_id: &str) -> Result<bool, GmailError> {
         let mut state = self.lock()?;
         let now = now_ts();
         state.refresh_locks.retain(|_, expires_at| *expires_at > now);
-        if state.refresh_locks.contains_key(owner_id) {
+        if state.refresh_locks.contains_key(link_id) {
             return Ok(false);
         }
         state
             .refresh_locks
-            .insert(owner_id.to_string(), now + REFRESH_LOCK_TTL_SECS);
+            .insert(link_id.to_string(), now + REFRESH_LOCK_TTL_SECS);
         Ok(true)
     }
 
-    fn release_refresh_lock(&self, owner_id: &str) {
+    fn release_refresh_lock(&self, link_id: &str) {
         if let Ok(mut state) = self.lock() {
-            state.refresh_locks.remove(owner_id);
+            state.refresh_locks.remove(link_id);
         }
     }
 
@@ -624,10 +736,11 @@ impl GmailManager {
     async fn list_messages(
         &self,
         owner_id: &str,
+        link_id: &str,
         max: usize,
         query: Option<String>,
     ) -> Result<GmailMessagesView, GmailError> {
-        let (access_token, email) = self.valid_tokens(owner_id).await?;
+        let (access_token, email) = self.valid_tokens(owner_id, link_id).await?;
         let max = max.clamp(1, MAX_MESSAGES);
         let query = query
             .map(|value| value.trim().to_string())
@@ -729,13 +842,25 @@ async fn api_connection(
     Ok(no_store(Json(view).into_response()))
 }
 
+#[derive(Deserialize)]
+struct DisconnectQuery {
+    /// `link` de la boite a delier ; sans lui, la boite par defaut.
+    #[serde(default)]
+    link: Option<String>,
+}
+
 async fn api_disconnect(
     State(manager): State<GmailManager>,
     headers: HeaderMap,
+    Query(query): Query<DisconnectQuery>,
 ) -> Result<Response, GmailError> {
     let identity = manager.identity(&headers)?;
     require_same_site(&headers)?;
-    manager.disconnect(&identity.id)?;
+    let link_id = match query.link {
+        Some(link) if !link.trim().is_empty() => link,
+        _ => manager.default_link_id(&identity.id)?,
+    };
+    manager.disconnect(&identity.id, &link_id)?;
     let view = manager.connection_view(&identity.id)?;
     Ok(no_store(Json(view).into_response()))
 }
@@ -814,6 +939,9 @@ struct MessagesQuery {
     max: Option<usize>,
     #[serde(default)]
     q: Option<String>,
+    /// `link` de la boite a lire ; sans lui, la boite par defaut.
+    #[serde(default)]
+    link: Option<String>,
 }
 
 async fn api_messages(
@@ -822,8 +950,12 @@ async fn api_messages(
     Query(query): Query<MessagesQuery>,
 ) -> Result<Response, GmailError> {
     let identity = manager.identity(&headers)?;
+    let link_id = match query.link {
+        Some(link) if !link.trim().is_empty() => link,
+        _ => manager.default_link_id(&identity.id)?,
+    };
     let view = manager
-        .list_messages(&identity.id, query.max.unwrap_or(DEFAULT_MAX_MESSAGES), query.q)
+        .list_messages(&identity.id, &link_id, query.max.unwrap_or(DEFAULT_MAX_MESSAGES), query.q)
         .await?;
     Ok(no_store(Json(view).into_response()))
 }
@@ -1050,9 +1182,10 @@ fn env_trimmed(name: &str) -> Option<String> {
 mod tests {
     use super::*;
 
-    fn link(owner_id: &str, updated_at: i64) -> StoredLink {
+    fn link(owner_id: &str, link_id: &str, updated_at: i64) -> StoredLink {
         StoredLink {
             owner_id: owner_id.to_string(),
+            link_id: link_id.to_string(),
             email: "moi@gmail.com".to_string(),
             access_token: "at".to_string(),
             refresh_token: "rt".to_string(),
@@ -1065,27 +1198,64 @@ mod tests {
     }
 
     #[test]
-    fn store_normalizes_one_link_per_owner_keeping_the_newest() {
+    fn store_keeps_every_linked_mailbox_and_dedupes_by_link_id() {
+        // Un proprietaire peut lier plusieurs boites ; seul un doublon du meme
+        // `link_id` (fichier corrompu) est retire, en gardant le plus recent.
         let mut store = GmailStore {
             version: STORE_VERSION,
-            links: vec![link("user-1", 100), link("user-2", 200), link("user-1", 300)],
+            links: vec![
+                link("user-1", "a", 100),
+                link("user-2", "b", 200),
+                link("user-1", "c", 300),
+                link("user-1", "a", 400),
+            ],
         };
         store.links.sort_by_key(|link| std::cmp::Reverse(link.updated_at));
-        let mut seen_owners = std::collections::HashSet::new();
+        let mut seen_links = std::collections::HashSet::new();
         store
             .links
-            .retain(|link| seen_owners.insert(link.owner_id.clone()));
-        assert_eq!(store.links.len(), 2);
+            .retain(|link| seen_links.insert(link.link_id.clone()));
+        assert_eq!(store.links.len(), 3);
         let user1 = store
             .links
             .iter()
-            .find(|link| link.owner_id == "user-1")
-            .expect("lien user-1");
-        assert_eq!(user1.updated_at, 300);
+            .filter(|link| link.owner_id == "user-1")
+            .collect::<Vec<_>>();
+        assert_eq!(user1.len(), 2);
+        let duplicate = user1
+            .iter()
+            .find(|link| link.link_id == "a")
+            .expect("doublon a");
+        assert_eq!(duplicate.updated_at, 400);
     }
 
     #[test]
-    fn connection_view_never_exposes_tokens() {
+    fn legacy_links_without_id_get_one_on_load() {
+        let mut store = GmailStore {
+            version: 1,
+            links: vec![StoredLink {
+                owner_id: "user-1".to_string(),
+                link_id: String::new(),
+                email: "moi@gmail.com".to_string(),
+                access_token: "at".to_string(),
+                refresh_token: "rt".to_string(),
+                expires_at: now_ts() + 3600,
+                scopes: vec![DEFAULT_SCOPES.to_string()],
+                linked_at: now_ts(),
+                updated_at: now_ts(),
+                needs_relink: false,
+            }],
+        };
+        for link in store.links.iter_mut() {
+            if link.link_id.trim().is_empty() {
+                link.link_id = random_secret();
+            }
+        }
+        assert!(!store.links[0].link_id.is_empty());
+    }
+
+    #[test]
+    fn connection_view_exposes_every_account_without_tokens() {
         let view = GmailConnectionView {
             configured: true,
             connected: true,
@@ -1093,11 +1263,31 @@ mod tests {
             needs_relink: false,
             scopes: vec![DEFAULT_SCOPES.to_string()],
             linked_at: Some(100),
+            accounts: vec![
+                GmailAccountView {
+                    link_id: "a".to_string(),
+                    email: "moi@gmail.com".to_string(),
+                    needs_relink: false,
+                    scopes: vec![DEFAULT_SCOPES.to_string()],
+                    linked_at: 100,
+                    is_default: true,
+                },
+                GmailAccountView {
+                    link_id: "b".to_string(),
+                    email: "autre@gmail.com".to_string(),
+                    needs_relink: true,
+                    scopes: vec![DEFAULT_SCOPES.to_string()],
+                    linked_at: 50,
+                    is_default: false,
+                },
+            ],
             redirect_uri: "https://switch.test/api/gmail/callback".to_string(),
             client_id: Some("id".to_string()),
             login_url: Some("https://switch.test/api/gmail/start".to_string()),
         };
         let serialized = serde_json::to_string(&view).unwrap();
+        assert!(serialized.contains("autre@gmail.com"));
+        assert!(serialized.contains("\"linkId\":\"b\""));
         assert!(!serialized.contains("accessToken"));
         assert!(!serialized.contains("refreshToken"));
         assert!(!serialized.contains("clientSecret"));
