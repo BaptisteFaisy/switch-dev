@@ -51,6 +51,10 @@ test("les statuts et la progression du chat orchestré sont explicites", () => {
   assert.equal(orchestrationPhaseLabel("final_validation"), "Validation finale");
   assert.equal(orchestrationPhaseLabel("designing_tests"), "Conception des tests par les orchestrateurs");
   assert.equal(orchestrationPhaseLabel("testing"), "Tests des orchestrateurs dédiés");
+  assert.equal(
+    orchestrationPhaseLabel("merging"),
+    "Fusion des sous-chats par l’orchestrateur",
+  );
   assert.equal(orchestrationTaskStatusLabel("revision_requested"), "Correction demandée");
   assert.equal(orchestrationTesterStatusLabel("revision_required"), "Corrections demandées");
   assert.deepEqual(orchestrationProgress(run()), { accepted: 1, total: 2, percent: 50 });
@@ -345,8 +349,13 @@ test("le moteur impose isolation, preuve, revue, test réel et publication prude
   assert.match(backend, /pub testers: Vec<OrchestrationTester>/);
   assert.match(backend, /OrchestrationTurnKind::TesterPlan/);
   assert.match(backend, /OrchestrationTurnKind::TesterValidation/);
+  assert.match(backend, /OrchestrationTurnKind::MergeReview/);
   assert.match(backend, /ORCHESTRATION_TEST_PLAN:/);
   assert.match(backend, /ORCHESTRATION_TEST_RESULT:/);
+  assert.match(backend, /ORCHESTRATION_MERGE:/);
+  assert.match(backend, /fn pending_merge_review_task_ids/);
+  assert.match(backend, /fn apply_merge_review_acceptance/);
+  assert.match(backend, /merge_reviewed_task_ids/);
   assert.match(backend, /testers_all_passed/);
   assert.match(backend, /reset_testers_for_validation/);
   assert.match(backend, /validate_worker_count/);
@@ -370,5 +379,5 @@ test("le moteur impose isolation, preuve, revue, test réel et publication prude
   assert.match(backend, /reprise automatique en cours/);
   assert.match(backend, /"diff", "--cached"/);
   assert.match(backend, /Le projet source a change de commit pendant l'orchestration/);
-  assert.match(backend, /git_sandboxes_apply_review_commit_and_publish_patch/);
+  assert.match(backend, /git_sandboxes_merge_two_finished_workers_before_publishing/);
 });

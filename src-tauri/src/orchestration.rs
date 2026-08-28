@@ -118,6 +118,7 @@ pub enum OrchestrationPhase {
     Reviewing,
     Validating,
     Testing,
+    Merging,
     FinalReview,
     FinalValidation,
     Publishing,
@@ -144,6 +145,7 @@ pub enum OrchestrationTurnKind {
     Worker,
     Review,
     TesterValidation,
+    MergeReview,
     FinalReview,
 }
 
@@ -373,6 +375,11 @@ pub struct OrchestrationSnapshot {
     pub tasks: Vec<OrchestrationTask>,
     #[serde(default)]
     pub testers: Vec<OrchestrationTester>,
+    /// Missions deja controlees ensemble par le chat orchestrateur apres le
+    /// passage de leur testeur. Une mission rouverte est retiree de cette liste
+    /// afin que sa nouvelle contribution repasse obligatoirement par la fusion.
+    #[serde(default)]
+    pub merge_reviewed_task_ids: Vec<String>,
     #[serde(default)]
     pub final_summary: Option<String>,
     #[serde(default)]
@@ -606,6 +613,21 @@ struct ProofEnvelope {
 struct ReviewEnvelope {
     decision: OrchestrationReviewDecision,
     summary: String,
+    #[serde(default)]
+    feedback: String,
+    #[serde(default)]
+    tests: Vec<OrchestrationProofTest>,
+    #[serde(default)]
+    messages: Vec<TeamMessageEnvelope>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MergeReviewEnvelope {
+    decision: OrchestrationReviewDecision,
+    summary: String,
+    #[serde(default)]
+    task_ids: Vec<String>,
     #[serde(default)]
     feedback: String,
     #[serde(default)]
@@ -867,6 +889,7 @@ impl OrchestrationManager {
             plan_summary: None,
             tasks: Vec::new(),
             testers: Vec::new(),
+            merge_reviewed_task_ids: Vec::new(),
             final_summary: None,
             last_error: None,
             consecutive_start_failures: 0,
@@ -1163,6 +1186,7 @@ impl OrchestrationManager {
                 kind,
                 OrchestrationTurnKind::Plan
                     | OrchestrationTurnKind::Review
+                    | OrchestrationTurnKind::MergeReview
                     | OrchestrationTurnKind::FinalReview
             ),
             (OrchestrationAccountRole::Worker, Some(OrchestrationTurnKind::Worker)) => task
@@ -1571,6 +1595,7 @@ fn drive_run(inner: &Arc<OrchestrationInner>, run_id: &str) {
         OrchestrationPhase::Working => start_worker_turn(inner, &run),
         OrchestrationPhase::Reviewing => start_review_turn(inner, &run),
         OrchestrationPhase::Testing => start_tester_validation_turn(inner, &run),
+        OrchestrationPhase::Merging => start_merge_review_turn(inner, &run),
         OrchestrationPhase::FinalReview => start_final_review_turn(inner, &run),
         OrchestrationPhase::Publishing => publish_run(inner, &run),
         OrchestrationPhase::Validating
@@ -1759,6 +1784,7 @@ fn prompt_with_pending_handoff(
         kind,
         OrchestrationTurnKind::Plan
             | OrchestrationTurnKind::Review
+            | OrchestrationTurnKind::MergeReview
             | OrchestrationTurnKind::FinalReview
     ) {
         (
@@ -1864,15 +1890,34 @@ fn start_tester_validation_turn(inner: &Arc<OrchestrationInner>, run: &Orchestra
             if !testers_all_passed(current) {
                 return Err("Tous les orchestrateurs testeurs doivent valider le rendu".to_string());
             }
-            current.phase = OrchestrationPhase::FinalReview;
+            let pending_merge = pending_merge_review_task_ids(current);
+            current.phase = if pending_merge.is_empty() {
+                OrchestrationPhase::FinalReview
+            } else {
+                OrchestrationPhase::Merging
+            };
             current.current_tester_id = None;
             current.next_action_at = Some(now);
             current.updated_at = now;
             push_event(
                 current,
                 now,
-                "tester_quorum_passed",
-                "Tous les orchestrateurs testeurs ont valide leurs missions".to_string(),
+                if pending_merge.is_empty() {
+                    "tester_quorum_passed"
+                } else {
+                    "merge_review_scheduled"
+                },
+                if pending_merge.is_empty() {
+                    "Tous les orchestrateurs testeurs ont valide leurs missions".to_string()
+                } else {
+                    format!(
+                        "{} mission{} validee{} attend{} la fusion par le chat orchestrateur",
+                        pending_merge.len(),
+                        if pending_merge.len() > 1 { "s" } else { "" },
+                        if pending_merge.len() > 1 { "s" } else { "" },
+                        if pending_merge.len() > 1 { "ent" } else { "" }
+                    )
+                },
             );
             Ok(())
         });
@@ -1901,6 +1946,37 @@ fn start_tester_validation_turn(inner: &Arc<OrchestrationInner>, run: &Orchestra
         run.orchestrator_dir.clone(),
         ChatTurnMode::Build,
         tester_validation_prompt(run, &tester),
+    );
+}
+
+fn start_merge_review_turn(inner: &Arc<OrchestrationInner>, run: &OrchestrationSnapshot) {
+    let pending_task_ids = pending_merge_review_task_ids(run);
+    if pending_task_ids.is_empty() {
+        let now = metrics::now_ts();
+        let _ = inner.mutate_store(|store| {
+            let current = find_run_mut(store, &run.id)?;
+            current.phase = if testers_all_passed(current) {
+                OrchestrationPhase::FinalReview
+            } else {
+                OrchestrationPhase::Testing
+            };
+            current.next_action_at = Some(now);
+            current.updated_at = now;
+            Ok(())
+        });
+        return;
+    }
+    start_chat_turn(
+        inner,
+        run,
+        OrchestrationTurnKind::MergeReview,
+        None,
+        None,
+        resolved_orchestrator_account(run).to_string(),
+        run.orchestrator_session_id.clone(),
+        run.orchestrator_dir.clone(),
+        ChatTurnMode::Build,
+        merge_review_prompt(run, &pending_task_ids),
     );
 }
 
@@ -2004,6 +2080,17 @@ fn start_review_turn(inner: &Arc<OrchestrationInner>, run: &OrchestrationSnapsho
 }
 
 fn start_final_review_turn(inner: &Arc<OrchestrationInner>, run: &OrchestrationSnapshot) {
+    if !pending_merge_review_task_ids(run).is_empty() {
+        let now = metrics::now_ts();
+        let _ = inner.mutate_store(|store| {
+            let current = find_run_mut(store, &run.id)?;
+            current.phase = OrchestrationPhase::Merging;
+            current.next_action_at = Some(now);
+            current.updated_at = now;
+            Ok(())
+        });
+        return;
+    }
     if !testers_all_passed(run) {
         let now = metrics::now_ts();
         let _ = inner.mutate_store(|store| {
@@ -2262,6 +2349,7 @@ fn poll_turn(
                 kind,
                 OrchestrationTurnKind::Plan
                     | OrchestrationTurnKind::Review
+                    | OrchestrationTurnKind::MergeReview
                     | OrchestrationTurnKind::FinalReview
             ) && run.orchestrator_handoff_pending
             {
@@ -2327,6 +2415,7 @@ fn complete_turn(
         OrchestrationTurnKind::TesterValidation => {
             complete_tester_validation(inner, &current, snapshot)
         }
+        OrchestrationTurnKind::MergeReview => complete_merge_review(inner, &current, snapshot),
         OrchestrationTurnKind::FinalReview => complete_final_review(inner, &current, snapshot),
     }
 }
@@ -2750,11 +2839,12 @@ fn complete_tester_validation(
             now,
         );
         current.current_tester_id = None;
-        current.next_action_at = if decision == OrchestrationTesterDecision::Pass {
-            Some(now)
-        } else {
-            None
-        };
+        if decision == OrchestrationTesterDecision::Pass
+            && !pending_merge_review_task_ids(current).is_empty()
+        {
+            current.phase = OrchestrationPhase::Merging;
+        }
+        current.next_action_at = (decision == OrchestrationTesterDecision::Pass).then_some(now);
         current.last_error = if decision == OrchestrationTesterDecision::Pass {
             None
         } else {
@@ -2787,6 +2877,122 @@ fn complete_tester_validation(
     }
     if decision == OrchestrationTesterDecision::Revise {
         reopen_tasks(inner, &run.id, &task_ids, feedback);
+    }
+}
+
+fn complete_merge_review(
+    inner: &Arc<OrchestrationInner>,
+    run: &OrchestrationSnapshot,
+    snapshot: &ChatTurnSnapshot,
+) {
+    let pending_task_ids = pending_merge_review_task_ids(run);
+    if pending_task_ids.is_empty() {
+        let now = metrics::now_ts();
+        let update = inner.mutate_store(|store| {
+            let current = find_run_mut(store, &run.id)?;
+            clear_current_turn(current, OrchestrationTurnKind::MergeReview, snapshot)?;
+            current.phase = if testers_all_passed(current) {
+                OrchestrationPhase::FinalReview
+            } else {
+                OrchestrationPhase::Testing
+            };
+            current.next_action_at = Some(now);
+            current.updated_at = now;
+            Ok(())
+        });
+        if let Err(error) = update {
+            mark_needs_attention(inner, &run.id, error);
+        }
+        return;
+    }
+
+    let text = snapshot_text(snapshot);
+    let mut envelope = match parse_marked_json::<MergeReviewEnvelope>(&text, "ORCHESTRATION_MERGE:")
+        .and_then(|review| validate_merge_review(review, run, &pending_task_ids))
+    {
+        Ok(review) => review,
+        Err(error) => {
+            protocol_failure(
+                inner,
+                &run.id,
+                None,
+                format!("Revue de fusion invalide : {error}"),
+            );
+            return;
+        }
+    };
+    if let Err(error) = validate_team_messages(&mut envelope.messages, run) {
+        protocol_failure(
+            inner,
+            &run.id,
+            None,
+            format!("Messages de fusion invalides : {error}"),
+        );
+        return;
+    }
+
+    let now = metrics::now_ts();
+    if envelope.decision == OrchestrationReviewDecision::Revise {
+        let task_ids = envelope.task_ids.clone();
+        let feedback = envelope.feedback.clone();
+        let update = inner.mutate_store(|store| {
+            let current = find_run_mut(store, &run.id)?;
+            clear_current_turn(current, OrchestrationTurnKind::MergeReview, snapshot)?;
+            append_team_messages(
+                current,
+                OrchestrationAccountRole::Orchestrator,
+                None,
+                envelope.messages,
+                now,
+            );
+            current.updated_at = now;
+            Ok(())
+        });
+        if let Err(error) = update {
+            mark_needs_attention(inner, &run.id, error);
+            return;
+        }
+        reopen_tasks(inner, &run.id, &task_ids, feedback);
+        return;
+    }
+
+    let integrated_commit = match commit_owned_worktree(
+        run,
+        &format!(
+            "orchestration: fusion de {} sous-chat{}",
+            pending_task_ids.len(),
+            if pending_task_ids.len() > 1 { "s" } else { "" }
+        ),
+    ) {
+        Ok(commit) => commit,
+        Err(error) => {
+            mark_needs_attention(inner, &run.id, error);
+            return;
+        }
+    };
+    let integration_changed = integrated_commit != run.integrated_commit;
+    let summary = envelope.summary.clone();
+    let update = inner.mutate_store(|store| {
+        let current = find_run_mut(store, &run.id)?;
+        clear_current_turn(current, OrchestrationTurnKind::MergeReview, snapshot)?;
+        append_team_messages(
+            current,
+            OrchestrationAccountRole::Orchestrator,
+            None,
+            envelope.messages,
+            now,
+        );
+        apply_merge_review_acceptance(
+            current,
+            &pending_task_ids,
+            integrated_commit.clone(),
+            integration_changed,
+            &summary,
+            now,
+        )
+    });
+    if let Err(error) = update {
+        mark_needs_attention(inner, &run.id, error);
     }
 }
 
@@ -3193,6 +3399,9 @@ fn apply_tester_revision_state(
         task.last_error = Some(feedback.to_string());
         task_titles.push(task.title.clone());
     }
+    let reopened = task_ids.iter().map(String::as_str).collect::<HashSet<_>>();
+    run.merge_reviewed_task_ids
+        .retain(|task_id| !reopened.contains(task_id.as_str()));
     reset_testers_for_validation(run, Some(feedback));
     run.phase = OrchestrationPhase::Working;
     run.current_task_id = None;
@@ -3397,6 +3606,24 @@ fn apply_worker_candidate(
 }
 
 fn publish_run(inner: &Arc<OrchestrationInner>, run: &OrchestrationSnapshot) {
+    if !pending_merge_review_task_ids(run).is_empty() {
+        let now = metrics::now_ts();
+        let update = inner.mutate_store(|store| {
+            let current = find_run_mut(store, &run.id)?;
+            current.phase = OrchestrationPhase::Merging;
+            current.next_action_at = Some(now);
+            current.last_error = Some(
+                "Publication bloquee : le chat orchestrateur doit fusionner les missions validees"
+                    .to_string(),
+            );
+            current.updated_at = now;
+            Ok(())
+        });
+        if let Err(error) = update {
+            mark_needs_attention(inner, &run.id, error);
+        }
+        return;
+    }
     if !testers_all_passed(run) {
         let now = metrics::now_ts();
         let update = inner.mutate_store(|store| {
@@ -3908,6 +4135,41 @@ fn review_prompt(run: &OrchestrationSnapshot, task: &OrchestrationTask) -> Strin
     )
 }
 
+fn merge_review_prompt(run: &OrchestrationSnapshot, pending_task_ids: &[String]) -> String {
+    let pending = pending_task_ids
+        .iter()
+        .filter_map(|task_id| run.tasks.iter().find(|task| task.id == *task_id))
+        .map(|task| {
+            format!(
+                "- {} (worker {}): {}\n  Criteres: {}",
+                task.id,
+                task.position,
+                task.title,
+                task.acceptance_criteria.join(" | ")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let already_reviewed = run
+        .merge_reviewed_task_ids
+        .iter()
+        .filter_map(|task_id| run.tasks.iter().find(|task| task.id == *task_id))
+        .map(|task| format!("- {} (worker {}): {}", task.id, task.position, task.title))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "Tu es le chat orchestrateur principal. Un orchestrateur testeur vient de valider un lot de sous-chats. Avant de continuer, verifie s'il existe d'autres contributions deja terminees et controle la fusion REELLE du lot avec tout ce qui a deja ete integre. Travaille dans ton worktree prive : inspecte le diff cumule depuis le commit de base, les recouvrements de fichiers, les contrats partages et les regressions entre sous-chats. Execute des tests d'integration pertinents. Tu peux corriger directement une petite imperfection de raccord ; une correction substantielle doit etre renvoyee aux workers concernes.\n\nObjectif global :\n{}\n\nNouveau lot valide a fusionner ensemble :\n{}\n\nLots deja controles (ils restent dans le resultat combine) :\n{}\n\nFil de coordination du groupe :\n{}\n\nDecision `accept` uniquement si le resultat combine est coherent et teste. En cas de conflit ou d'incompatibilite, decision `revise` avec tous les `taskIds` concernes et un feedback actionnable. Toute correction directe declenchera automatiquement un nouveau passage des testeurs avant l'audit final.\n\nTermine par exactement une ligne, sans bloc Markdown :\nORCHESTRATION_MERGE: {{\"decision\":\"accept\",\"summary\":\"fusion controlee\",\"taskIds\":[],\"feedback\":\"\",\"tests\":[{{\"command\":\"commande executee\",\"result\":\"resultat observe\",\"passed\":true}}],\"messages\":[]}}",
+        run.objective,
+        pending,
+        if already_reviewed.is_empty() {
+            "Aucun lot precedent.".to_string()
+        } else {
+            already_reviewed
+        },
+        team_feed(run, None)
+    )
+}
+
 fn final_review_prompt(run: &OrchestrationSnapshot) -> String {
     let tasks = run
         .tasks
@@ -4208,6 +4470,70 @@ fn validate_review(mut review: ReviewEnvelope) -> Result<ReviewEnvelope, String>
         }
     } else if review.feedback.is_empty() {
         return Err("une revision doit contenir un feedback".to_string());
+    }
+    Ok(review)
+}
+
+fn validate_merge_review(
+    mut review: MergeReviewEnvelope,
+    run: &OrchestrationSnapshot,
+    pending_task_ids: &[String],
+) -> Result<MergeReviewEnvelope, String> {
+    review.summary = validate_short_text(&review.summary, "Le resume de la fusion")?;
+    review.feedback = truncate(review.feedback.trim(), MAX_TEXT_CHARS);
+    if review.tests.is_empty() {
+        return Err("la revue de fusion exige au moins un test execute".to_string());
+    }
+    for test in &mut review.tests {
+        test.command = validate_short_text(&test.command, "La commande de fusion")?;
+        test.result = validate_short_text(&test.result, "Le resultat de fusion")?;
+    }
+
+    let accepted = run
+        .tasks
+        .iter()
+        .filter(|task| task.status == OrchestrationTaskStatus::Accepted)
+        .map(|task| task.id.as_str())
+        .collect::<HashSet<_>>();
+    let mut seen = HashSet::new();
+    review.task_ids = review
+        .task_ids
+        .drain(..)
+        .map(|task_id| task_id.trim().to_string())
+        .filter(|task_id| !task_id.is_empty() && seen.insert(task_id.clone()))
+        .collect();
+    if let Some(unknown) = review
+        .task_ids
+        .iter()
+        .find(|task_id| !accepted.contains(task_id.as_str()))
+    {
+        return Err(format!(
+            "la fusion ne peut rouvrir qu'une mission acceptee ; taskId interdit : {unknown}"
+        ));
+    }
+
+    match review.decision {
+        OrchestrationReviewDecision::Accept => {
+            if review.tests.iter().any(|test| !test.passed) {
+                return Err("une fusion acceptee contient un test en echec".to_string());
+            }
+            if !review.task_ids.is_empty() || !review.feedback.is_empty() {
+                return Err("une fusion acceptee ne doit pas demander de correction".to_string());
+            }
+            if pending_task_ids.is_empty() {
+                return Err("aucune mission validee n'attend la fusion".to_string());
+            }
+        }
+        OrchestrationReviewDecision::Revise => {
+            if review.task_ids.is_empty() {
+                return Err("une correction de fusion doit cibler au moins un worker".to_string());
+            }
+            if review.feedback.is_empty() {
+                return Err(
+                    "une correction de fusion doit fournir un feedback actionnable".to_string(),
+                );
+            }
+        }
     }
     Ok(review)
 }
@@ -5011,6 +5337,94 @@ fn testers_all_passed(run: &OrchestrationSnapshot) -> bool {
             .all(|tester| tester.status == OrchestrationTesterStatus::Passed)
 }
 
+fn pending_merge_review_task_ids(run: &OrchestrationSnapshot) -> Vec<String> {
+    let passed_task_ids = run
+        .testers
+        .iter()
+        .filter(|tester| tester.status == OrchestrationTesterStatus::Passed)
+        .flat_map(|tester| tester.assigned_task_ids.iter().map(String::as_str))
+        .collect::<HashSet<_>>();
+    let reviewed_task_ids = run
+        .merge_reviewed_task_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    run.tasks
+        .iter()
+        .filter(|task| {
+            task.status == OrchestrationTaskStatus::Accepted
+                && passed_task_ids.contains(task.id.as_str())
+                && !reviewed_task_ids.contains(task.id.as_str())
+        })
+        .map(|task| task.id.clone())
+        .collect()
+}
+
+fn apply_merge_review_acceptance(
+    run: &mut OrchestrationSnapshot,
+    task_ids: &[String],
+    integrated_commit: String,
+    integration_changed: bool,
+    summary: &str,
+    now: i64,
+) -> Result<(), String> {
+    if task_ids.is_empty() {
+        return Err("Aucune mission validee a marquer comme fusionnee".to_string());
+    }
+    let pending = pending_merge_review_task_ids(run)
+        .into_iter()
+        .collect::<HashSet<_>>();
+    if let Some(task_id) = task_ids.iter().find(|task_id| !pending.contains(*task_id)) {
+        return Err(format!(
+            "Mission absente du lot de fusion courant : {task_id}"
+        ));
+    }
+    for task_id in task_ids {
+        if !run.merge_reviewed_task_ids.contains(task_id) {
+            run.merge_reviewed_task_ids.push(task_id.clone());
+        }
+    }
+    run.integrated_commit = integrated_commit;
+    run.protocol_failures = 0;
+    run.current_task_id = None;
+    run.current_tester_id = None;
+    run.last_error = None;
+    run.updated_at = now;
+
+    if integration_changed {
+        reset_testers_for_validation(
+            run,
+            Some("Le chat orchestrateur a ajuste la fusion ; les tests doivent repasser"),
+        );
+        run.phase = OrchestrationPhase::Testing;
+    } else {
+        run.phase = if testers_all_passed(run) {
+            OrchestrationPhase::FinalReview
+        } else {
+            OrchestrationPhase::Testing
+        };
+    }
+    run.next_action_at = Some(now);
+    push_event(
+        run,
+        now,
+        if integration_changed {
+            "merge_review_updated"
+        } else {
+            "merge_review_passed"
+        },
+        format!(
+            "{} sous-chat{} fusionne{} et controle{} par l'orchestrateur : {}",
+            task_ids.len(),
+            if task_ids.len() > 1 { "s" } else { "" },
+            if task_ids.len() > 1 { "s" } else { "" },
+            if task_ids.len() > 1 { "s" } else { "" },
+            truncate(summary, 1_000)
+        ),
+    );
+    Ok(())
+}
+
 fn reset_testers_for_validation(run: &mut OrchestrationSnapshot, feedback: Option<&str>) {
     for tester in &mut run.testers {
         tester.status = OrchestrationTesterStatus::Ready;
@@ -5292,6 +5706,20 @@ fn normalize_loaded_store(store: &mut OrchestrationStore, now: i64) -> bool {
                 .collect();
             changed = true;
         }
+        let accepted_task_ids = run
+            .tasks
+            .iter()
+            .filter(|task| task.status == OrchestrationTaskStatus::Accepted)
+            .map(|task| task.id.clone())
+            .collect::<HashSet<_>>();
+        let mut seen_merge_reviews = HashSet::new();
+        let previous_merge_review_count = run.merge_reviewed_task_ids.len();
+        run.merge_reviewed_task_ids.retain(|task_id| {
+            accepted_task_ids.contains(task_id) && seen_merge_reviews.insert(task_id.clone())
+        });
+        if run.merge_reviewed_task_ids.len() != previous_merge_review_count {
+            changed = true;
+        }
         if run.status != OrchestrationStatus::Completed
             && matches!(
                 run.phase,
@@ -5306,6 +5734,19 @@ fn normalize_loaded_store(store: &mut OrchestrationStore, now: i64) -> bool {
             } else {
                 OrchestrationPhase::Testing
             };
+            changed = true;
+        }
+        if run.status != OrchestrationStatus::Completed
+            && matches!(
+                run.phase,
+                OrchestrationPhase::Testing
+                    | OrchestrationPhase::FinalReview
+                    | OrchestrationPhase::FinalValidation
+                    | OrchestrationPhase::Publishing
+            )
+            && !pending_merge_review_task_ids(run).is_empty()
+        {
+            run.phase = OrchestrationPhase::Merging;
             changed = true;
         }
         if run.team_messages.len() > MAX_TEAM_MESSAGES {
@@ -5599,6 +6040,92 @@ mod tests {
     }
 
     #[test]
+    fn passed_tester_batches_wait_for_an_orchestrator_merge_review() {
+        let mut run = sample_run();
+        let mut second = run.tasks[0].clone();
+        second.id = "task-02".to_string();
+        second.position = 2;
+        second.title = "Interface".to_string();
+        run.tasks.push(second);
+        run.worker_count = 2;
+        run.testers[0].assigned_task_ids = vec!["task-01".to_string(), "task-02".to_string()];
+
+        let pending = pending_merge_review_task_ids(&run);
+        assert_eq!(pending, vec!["task-01", "task-02"]);
+        apply_merge_review_acceptance(
+            &mut run,
+            &pending,
+            "merged-head".to_string(),
+            false,
+            "Les deux sous-chats sont compatibles",
+            123,
+        )
+        .unwrap();
+
+        assert_eq!(run.merge_reviewed_task_ids, vec!["task-01", "task-02"]);
+        assert_eq!(run.integrated_commit, "merged-head");
+        assert_eq!(run.phase, OrchestrationPhase::FinalReview);
+        assert!(pending_merge_review_task_ids(&run).is_empty());
+    }
+
+    #[test]
+    fn an_orchestrator_merge_fix_forces_every_tester_to_run_again() {
+        let mut run = sample_run();
+        let pending = pending_merge_review_task_ids(&run);
+        apply_merge_review_acceptance(
+            &mut run,
+            &pending,
+            "fixed-merge-head".to_string(),
+            true,
+            "Raccord corrige par l'orchestrateur",
+            456,
+        )
+        .unwrap();
+
+        assert_eq!(run.phase, OrchestrationPhase::Testing);
+        assert_eq!(run.testers[0].status, OrchestrationTesterStatus::Ready);
+        assert_eq!(run.merge_reviewed_task_ids, vec!["task-01"]);
+        assert!(pending_merge_review_task_ids(&run).is_empty());
+        assert!(run
+            .events
+            .iter()
+            .any(|event| event.kind == "merge_review_updated"));
+    }
+
+    #[test]
+    fn merge_review_rejects_an_unproven_or_unknown_revision() {
+        let run = sample_run();
+        let pending = pending_merge_review_task_ids(&run);
+        let failed_accept = MergeReviewEnvelope {
+            decision: OrchestrationReviewDecision::Accept,
+            summary: "Fusion".to_string(),
+            task_ids: Vec::new(),
+            feedback: String::new(),
+            tests: vec![OrchestrationProofTest {
+                command: "cargo test".to_string(),
+                result: "failed".to_string(),
+                passed: false,
+            }],
+            messages: Vec::new(),
+        };
+        assert!(validate_merge_review(failed_accept, &run, &pending).is_err());
+
+        let unknown_revision = MergeReviewEnvelope {
+            decision: OrchestrationReviewDecision::Revise,
+            summary: "Conflit".to_string(),
+            task_ids: vec!["task-99".to_string()],
+            feedback: "Corriger le contrat partage".to_string(),
+            tests: vec![OrchestrationProofTest {
+                command: "cargo test".to_string(),
+                result: "failed".to_string(),
+                passed: false,
+            }],
+            messages: Vec::new(),
+        };
+        assert!(validate_merge_review(unknown_revision, &run, &pending).is_err());
+    }
+
+    #[test]
     fn failed_tester_reopens_workers_and_invalidates_the_whole_quorum() {
         let mut run = sample_run();
         let mut second = run.tasks[0].clone();
@@ -5609,6 +6136,7 @@ mod tests {
         run.worker_count = 2;
         run.testers[0].assigned_task_ids = vec!["task-01".to_string(), "task-02".to_string()];
         run.testers[0].status = OrchestrationTesterStatus::Passed;
+        run.merge_reviewed_task_ids = vec!["task-01".to_string(), "task-02".to_string()];
         run.phase = OrchestrationPhase::Testing;
 
         let reopened = vec!["task-01".to_string(), "task-02".to_string()];
@@ -5626,6 +6154,7 @@ mod tests {
                 && task.last_error.as_deref() == Some("Les tests de regression echouent")
         }));
         assert_eq!(run.testers[0].status, OrchestrationTesterStatus::Ready);
+        assert!(run.merge_reviewed_task_ids.is_empty());
         assert_eq!(run.phase, OrchestrationPhase::Working);
         assert_eq!(
             next_open_task(&run).map(|task| task.id.as_str()),
@@ -5894,7 +6423,7 @@ mod tests {
     }
 
     #[test]
-    fn git_sandboxes_apply_review_commit_and_publish_patch() {
+    fn git_sandboxes_merge_two_finished_workers_before_publishing() {
         let root = std::env::temp_dir().join(format!("cst-orchestration-test-{}", Uuid::new_v4()));
         let repo = root.join("repo");
         let sandboxes = root.join("sandboxes");
@@ -5902,6 +6431,7 @@ mod tests {
         let sandbox = sandboxes.join(&run_id);
         let orchestrator = sandbox.join("orchestrator");
         let worker = sandbox.join("workers").join("task-01-01");
+        let worker_two = sandbox.join("workers").join("task-02-01");
         fs::create_dir_all(&repo).unwrap();
         run_git(&repo, ["init"], None).unwrap();
         fs::write(repo.join("feature.txt"), "base\n").unwrap();
@@ -5924,8 +6454,10 @@ mod tests {
         fs::create_dir_all(worker.parent().unwrap()).unwrap();
         add_worktree(&repo, &orchestrator, &base).unwrap();
         add_worktree(&repo, &worker, &base).unwrap();
+        add_worktree(&repo, &worker_two, &base).unwrap();
         fs::write(worker.join("feature.txt"), "base\nworker change\n").unwrap();
         fs::write(worker.join("new-file.txt"), "proof\n").unwrap();
+        fs::write(worker_two.join("second-worker.txt"), "second proof\n").unwrap();
 
         let mut run = sample_run();
         run.id = run_id;
@@ -5953,7 +6485,28 @@ mod tests {
                 .replace("\r\n", "\n"),
             "proof\n"
         );
-        run.integrated_commit = commit_owned_worktree(&run, "orchestration test").unwrap();
+        run.integrated_commit = commit_owned_worktree(&run, "orchestration worker one").unwrap();
+        let mut second_task = run.tasks[0].clone();
+        second_task.id = "task-02".to_string();
+        second_task.position = 2;
+        second_task.title = "Second worker".to_string();
+        second_task.workspace_dir = Some(worker_two.to_string_lossy().to_string());
+        second_task.base_commit = Some(base.clone());
+        run.tasks.push(second_task);
+        apply_worker_candidate(&run, &run.tasks[1]).unwrap();
+        run.integrated_commit = commit_owned_worktree(&run, "orchestration worker two").unwrap();
+        assert_eq!(
+            fs::read_to_string(orchestrator.join("feature.txt"))
+                .unwrap()
+                .replace("\r\n", "\n"),
+            "base\nworker change\n"
+        );
+        assert_eq!(
+            fs::read_to_string(orchestrator.join("second-worker.txt"))
+                .unwrap()
+                .replace("\r\n", "\n"),
+            "second proof\n"
+        );
         fs::write(repo.join("source-changed.txt"), "do not overwrite\n").unwrap();
         assert!(apply_final_patch(&run).is_err());
         fs::remove_file(repo.join("source-changed.txt")).unwrap();
@@ -5972,6 +6525,12 @@ mod tests {
                 .unwrap()
                 .replace("\r\n", "\n"),
             "proof\n"
+        );
+        assert_eq!(
+            fs::read_to_string(repo.join("second-worker.txt"))
+                .unwrap()
+                .replace("\r\n", "\n"),
+            "second proof\n"
         );
         fs::write(
             repo.join("feature.txt"),
@@ -6090,6 +6649,7 @@ mod tests {
                 protocol_failures: 0,
                 last_error: None,
             }],
+            merge_reviewed_task_ids: Vec::new(),
             final_summary: None,
             last_error: None,
             consecutive_start_failures: 0,

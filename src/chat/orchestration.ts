@@ -8,6 +8,7 @@ export type OrchestrationPhase =
   | "reviewing"
   | "validating"
   | "testing"
+  | "merging"
   | "final_review"
   | "final_validation"
   | "publishing"
@@ -154,6 +155,7 @@ export type OrchestrationSnapshot = {
     | "worker"
     | "review"
     | "tester_validation"
+    | "merge_review"
     | "final_review"
     | null;
   currentTaskId: string | null;
@@ -165,6 +167,8 @@ export type OrchestrationSnapshot = {
   planSummary: string | null;
   tasks: OrchestrationTask[];
   testers: OrchestrationTester[];
+  /** Tâches déjà contrôlées ensemble par le chat orchestrateur après les tests. */
+  mergeReviewedTaskIds?: string[];
   finalSummary: string | null;
   lastError: string | null;
   consecutiveStartFailures: number;
@@ -322,6 +326,8 @@ export const orchestrationPhaseLabel = (phase: OrchestrationPhase): string => {
       return "Validation réelle de la contribution";
     case "testing":
       return "Tests des orchestrateurs dédiés";
+    case "merging":
+      return "Fusion des sous-chats par l’orchestrateur";
     case "final_review":
       return "Audit final";
     case "final_validation":
