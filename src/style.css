@@ -681,6 +681,89 @@ button {
   white-space: nowrap;
 }
 
+.openai-compatible-account-fields {
+  display: grid;
+  grid-column: 1 / -1;
+  gap: 10px;
+  padding: 13px;
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--line));
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--accent) 6%, var(--app-bg));
+}
+
+.openai-compatible-account-fields[hidden] {
+  display: none;
+}
+
+.openai-compatible-account-fields > header {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.openai-compatible-account-fields > header > svg {
+  width: 18px;
+  color: var(--accent);
+}
+
+.openai-compatible-account-fields > header > span {
+  display: grid;
+  gap: 2px;
+}
+
+.openai-compatible-account-fields strong {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.openai-compatible-account-fields small {
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.openai-compatible-account-fields > div,
+.openai-compatible-account-edit-fields {
+  display: grid;
+  grid-template-columns: minmax(210px, 1.3fr) minmax(180px, 1fr) minmax(180px, 1fr);
+  gap: 10px;
+}
+
+.openai-compatible-account-fields label,
+.openai-compatible-account-edit-fields label {
+  display: grid;
+  min-width: 0;
+  gap: 5px;
+}
+
+.openai-compatible-account-fields label > span,
+.openai-compatible-account-edit-fields label > span {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 650;
+}
+
+.openai-compatible-account-fields input,
+.openai-compatible-account-edit-fields input {
+  width: 100%;
+  min-width: 0;
+  min-height: 38px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  outline: 0;
+  color: var(--text);
+  background: var(--app-bg);
+  font: inherit;
+  font-size: 11px;
+}
+
+.openai-compatible-account-fields input:focus,
+.openai-compatible-account-edit-fields input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
 .simple-accounts-list {
   overflow: hidden;
 }
@@ -788,6 +871,10 @@ button {
 
 .simple-account-provider-icon.opencode {
   color: var(--accent);
+}
+
+.simple-account-provider-icon.openai-compatible {
+  color: #72d7b7;
 }
 
 .simple-account-provider-icon svg {
@@ -999,6 +1086,15 @@ button {
   opacity: .55;
 }
 
+.openai-compatible-account-edit-fields {
+  grid-template-columns: minmax(210px, 1.3fr) minmax(180px, 1fr) minmax(180px, 1fr) auto;
+  align-items: end;
+}
+
+.openai-compatible-account-edit-fields > .tool-button {
+  min-height: 38px;
+}
+
 .simple-accounts-empty {
   display: grid;
   min-height: 150px;
@@ -1114,6 +1210,11 @@ button {
 
   .simple-account-add > .tool-button {
     width: 100%;
+  }
+
+  .openai-compatible-account-fields > div,
+  .openai-compatible-account-edit-fields {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 

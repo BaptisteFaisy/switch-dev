@@ -150,8 +150,10 @@ impl Provider {
                     "HOME"
                 }
             }
-            // Fournisseur HTTP : aucune isolation par home n'est necessaire.
-            Provider::OpenAiCompatible => "CST_OPENAI_COMPATIBLE_BASE_URL",
+            // Le transport OpenAI-compatible est pilote par OpenCode afin de
+            // conserver ses sessions et ses outils. Il utilise donc le meme
+            // cloisonnement XDG qu'un compte OpenCode classique.
+            Provider::OpenAiCompatible => "XDG_DATA_HOME",
         }
     }
 
@@ -166,7 +168,7 @@ impl Provider {
             // plugin, qui ne portent aucun secret et coutent ~60 Mo a installer.
             // OpenCode ajoute lui-meme le sous-dossier `opencode` dans chacun de
             // ces emplacements.
-            Provider::OpenCode => {
+            Provider::OpenCode | Provider::OpenAiCompatible => {
                 let shared = opencode_shared_runtime_dir(home);
                 vec![
                     ("XDG_DATA_HOME", home.join("data")),
@@ -189,8 +191,6 @@ impl Provider {
                 ("USERPROFILE", home.to_path_buf()),
             ],
             Provider::Aihubmix => vec![("HOME", home.to_path_buf()), ("USERPROFILE", home.to_path_buf())],
-            // Aucune variable de home : le compte ne pilote pas de CLI local.
-            Provider::OpenAiCompatible => Vec::new(),
         }
     }
 
@@ -204,8 +204,8 @@ impl Provider {
             // pratique : le bypass n'est applique que par le runtime de chat,
             // que freebuff ne peut pas alimenter.
             Provider::Freebuff | Provider::Aihubmix => "",
-            // HTTP : pas de flag CLI a passer.
-            Provider::OpenAiCompatible => "",
+            // Le transport OpenAI-compatible reutilise `opencode run`.
+            Provider::OpenAiCompatible => "--auto",
         }
     }
 
@@ -237,7 +237,7 @@ impl Provider {
             // freebuff: <home>/.config/manicode/projects, comme Claude Code.
             Provider::Freebuff => freebuff_config_dir(home).join("projects"),
             Provider::Aihubmix => home.join(".config").join("aihubmix").join("sessions"),
-            Provider::OpenAiCompatible => home.join(".config").join("openai-compatible"),
+            Provider::OpenAiCompatible => home.join("data").join("opencode"),
         }
     }
 
@@ -250,7 +250,7 @@ impl Provider {
             Provider::OpenCode => format!("{cli} --session {session_id}"),
             Provider::Freebuff => format!("{cli} --continue {session_id}"),
             Provider::Aihubmix => format!("{cli} --session {session_id}"),
-            // Non atteint : le chat HTTP ne reprend pas via un CLI local.
+            // Meme transport OpenCode que le chat initial.
             Provider::OpenAiCompatible => format!("{cli} --session {session_id}"),
         }
     }
@@ -297,9 +297,13 @@ impl Provider {
             Provider::OpenCode => opencode_has_auth(home, inference_provider),
             Provider::Freebuff => freebuff_has_auth(home),
             Provider::Aihubmix => home.join(".config").join("aihubmix").join("credentials.json").is_file(),
-            // La cle vit sur l'account (cote serveur), pas dans le home.
-            // `account_has_auth_tokens` la teste par `api_key.present`.
-            Provider::OpenAiCompatible => home.join(".config").join("openai-compatible").is_dir(),
+            // Le repertoire contient le fichier prive `credentials.json` ;
+            // `account_has_auth_tokens` verifie ensuite la cle hydratee.
+            Provider::OpenAiCompatible => home
+                .join(".config")
+                .join("openai-compatible")
+                .join("credentials.json")
+                .is_file(),
         }
     }
 
@@ -325,7 +329,7 @@ impl Provider {
             Provider::OpenCode => ensure_opencode_account_home(home),
             Provider::Freebuff => ensure_freebuff_account_config(home, model),
             Provider::Aihubmix => ensure_aihubmix_account_config(home, model),
-            Provider::OpenAiCompatible => fs::create_dir_all(home),
+            Provider::OpenAiCompatible => ensure_opencode_account_home(home),
         }
     }
 }

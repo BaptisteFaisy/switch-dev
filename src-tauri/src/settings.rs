@@ -71,7 +71,9 @@ pub struct AccountProfile {
     /// les runtimes natifs Codex et Claude Code.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inference_provider: Option<String>,
-    /// Clé AIHubMix stockée côté runtime, jamais exposée au frontend.
+    /// Cle API sensible recue en ecriture puis hydratee depuis le fichier de
+    /// credentials du compte. Elle n'est jamais serialisee dans les reponses
+    /// API ni dans `settings.json`.
     #[serde(default, skip_serializing)]
     pub api_key: Option<String>,
     /// Dossier "home" isole du compte. Pour Codex c'est `CODEX_HOME` ; pour
@@ -103,7 +105,7 @@ pub struct AccountProfile {
     #[serde(default)]
     pub fast_mode: bool,
     /// Endpoint /v1 d'un fournisseur OpenAI-compatible (voir Provider::OpenAiCompatible).
-    /// Vide hors de ce provider. Stocke cote serveur, jamais expose dans l'UI.
+    /// Vide hors de ce provider. L'URL, non secrete, est exposee dans l'UI.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
     /// Nom exact du champ JSON qui porte l'intensite sur cet endpoint
@@ -493,6 +495,8 @@ pub fn load_settings() -> Result<AppSettings, String> {
         settings
     };
 
+    hydrate_openai_compatible_api_keys(&mut settings);
+
     let mut changed = false;
     if settings.auto_discover_accounts && merge_discovered_profiles(&mut settings)? {
         changed = true;
@@ -530,6 +534,10 @@ pub fn load_settings() -> Result<AppSettings, String> {
 pub fn save_settings(mut settings: AppSettings) -> Result<AppSettings, String> {
     let path = settings_path()?;
     let now = now_unix();
+    // Les clients ne recoivent jamais les cles. Recharge donc les secrets des
+    // comptes deja connus avant de persister une copie de settings renvoyee par
+    // le navigateur, sinon une sauvegarde sans rapport effacerait leur acces.
+    hydrate_openai_compatible_api_keys(&mut settings);
     merge_persisted_account_lifecycle(&path, &mut settings, now);
     deduplicate_accounts_by_home(&mut settings);
     ensure_special_bai_account(&mut settings)?;
@@ -540,6 +548,7 @@ pub fn save_settings(mut settings: AppSettings) -> Result<AppSettings, String> {
     sync_account_limit_trackers(&mut settings);
     remove_expired_unconnected_accounts(&mut settings, now);
     clear_expired_home_tombstones_for_registered_accounts(&mut settings);
+    persist_openai_compatible_api_keys(&settings)?;
     write_settings(&path, &settings)?;
     Ok(settings)
 }
@@ -793,6 +802,7 @@ pub fn add_shared_account(account: AccountProfile) -> Result<AppSettings, String
     }
     ensure_agents(&mut settings);
     sync_account_limit_trackers(&mut settings);
+    persist_openai_compatible_api_keys(&settings)?;
     write_settings(&path, &settings)?;
     Ok(settings)
 }
@@ -2689,10 +2699,137 @@ mod tests {
             openrouter_next_page_url(&endpoint, &current, &hostile, None, 1_000, 1_000,).is_err()
         );
     }
+
+    #[test]
+    fn openai_compatible_key_is_private_and_rehydrated_from_the_account_home() {
+        let home = fresh_account_home("openai-compatible-key");
+        let mut account = account_for_home(&home);
+        account.provider = Provider::OpenAiCompatible;
+        account.base_url = Some("https://api.example.test/v1".to_string());
+        account.api_key = Some("sk-private-test".to_string());
+        let mut settings = empty_settings("codex", Vec::new(), None);
+        settings.accounts.push(account);
+
+        persist_openai_compatible_api_keys(&settings).unwrap();
+        let serialized = serde_json::to_string(&settings).unwrap();
+        assert!(!serialized.contains("sk-private-test"));
+
+        settings.accounts[0].api_key = None;
+        hydrate_openai_compatible_api_keys(&mut settings);
+        assert_eq!(
+            settings.accounts[0].api_key.as_deref(),
+            Some("sk-private-test")
+        );
+        let credentials = fs::read_to_string(
+            openai_compatible_credentials_path(&settings.accounts[0].codex_home).unwrap(),
+        )
+        .unwrap();
+        assert!(credentials.contains("sk-private-test"));
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn openai_compatible_endpoint_and_catalog_follow_the_openai_shape() {
+        assert_eq!(
+            normalize_openai_compatible_base_url("https://api.example.test/v1/models").unwrap(),
+            "https://api.example.test/v1"
+        );
+        assert_eq!(
+            openai_compatible_models_url("https://api.example.test/v1")
+                .unwrap()
+                .as_str(),
+            "https://api.example.test/v1/models"
+        );
+        assert!(normalize_openai_compatible_base_url(
+            "https://user:secret@api.example.test/v1"
+        )
+        .is_err());
+
+        let models = parse_openai_compatible_catalog(&json!({
+            "data": [
+                { "id": "model-a", "name": "Modele A" },
+                { "id": "model-a" },
+                { "model": "model-b" }
+            ]
+        }));
+        assert_eq!(
+            models.iter().map(|model| model.id.as_str()).collect::<Vec<_>>(),
+            vec!["model-a", "model-b"]
+        );
+    }
 }
 
 pub fn load_settings_for_terminal() -> Result<AppSettings, String> {
     load_settings()
+}
+
+const OPENAI_COMPATIBLE_CREDENTIALS_FILE: &str = "credentials.json";
+
+fn openai_compatible_credentials_path(codex_home: &str) -> Result<PathBuf, String> {
+    Ok(expand_home_local(codex_home)?
+        .join(".config")
+        .join("openai-compatible")
+        .join(OPENAI_COMPATIBLE_CREDENTIALS_FILE))
+}
+
+/// Recharge les cles sensibles depuis le home local du compte. La lecture est
+/// best-effort : un fichier absent ou invalide laisse simplement le compte non
+/// authentifie et n'empeche pas Switch de demarrer.
+fn hydrate_openai_compatible_api_keys(settings: &mut AppSettings) {
+    for account in &mut settings.accounts {
+        if account.provider != Provider::OpenAiCompatible
+            || account
+                .api_key
+                .as_deref()
+                .is_some_and(|key| !key.trim().is_empty())
+        {
+            continue;
+        }
+        let Some(path) = openai_compatible_credentials_path(&account.codex_home).ok() else {
+            continue;
+        };
+        let Some(document) = fs::read_to_string(path)
+            .ok()
+            .and_then(|content| serde_json::from_str::<Value>(&content).ok())
+        else {
+            continue;
+        };
+        account.api_key = document
+            .get("apiKey")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|key| !key.is_empty() && key.len() <= 16_384)
+            .filter(|key| !key.chars().any(char::is_control))
+            .map(ToString::to_string);
+    }
+}
+
+/// Persiste les nouvelles cles hors de `settings.json`. `api_key` porte le
+/// secret uniquement pendant la deserialisation et l'execution serveur ; son
+/// attribut serde l'exclut de toute reponse envoyee au navigateur.
+fn persist_openai_compatible_api_keys(settings: &AppSettings) -> Result<(), String> {
+    for account in &settings.accounts {
+        if account.provider != Provider::OpenAiCompatible {
+            continue;
+        }
+        let Some(key) = account
+            .api_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|key| !key.is_empty())
+        else {
+            continue;
+        };
+        if key.len() > 16_384 || key.chars().any(char::is_control) {
+            return Err(format!("Cle API invalide pour le compte {}", account.label));
+        }
+        let path = openai_compatible_credentials_path(&account.codex_home)?;
+        let content = serde_json::to_vec_pretty(&json!({ "apiKey": key }))
+            .map_err(|error| error.to_string())?;
+        crate::fs_util::atomic_write(&path, content).map_err(|error| error.to_string())?;
+        crate::fs_util::restrict_private_file(&path).map_err(|error| error.to_string())?;
+    }
+    Ok(())
 }
 
 fn write_settings(path: &Path, settings: &AppSettings) -> Result<(), String> {
@@ -3433,8 +3570,9 @@ fn stable_id(prefix: &str, input: &str) -> String {
 }
 
 pub fn account_has_auth_tokens(account: &AccountProfile) -> bool {
-    // OpenAI-compatible : la cle API vit sur le compte (cote serveur), pas
-    // dans un home. Sa presence suffit pour considerer le compte authentifie.
+    // OpenAI-compatible : `load_settings` hydrate la cle depuis le fichier
+    // prive du home dans cette copie uniquement cote serveur. Sa presence
+    // suffit donc pour considerer le compte authentifie.
     if account.provider == Provider::OpenAiCompatible {
         return account
             .api_key
@@ -3455,10 +3593,18 @@ pub fn account_has_auth_tokens(account: &AccountProfile) -> bool {
 /// l'agent integre correspondant (Codex ou Claude Code), avec repli sur la
 /// commande par defaut du provider si l'agent a ete retire du registre.
 pub fn command_for_provider(settings: &AppSettings, provider: Provider) -> String {
+    // Le compte OpenAI-compatible reutilise OpenCode comme transport : on
+    // conserve ainsi les sessions, les outils et le format JSON deja compris
+    // par Switch, tout en injectant endpoint/cle uniquement dans le processus.
+    let command_provider = if provider == Provider::OpenAiCompatible {
+        Provider::OpenCode
+    } else {
+        provider
+    };
     settings
         .agents
         .iter()
-        .find(|agent| agent.provider == provider && agent.builtin)
+        .find(|agent| agent.provider == command_provider && agent.builtin)
         .map(|agent| agent.command.trim().to_string())
         .filter(|command| !command.is_empty())
         .unwrap_or_else(|| match provider {
@@ -3467,8 +3613,7 @@ pub fn command_for_provider(settings: &AppSettings, provider: Provider) -> Strin
             Provider::OpenCode => "opencode".to_string(),
             Provider::Freebuff => "freebuff".to_string(),
             Provider::Aihubmix => "aihubmix".to_string(),
-            // Pas de CLI local : le chat OpenAI-compatible est un appel HTTP.
-            Provider::OpenAiCompatible => String::new(),
+            Provider::OpenAiCompatible => "opencode".to_string(),
         })
 }
 
@@ -4202,7 +4347,9 @@ async fn load_openai_compatible_model_catalog(
         .ok_or_else(|| "Compte OpenAI-compatible sans cle API".to_string())?;
 
     let endpoint = openai_compatible_models_url(base_url)?;
-    let cache_key = endpoint.as_str().to_string();
+    // Deux cles du meme endpoint peuvent exposer des catalogues differents.
+    // L'identifiant de compte segmente le cache sans y inclure le secret.
+    let cache_key = format!("{}\0{}", account.id, endpoint);
     let now = now_unix();
 
     // Cache hot.
@@ -4252,33 +4399,50 @@ async fn load_openai_compatible_model_catalog(
     Ok(models)
 }
 
-/// Construit l'URL `/models` (ou la garde telle quelle si l'utilisateur a deja
-/// fourni un chemin se terminant par `/models`), et refuse une base non-HTTP(S).
-fn openai_compatible_models_url(base_url: &str) -> Result<Url, String> {
+/// Normalise l'endpoint de base transmis au transport OpenCode. Les identifiants,
+/// query strings et fragments sont refuses afin qu'aucun secret ne soit masque
+/// dans l'URL. Un `/models` colle par habitude est retire.
+pub(crate) fn normalize_openai_compatible_base_url(base_url: &str) -> Result<String, String> {
     let mut url = Url::parse(base_url)
         .map_err(|_| "Endpoint OpenAI-compatible invalide".to_string())?;
     match url.scheme() {
-        "https" => {}
-        "http" => {}
-        other => return Err(format!("Endpoint OpenAI-compatible invalide (HTTPS requis, recu {other})")),
+        "https" | "http" => {}
+        other => {
+            return Err(format!(
+                "Endpoint OpenAI-compatible invalide (HTTP(S) requis, recu {other})"
+            ))
+        }
     }
-    if url.username().is_empty() && url.password().is_none() && url.fragment().is_none() {
+    if url.username().is_empty()
+        && url.password().is_none()
+        && url.query().is_none()
+        && url.fragment().is_none()
+    {
         // ok
     } else {
         return Err("Endpoint OpenAI-compatible invalide".to_string());
     }
-    if !url.path().ends_with("/models") {
-        let path = url.path();
-        let joined = if path.is_empty() || path == "/" {
-            "/models".to_string()
-        } else {
-            format!("{}/models", path.trim_end_matches('/'))
-        };
-        url.set_path(&joined);
+    let mut path = url.path().trim_end_matches('/').to_string();
+    if path.ends_with("/models") {
+        path.truncate(path.len() - "/models".len());
     }
-    // Aucune requete ne doit emporter la cle ou un query utilitaire.
+    url.set_path(if path.is_empty() { "/" } else { &path });
     url.set_query(None);
     url.set_fragment(None);
+    Ok(url.as_str().trim_end_matches('/').to_string())
+}
+
+/// Construit l'URL `/models` a partir de la base validee.
+fn openai_compatible_models_url(base_url: &str) -> Result<Url, String> {
+    let base = normalize_openai_compatible_base_url(base_url)?;
+    let mut url = Url::parse(&base)
+        .map_err(|_| "Endpoint OpenAI-compatible invalide".to_string())?;
+    let path = if url.path().is_empty() || url.path() == "/" {
+        "/models".to_string()
+    } else {
+        format!("{}/models", url.path().trim_end_matches('/'))
+    };
+    url.set_path(&path);
     Ok(url)
 }
 

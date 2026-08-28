@@ -1,7 +1,13 @@
 export type ChatAccountReference = {
   id: string;
   label: string;
-  provider?: "codex" | "claude" | "opencode" | "freebuff" | "aihubmix";
+  provider?:
+    | "codex"
+    | "claude"
+    | "opencode"
+    | "freebuff"
+    | "aihubmix"
+    | "openai-compatible";
   codexHome: string;
 };
 

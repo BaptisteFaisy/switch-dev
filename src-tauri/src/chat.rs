@@ -77,6 +77,8 @@ const COMPACT_TIMEOUT: Duration = Duration::from_secs(180);
 /// d'une conversation ni faire perdre le message de l'utilisateur.
 const CHAT_MCP_STARTUP_TIMEOUT_SECONDS: u64 = 15;
 const OPENCODE_CONFIG_CONTENT_ENV: &str = "OPENCODE_CONFIG_CONTENT";
+const OPENAI_COMPATIBLE_PROVIDER_ID: &str = "switch-openai-compatible";
+const OPENAI_COMPATIBLE_API_KEY_ENV: &str = "CST_OPENAI_COMPATIBLE_API_KEY";
 const RESPONSE_QUALITY_INSTRUCTIONS: &str = "Avant toute réponse finale destinée à l'utilisateur, effectue une relecture silencieuse. Corrige les fautes de grammaire, de syntaxe, d'orthographe, d'accord et de ponctuation, puis vérifie que les phrases sont naturelles et non ambiguës dans la langue de l'utilisateur, sauf demande contraire. Pour le code, les commandes et les formats structurés, préserve les éléments littéraux et vérifie que la syntaxe ainsi que tous les délimiteurs et blocs sont complets. Ne modifie pas les citations ou les contenus demandés mot pour mot et ne mentionne pas cette relecture.";
 
 /// Les identifiants de processus renvoyes par les outils d'execution sont lies
@@ -882,10 +884,17 @@ impl ChatTurnManager {
             validate_session_id(account.provider, session_id)?;
         }
         if !settings::account_has_auth_tokens(&account) {
-            return Err(format!(
-                "Compte non authentifie : {}. Ouvre un terminal de connexion pour ce compte avant de lancer un chat.",
-                account.label
-            ));
+            return Err(if account.provider == Provider::OpenAiCompatible {
+                format!(
+                    "Compte non authentifie : {}. Enregistre sa cle API dans la categorie Autre.",
+                    account.label
+                )
+            } else {
+                format!(
+                    "Compte non authentifie : {}. Ouvre un terminal de connexion pour ce compte avant de lancer un chat.",
+                    account.label
+                )
+            });
         }
         let model = selected_model(request.model.as_deref(), account.model.as_deref())?;
         let reasoning_effort = selected_reasoning_effort(
@@ -1186,7 +1195,10 @@ impl ChatTurnManager {
         self.runtime_sync.notify(RuntimeSyncTopic::ActiveChatTurns);
 
         if let Some(mut writer) = stdin.take() {
-            let prompt = if account.provider == Provider::OpenCode {
+            let prompt = if matches!(
+                account.provider,
+                Provider::OpenCode | Provider::OpenAiCompatible
+            ) {
                 provider_instructions
                     .as_deref()
                     .map(|instructions| {
@@ -2582,7 +2594,7 @@ fn configure_provider_command_with_images_and_scope(
                     ));
             }
         }
-        Provider::OpenCode => {
+        Provider::OpenCode | Provider::OpenAiCompatible => {
             configure_opencode_model_tool(command, model_tool_server);
             command
                 .arg("run")
@@ -2603,6 +2615,11 @@ fn configure_provider_command_with_images_and_scope(
                 command.arg(account.provider.bypass_flag());
             }
             if let Some(model) = model {
+                let model = if account.provider == Provider::OpenAiCompatible {
+                    format!("{OPENAI_COMPATIBLE_PROVIDER_ID}/{model}")
+                } else {
+                    model.to_string()
+                };
                 command.arg("--model").arg(model);
             }
             if account
@@ -2615,8 +2632,6 @@ fn configure_provider_command_with_images_and_scope(
                 }
             }
         }
-        // HTTP : aucun binaire CLI a configurer (voir le runner dedie).
-        Provider::OpenAiCompatible => {}
     }
 }
 
@@ -2805,6 +2820,75 @@ fn configure_opencode_model_overlay(
     model: Option<&str>,
     reasoning_effort: Option<&str>,
 ) -> Result<(), String> {
+    if account.provider == Provider::OpenAiCompatible {
+        let base_url = settings::normalize_openai_compatible_base_url(
+            account.base_url.as_deref().unwrap_or_default(),
+        )?;
+        let api_key = account
+            .api_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| "Compte OpenAI-compatible sans cle API".to_string())?;
+        let model = model
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .filter(|value| value.chars().count() <= 240)
+            .filter(|value| !value.chars().any(char::is_control))
+            .ok_or_else(|| "Choisis un modele pour ce compte OpenAI-compatible".to_string())?;
+
+        let mut model_config = json!({ "name": model });
+        if let (Some(field), Some(effort)) = (
+            account
+                .reasoning_effort_field
+                .as_deref()
+                .map(str::trim)
+                .filter(|field| !field.is_empty()),
+            reasoning_effort
+                .map(str::trim)
+                .filter(|effort| !effort.is_empty()),
+        ) {
+            if field.len() > 64
+                || !field
+                    .chars()
+                    .all(|character| character.is_ascii_alphanumeric() || character == '_')
+            {
+                return Err("Champ d'intensite OpenAI-compatible invalide".to_string());
+            }
+            if !settings::is_valid_reasoning_effort(effort) {
+                return Err("Intensite de raisonnement invalide".to_string());
+            }
+            model_config
+                .as_object_mut()
+                .expect("configuration modele objet")
+                .insert("options".to_string(), json!({ (field): effort }));
+        }
+
+        // La cle reste une variable du processus. OPENCODE_CONFIG_CONTENT ne
+        // contient que la reference `{env:...}` et peut donc etre diagnostique
+        // sans jamais divulguer le secret.
+        command.env(OPENAI_COMPATIBLE_API_KEY_ENV, api_key);
+        merge_opencode_config_content(
+            command,
+            json!({
+                "provider": {
+                    (OPENAI_COMPATIBLE_PROVIDER_ID): {
+                        "npm": "@ai-sdk/openai-compatible",
+                        "name": account.label,
+                        "options": {
+                            "baseURL": base_url,
+                            "apiKey": format!("{{env:{OPENAI_COMPATIBLE_API_KEY_ENV}}}")
+                        },
+                        "models": {
+                            (model): model_config
+                        }
+                    }
+                }
+            }),
+        );
+        return Ok(());
+    }
+
     if account.provider != Provider::OpenCode {
         return Ok(());
     }
@@ -3213,7 +3297,7 @@ fn resolve_provider_program(
     provider: Provider,
 ) -> Result<ResolvedProviderProgram, String> {
     let wrapper = resolve_cli_program(raw).map_err(|error| {
-        if provider == Provider::OpenCode {
+        if matches!(provider, Provider::OpenCode | Provider::OpenAiCompatible) {
             format!(
                 "{error}. Installe OpenCode (`npm install -g opencode-ai`) puis redemarre l'application"
             )
@@ -3229,7 +3313,7 @@ fn resolve_provider_program(
             });
         }
     }
-    if provider == Provider::OpenCode {
+    if matches!(provider, Provider::OpenCode | Provider::OpenAiCompatible) {
         if let Some(executable) = resolve_native_npm_opencode(&wrapper) {
             return Ok(ResolvedProviderProgram {
                 executable,
@@ -3903,7 +3987,7 @@ fn apply_provider_event_to_snapshot(
     value: &Value,
     event_type: &str,
 ) {
-    if provider == Provider::OpenCode {
+    if matches!(provider, Provider::OpenCode | Provider::OpenAiCompatible) {
         apply_opencode_event(turn, snapshot, value, event_type);
         return;
     }
@@ -6108,6 +6192,62 @@ mod tests {
         assert!(!encoded.contains("reasoningEffort"));
         assert!(!encoded.contains("sk-or-"));
         assert!(!encoded.to_ascii_lowercase().contains("proxy"));
+    }
+
+    #[test]
+    fn openai_compatible_account_uses_opencode_without_putting_the_key_in_config() {
+        let mut account = test_account(Provider::OpenAiCompatible);
+        account.label = "Endpoint prive".to_string();
+        account.base_url = Some("https://api.example.test/v1".to_string());
+        account.api_key = Some("sk-private-test".to_string());
+        account.reasoning_effort_field = Some("reasoning_effort".to_string());
+        let mut command = Command::new("opencode");
+        configure_provider_command(
+            &mut command,
+            &account,
+            Some("ses_compatible"),
+            ChatTurnMode::Build,
+            Some("model-a"),
+            Some("high"),
+            None,
+            false,
+            None,
+            None,
+            None,
+        );
+        configure_opencode_model_overlay(
+            &mut command,
+            &account,
+            Some("model-a"),
+            Some("high"),
+        )
+        .unwrap();
+
+        let arguments = command_args(&command);
+        assert!(arguments.windows(2).any(|pair| {
+            pair == ["--model", "switch-openai-compatible/model-a"]
+        }));
+        assert!(arguments
+            .windows(2)
+            .any(|pair| pair == ["--session", "ses_compatible"]));
+        assert_eq!(
+            command_env_value(&command, OPENAI_COMPATIBLE_API_KEY_ENV).as_deref(),
+            Some("sk-private-test")
+        );
+        let encoded = command_env_value(&command, OPENCODE_CONFIG_CONTENT_ENV).unwrap();
+        assert!(!encoded.contains("sk-private-test"));
+        let overlay: Value = serde_json::from_str(&encoded).unwrap();
+        let provider = &overlay["provider"][OPENAI_COMPATIBLE_PROVIDER_ID];
+        assert_eq!(provider["npm"], "@ai-sdk/openai-compatible");
+        assert_eq!(provider["options"]["baseURL"], "https://api.example.test/v1");
+        assert_eq!(
+            provider["options"]["apiKey"],
+            format!("{{env:{OPENAI_COMPATIBLE_API_KEY_ENV}}}")
+        );
+        assert_eq!(
+            provider["models"]["model-a"]["options"]["reasoning_effort"],
+            "high"
+        );
     }
 
     #[test]

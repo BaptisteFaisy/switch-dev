@@ -1146,7 +1146,13 @@ type CodexReasoningEffort = string;
 // executes par OpenCode ; Codex et Claude Code conservent leur CLI natif.
 // freebuff est un TUI interactif : il ne vit qu'en onglet terminal, jamais
 // dans le flux de chat (le backend refuse explicitement un tour de chat).
-type Provider = "codex" | "claude" | "opencode" | "freebuff" | "aihubmix";
+type Provider =
+  | "codex"
+  | "claude"
+  | "opencode"
+  | "freebuff"
+  | "aihubmix"
+  | "openai-compatible";
 type OpenCodeInferenceProvider =
   | "zai"
   | "zai-coding-plan"
@@ -1177,6 +1183,11 @@ type AccountProfile = {
   // compatible avec les settings.json crees avant leur introduction.
   model?: string | null;
   reasoningEffort?: CodexReasoningEffort | null;
+  // Configuration d'un compte « Autre ». La cle n'est presente que dans la
+  // requete d'enregistrement : le serveur ne la renvoie jamais au navigateur.
+  baseUrl?: string | null;
+  reasoningEffortField?: string | null;
+  apiKey?: string | null;
   // Palier rapide par compte. Absent des anciens settings => mode normal.
   fastMode?: boolean;
   // Jour civil local ou l'utilisateur a marque ce compte comme termine.
@@ -4496,7 +4507,7 @@ const buildResumeCommand = (id: string, account: AccountProfile | null | undefin
   const base = agentRunCommand(agentById(providerAgentId(provider)), account);
   return provider === "claude"
     ? `${base} --resume ${id}`
-    : provider === "opencode"
+    : provider === "opencode" || provider === "openai-compatible"
       ? `${base} --session ${id}`
       : provider === "freebuff"
         ? `${base} --continue ${id}`
@@ -4753,6 +4764,7 @@ const providerLabel = (provider: Provider) =>
   provider === "freebuff"
     ? "Freebuff"
     : provider === "aihubmix" ? "AIHubMix"
+    : provider === "openai-compatible" ? "Autre (API OpenAI-compatible)"
     : provider === "claude" ? "Claude" : provider === "opencode" ? "OpenCode" : "Codex";
 
 const openCodeProviderOption = (id: string | null | undefined) =>
@@ -4764,10 +4776,24 @@ const accountInferenceProvider = (
 const accountIsOpenRouter = (account: AccountProfile | null | undefined): boolean =>
   accountProvider(account) === "opencode"
   && accountInferenceProvider(account)?.toLocaleLowerCase() === "openrouter";
+const accountIsOpenAiCompatible = (
+  account: AccountProfile | null | undefined,
+): boolean => accountProvider(account) === "openai-compatible";
 const safeOpenCodeProviderId = (value: string | null | undefined): string | null =>
   value && /^[a-z0-9][a-z0-9_-]{0,63}$/.test(value) ? value : null;
 const safeCliModel = (value: string | null | undefined): string | null =>
   value && /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,159}$/.test(value) ? value : null;
+const normalizeOpenAiCompatibleBaseUrl = (value: string): string | null => {
+  try {
+    const url = new URL(value.trim());
+    if (!['http:', 'https:'].includes(url.protocol)) return null;
+    if (url.username || url.password || url.search || url.hash) return null;
+    url.pathname = url.pathname.replace(/\/+$/, "").replace(/\/models$/, "") || "/";
+    return url.toString().replace(/\/$/, "");
+  } catch {
+    return null;
+  }
+};
 // OpenRouter publie notamment `openrouter/~z-ai/glm-latest`. Le tilde reste
 // strictement limite au debut du premier segment fournisseur ; les autres
 // modeles conservent le validateur CLI historique ci-dessus.
@@ -4810,6 +4836,9 @@ const parseProviderChoice = (value: string | null | undefined): {
   if (value === "claude") return { provider: "claude", inferenceProvider: null };
   if (value === "freebuff") return { provider: "freebuff", inferenceProvider: null };
   if (value === "aihubmix") return { provider: "aihubmix", inferenceProvider: null };
+  if (value === "openai-compatible") {
+    return { provider: "openai-compatible", inferenceProvider: null };
+  }
   return { provider: "codex", inferenceProvider: null };
 };
 const providerChoiceValue = (
@@ -4845,14 +4874,16 @@ const providerIcon = (provider: Provider) =>
     ? "sparkles"
     : provider === "opencode"
       ? "bot"
-      : provider === "freebuff"
-        ? "zap"
-        : "cpu";
+      : provider === "openai-compatible"
+        ? "key-round"
+        : provider === "freebuff"
+          ? "zap"
+          : "cpu";
 
 const providerBypassFlag = (provider: Provider) =>
   provider === "claude"
     ? CLAUDE_BYPASS_FLAG
-    : provider === "opencode"
+    : provider === "opencode" || provider === "openai-compatible"
       ? "--auto"
       : provider === "freebuff"
         ? FREEBUFF_BYPASS_FLAG
@@ -4894,6 +4925,8 @@ const providerDefaultModel = (
     ? DEFAULT_CLAUDE_MODEL
     : provider === "opencode"
       ? openCodeProviderOption(inferenceProvider)?.defaultModel ?? OPENCODE_PROVIDER_OPTIONS[0].defaultModel
+      : provider === "openai-compatible"
+        ? ""
       : provider === "freebuff"
         ? DEFAULT_FREEBUFF_MODEL
         : DEFAULT_CODEX_MODEL;
@@ -4965,6 +4998,7 @@ const modelSuggestionsForProvider = (
     ];
   }
   if (provider === "freebuff") return [...FREEBUFF_MODEL_SUGGESTIONS];
+  if (provider === "openai-compatible") return catalog?.map((model) => model.id) ?? [];
   return catalog?.map((model) => model.id) ?? CODEX_MODEL_SUGGESTIONS;
 };
 
@@ -4991,7 +5025,10 @@ const renderModelSuggestionDatalist = (id: string, models: string[]) =>
 // explicite afin qu'un futur provider ne soit pas annonce compatible avant
 // d'avoir recu et valide son transport Goal.
 const providerSupportsGoals = (provider: Provider): boolean =>
-  provider === "codex" || provider === "claude" || provider === "opencode";
+  provider === "codex"
+  || provider === "claude"
+  || provider === "opencode"
+  || provider === "openai-compatible";
 
 const accountReasoningEffort = (account: AccountProfile | null | undefined) => {
   const raw = account?.reasoningEffort;
@@ -5230,13 +5267,21 @@ const loadChatModelCatalog = async (
     || chatModelCatalogLoads.has(accountId)
   ) return;
   const account = accountById(accountId);
-  if (!account || (accountProvider(account) !== "codex" && !accountIsOpenRouter(account))) return;
+  if (
+    !account
+    || (
+      accountProvider(account) !== "codex"
+      && !accountIsOpenRouter(account)
+      && !accountIsOpenAiCompatible(account)
+    )
+  ) return;
   const accountContext = {
     account,
     provider: accountProvider(account),
     inferenceProvider: accountInferenceProvider(account)?.toLocaleLowerCase() ?? null,
     codexHome: account.codexHome,
     proxyId: account.proxyId ?? null,
+    baseUrl: account.baseUrl?.trim() ?? null,
   };
   chatModelCatalogLoads.add(accountId);
   chatModelCatalogErrors.delete(accountId);
@@ -5251,14 +5296,28 @@ const loadChatModelCatalog = async (
         !== accountContext.inferenceProvider
       || currentAccount?.codexHome !== accountContext.codexHome
       || (currentAccount?.proxyId ?? null) !== accountContext.proxyId
+      || (currentAccount?.baseUrl?.trim() ?? null) !== accountContext.baseUrl
     ) return;
-    if (!catalog.length && accountIsOpenRouter(currentAccount)) {
-      throw new Error("OpenRouter n'a retourné aucun modèle pour ce compte.");
+    if (!catalog.length && (accountIsOpenRouter(currentAccount) || accountIsOpenAiCompatible(currentAccount))) {
+      throw new Error(
+        accountIsOpenRouter(currentAccount)
+          ? "OpenRouter n'a retourné aucun modèle pour ce compte."
+          : "L'endpoint OpenAI-compatible n'a retourné aucun modèle.",
+      );
     }
     if (catalog.length) {
       chatModelCatalogs.set(accountId, catalog);
       chatModelCatalogUpdatedAt.set(accountId, Date.now());
       if (reconcileOpenRouterAccountSelection(currentAccount, catalog)) {
+        await persistChatPreferences(accountId);
+      } else if (
+        currentAccount
+        && accountIsOpenAiCompatible(currentAccount)
+        && !currentAccount.model?.trim()
+      ) {
+        // A la creation, une simple cle + endpoint suffit : le premier modele
+        // annonce par `/models` devient le defaut, sans demander un second flux.
+        currentAccount.model = catalog[0].id;
         await persistChatPreferences(accountId);
       }
     }
@@ -7432,7 +7491,11 @@ const setActiveView = (view: AppView) => {
     void refreshAccountCompletions();
     void refreshPoolStatus();
     settings?.accounts
-      .filter((account) => accountProvider(account) === "codex" || accountIsOpenRouter(account))
+      .filter((account) =>
+        accountProvider(account) === "codex"
+        || accountIsOpenRouter(account)
+        || accountIsOpenAiCompatible(account),
+      )
       .forEach((account) => void loadChatModelCatalog(account.id));
   }
   if (activeView === "limits") void refreshLimitStatus();
@@ -25244,6 +25307,55 @@ const renderOpenRouterAccountCatalog = (account: AccountProfile): string => {
   </section>`;
 };
 
+const renderOpenAiCompatibleAccountCatalog = (account: AccountProfile): string => {
+  if (!accountIsOpenAiCompatible(account)) return "";
+  const snapshot = chatModelCatalogs.get(account.id) ?? [];
+  const loading = chatModelCatalogLoads.has(account.id);
+  const error = chatModelCatalogErrors.get(account.id) ?? "";
+  const updatedAt = chatModelCatalogUpdatedAt.get(account.id) ?? null;
+  const datalistId = `openai-compatible-models-${account.id}`;
+  const statusClass = error ? "is-error" : snapshot.length ? "is-ready" : "is-idle";
+  const status = loading
+    ? "Lecture du catalogue /models…"
+    : error
+      ? error
+      : snapshot.length
+        ? `${snapshot.length} modèle${snapshot.length === 1 ? "" : "s"} disponible${snapshot.length === 1 ? "" : "s"}${updatedAt ? ` · scanné ${formatTimestamp(Math.floor(updatedAt / 1_000))}` : ""}`
+        : "Enregistre la configuration puis scanne les modèles disponibles.";
+
+  return `<section class="openrouter-account-catalog openai-compatible-account-catalog ${statusClass}" data-openai-compatible-account="${escapeAttr(account.id)}">
+    <header class="openrouter-account-catalog-head">
+      <span class="openrouter-account-catalog-mark" aria-hidden="true"><i data-lucide="plug-zap"></i></span>
+      <span><strong>API OpenAI-compatible</strong><small>Endpoint, clé privée et modèle de ce compte</small></span>
+      <button type="button" class="tool-button openrouter-scan-button" data-openai-compatible-scan="${escapeAttr(account.id)}" ${loading ? 'disabled aria-busy="true"' : ""}>
+        <i data-lucide="${loading ? "loader-circle" : "scan-line"}" class="${loading ? "is-spinning" : ""}"></i><span>${loading ? "Scan…" : "Scanner"}</span>
+      </button>
+    </header>
+    <div class="openrouter-account-catalog-status ${statusClass}" role="status" aria-live="polite">
+      <i data-lucide="${error ? "circle-alert" : snapshot.length ? "circle-check" : "library"}"></i><span>${escapeHtml(status)}</span>
+    </div>
+    <div class="openai-compatible-account-edit-fields">
+      <label>
+        <span>URL de base</span>
+        <input data-openai-compatible-base-url="${escapeAttr(account.id)}" type="url" value="${escapeAttr(account.baseUrl ?? "")}" placeholder="https://api.exemple.com/v1" spellcheck="false" />
+      </label>
+      <label>
+        <span>Nouvelle clé API</span>
+        <input data-openai-compatible-api-key="${escapeAttr(account.id)}" type="password" placeholder="Laisser vide pour conserver la clé" autocomplete="new-password" spellcheck="false" />
+      </label>
+      <label>
+        <span>Modèle</span>
+        <input data-openai-compatible-model="${escapeAttr(account.id)}" list="${escapeAttr(datalistId)}" value="${escapeAttr(account.model?.trim() ?? "")}" placeholder="Choisir après le scan" autocomplete="off" spellcheck="false" maxlength="240" />
+        <datalist id="${escapeAttr(datalistId)}">
+          ${snapshot.map((model) => `<option value="${escapeAttr(model.id)}">${escapeHtml(model.displayName)}</option>`).join("")}
+        </datalist>
+      </label>
+      <button type="button" class="tool-button primary" data-openai-compatible-save="${escapeAttr(account.id)}"><i data-lucide="save"></i><span>Enregistrer</span></button>
+    </div>
+    <p class="openrouter-account-catalog-detail"><i data-lucide="shield-check"></i><span>La clé n'est jamais renvoyée au navigateur. Une clé laissée vide conserve celle déjà enregistrée.</span></p>
+  </section>`;
+};
+
 const renderAccountsPanel = () => {
   if (!settings) return "";
 
@@ -25251,7 +25363,7 @@ const renderAccountsPanel = () => {
     .map((item) => {
       const provider = accountProvider(item);
       const providerName = accountProviderLabel(item);
-      const model = accountModel(item);
+      const model = accountModel(item) || "modèle à choisir";
       const fastSupported = accountSupportsFastMode(item, model);
       const fastEnabled = accountFastModeEnabled(item);
       const fastHelp = fastModeAvailabilityLabel(provider, model, fastSupported);
@@ -25297,7 +25409,9 @@ const renderAccountsPanel = () => {
                 <i data-lucide="${fastEnabled ? "zap" : "gauge"}"></i>
                 <span>${fastEnabled ? "Fast" : "Normal"}</span>
               </button>
-              ${accountProvider(item) === "codex" && isRemoteMode()
+              ${accountIsOpenAiCompatible(item)
+                ? `<span class="bai-special-chip" title="La clé API est conservée côté serveur"><i data-lucide="shield-check"></i>Clé privée</span>`
+                : accountProvider(item) === "codex" && isRemoteMode()
                 ? `<a class="tool-button" data-login-account="${escapeAttr(item.id)}" href="https://auth.openai.com/codex/device" target="_blank" rel="noopener" title="Se connecter avec OpenAI">
                     <i data-lucide="log-in"></i><span>Se connecter</span>
                   </a>`
@@ -25311,6 +25425,7 @@ const renderAccountsPanel = () => {
           </div>
           ${codexPanel}
           ${renderOpenRouterAccountCatalog(item)}
+          ${renderOpenAiCompatibleAccountCatalog(item)}
         </article>`;
     })
     .join("");
@@ -25348,6 +25463,10 @@ const renderAccountsPanel = () => {
               <input type="radio" name="newAccountProvider" value="aihubmix" />
               <span><i data-lucide="key"></i>AIHubMix</span>
             </label>
+            <label title="Endpoint et clé API suivant le protocole OpenAI (/v1/models et /v1/chat/completions).">
+              <input type="radio" name="newAccountProvider" value="openai-compatible" />
+              <span><i data-lucide="key-round"></i>Autre</span>
+            </label>
             <label title="Compte spécial b.ai — DeepSeek V4 Flash, intensité max. La clé API est déjà configurée sur le serveur (CST_BAI_API_KEY).">
               <input type="radio" name="newAccountProvider" value="opencode:b.ai" ${(settings?.accounts ?? []).some(isBaiAccount) ? "disabled" : ""} />
               <span><i data-lucide="sparkles"></i>b.ai</span>
@@ -25360,6 +25479,27 @@ const renderAccountsPanel = () => {
           </div>
           <small>Les fournisseurs annexes nécessitent OpenCode dans le PATH (<code>npm install -g opencode-ai</code>). La clé API reste uniquement dans le home isolé du compte.</small>
         </fieldset>
+        <section class="openai-compatible-account-fields" data-openai-compatible-create hidden>
+          <header>
+            <i data-lucide="plug-zap"></i>
+            <span><strong>API compatible OpenAI</strong><small>Switch scannera <code>/models</code>, puis utilisera <code>/chat/completions</code> via OpenCode.</small></span>
+          </header>
+          <div>
+            <label>
+              <span>URL de base</span>
+              <input id="newOpenAiCompatibleBaseUrl" type="url" value="https://api.openai.com/v1" placeholder="https://api.exemple.com/v1" autocomplete="url" spellcheck="false" />
+            </label>
+            <label>
+              <span>Clé API</span>
+              <input id="newOpenAiCompatibleApiKey" type="password" placeholder="sk-…" autocomplete="new-password" spellcheck="false" />
+            </label>
+            <label>
+              <span>Modèle (facultatif)</span>
+              <input id="newOpenAiCompatibleModel" placeholder="Détecté automatiquement via /models" autocomplete="off" spellcheck="false" maxlength="240" />
+            </label>
+          </div>
+          <small>La clé est enregistrée dans un fichier privé côté serveur et n'est jamais renvoyée au navigateur.</small>
+        </section>
         <button id="addAccount" type="submit" class="tool-button primary">
           <i data-lucide="user-plus"></i><span>Ajouter et se connecter</span>
         </button>
@@ -25383,6 +25523,20 @@ const renderAccountsPanel = () => {
 const renderAccountsAndPool = (): string => {
   if (!settings) return "";
   return `<div class="accounts-pool-view">${renderAccountsPanel()}</div>`;
+};
+
+const syncOpenAiCompatibleCreateFields = (): void => {
+  const selected = document.querySelector<HTMLInputElement>(
+    'input[name="newAccountProvider"]:checked',
+  )?.value === "openai-compatible";
+  const panel = document.querySelector<HTMLElement>("[data-openai-compatible-create]");
+  if (panel) panel.hidden = !selected;
+  const baseUrl = document.querySelector<HTMLInputElement>("#newOpenAiCompatibleBaseUrl");
+  const apiKey = document.querySelector<HTMLInputElement>("#newOpenAiCompatibleApiKey");
+  if (baseUrl) baseUrl.required = selected;
+  if (apiKey) apiKey.required = selected;
+  const label = document.querySelector<HTMLElement>("#addAccount span");
+  if (label) label.textContent = selected ? "Ajouter et scanner" : "Ajouter et se connecter";
 };
 
 const renderDiscussionArchiveModal = () => {
@@ -29339,6 +29493,8 @@ const defaultCodexHomeForLabel = (label: string, provider: Provider = "codex") =
       ? "claude-"
       : provider === "opencode"
         ? "opencode-"
+        : provider === "openai-compatible"
+          ? "openai-compatible-"
         : provider === "freebuff"
           ? "freebuff-"
           : "";
@@ -29350,6 +29506,8 @@ const defaultCodexHomeForLabel = (label: string, provider: Provider = "codex") =
     ? ".claude-"
     : provider === "opencode"
       ? ".opencode-"
+      : provider === "openai-compatible"
+        ? ".openai-compatible-"
       : provider === "freebuff"
         ? ".freebuff-"
         : ".codex-";
@@ -29378,6 +29536,9 @@ type NewAccountPreferences = {
   model?: string | null;
   reasoningEffort?: string | null;
   fastMode?: boolean;
+  baseUrl?: string | null;
+  reasoningEffortField?: string | null;
+  apiKey?: string | null;
 };
 
 const newAccountProfile = (
@@ -29403,6 +29564,10 @@ const newAccountProfile = (
     startupCommand: null,
     bypass: preferences.bypass ?? settings?.codexBypass ?? true,
     model: preferences.model?.trim() || providerDefaultModel(provider, inferenceProvider),
+    baseUrl: provider === "openai-compatible" ? preferences.baseUrl?.trim() || null : null,
+    reasoningEffortField:
+      provider === "openai-compatible" ? preferences.reasoningEffortField?.trim() || null : null,
+    apiKey: provider === "openai-compatible" ? preferences.apiKey?.trim() || null : null,
     // OpenRouter demarre en Automatique (null) : aucun niveau n'est force
     // avant que l'utilisateur ait scanne puis choisi une valeur publiee.
     reasoningEffort:
@@ -30288,15 +30453,44 @@ const addAccountAndLogin = async () => {
   if (!settings) return;
   const submitButton = document.querySelector<HTMLButtonElement>("#addAccount");
   if (submitButton?.disabled) return;
-  if (submitButton) {
-    submitButton.disabled = true;
-    submitButton.setAttribute("aria-busy", "true");
-  }
   const providerValue = document.querySelector<HTMLInputElement>(
     'input[name="newAccountProvider"]:checked',
   )?.value;
   const { provider, inferenceProvider } = parseProviderChoice(providerValue);
   const isBai = providerValue === "opencode:b.ai";
+  const openAiCompatibleBaseInput = document.querySelector<HTMLInputElement>(
+    "#newOpenAiCompatibleBaseUrl",
+  );
+  const openAiCompatibleKeyInput = document.querySelector<HTMLInputElement>(
+    "#newOpenAiCompatibleApiKey",
+  );
+  const openAiCompatibleBaseUrl = provider === "openai-compatible"
+    ? normalizeOpenAiCompatibleBaseUrl(openAiCompatibleBaseInput?.value ?? "")
+    : null;
+  const openAiCompatibleApiKey = provider === "openai-compatible"
+    ? openAiCompatibleKeyInput?.value.trim() ?? ""
+    : "";
+  const openAiCompatibleModel = provider === "openai-compatible"
+    ? document.querySelector<HTMLInputElement>("#newOpenAiCompatibleModel")?.value.trim() ?? ""
+    : "";
+  if (provider === "openai-compatible" && !openAiCompatibleBaseUrl) {
+    openAiCompatibleBaseInput?.setCustomValidity(
+      "Saisis une URL HTTP(S) valide, sans identifiants ni paramètres.",
+    );
+    openAiCompatibleBaseInput?.reportValidity();
+    return;
+  }
+  openAiCompatibleBaseInput?.setCustomValidity("");
+  if (provider === "openai-compatible" && !openAiCompatibleApiKey) {
+    openAiCompatibleKeyInput?.setCustomValidity("Saisis la clé API de ce fournisseur.");
+    openAiCompatibleKeyInput?.reportValidity();
+    return;
+  }
+  openAiCompatibleKeyInput?.setCustomValidity("");
+  if (submitButton) {
+    submitButton.disabled = true;
+    submitButton.setAttribute("aria-busy", "true");
+  }
   const requestedLabel =
     document.querySelector<HTMLInputElement>("#newAccountLabel")?.value.trim() ?? "";
   const serviceLabel = isBai
@@ -30312,6 +30506,13 @@ const addAccountAndLogin = async () => {
     {
       provider,
       inferenceProvider,
+      ...(provider === "openai-compatible"
+        ? {
+          baseUrl: openAiCompatibleBaseUrl,
+          apiKey: openAiCompatibleApiKey,
+          model: openAiCompatibleModel || null,
+        }
+        : {}),
       // Le type b.ai est fixe sur DeepSeek V4 Flash en intensite max.
       ...(isBai ? { model: BAI_ACCOUNT_MODEL, reasoningEffort: "max" } : {}),
     },
@@ -30353,6 +30554,18 @@ const addAccountAndLogin = async () => {
   } catch (error) {
     statusText = String(error);
     if (popupPrepared) failRemoteCodexLoginWindow(account.id, statusText);
+    render();
+    return;
+  }
+  if (provider === "openai-compatible") {
+    chatModelCatalogs.delete(account.id);
+    chatModelCatalogErrors.delete(account.id);
+    await loadChatModelCatalog(account.id, true);
+    const catalog = chatModelCatalogs.get(account.id) ?? [];
+    const error = chatModelCatalogErrors.get(account.id);
+    statusText = error
+      ? `Compte ${label} créé, mais le scan a échoué : ${error}`
+      : `Compte ${label} prêt · ${catalog.length} modèle${catalog.length === 1 ? "" : "s"} détecté${catalog.length === 1 ? "" : "s"}`;
     render();
     return;
   }
@@ -31131,6 +31344,10 @@ const bindUi = () => {
     event.preventDefault();
     void addAccountAndLogin();
   });
+  document.querySelectorAll<HTMLInputElement>('input[name="newAccountProvider"]').forEach((input) => {
+    input.addEventListener("change", syncOpenAiCompatibleCreateFields);
+  });
+  syncOpenAiCompatibleCreateFields();
 
   document.querySelectorAll<HTMLElement>("[data-login-account]").forEach((button) => {
     button.addEventListener("click", () => {
@@ -31163,6 +31380,77 @@ const bindUi = () => {
       if (!accountId || !account || !accountIsOpenRouter(account)) return;
       selectedAccountId = accountId;
       void loadChatModelCatalog(accountId, true);
+    });
+  });
+
+  document.querySelectorAll<HTMLButtonElement>("[data-openai-compatible-scan]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const accountId = button.dataset.openaiCompatibleScan;
+      const account = accountById(accountId);
+      if (!accountId || !accountIsOpenAiCompatible(account)) return;
+      selectedAccountId = accountId;
+      void loadChatModelCatalog(accountId, true);
+    });
+  });
+
+  document.querySelectorAll<HTMLButtonElement>("[data-openai-compatible-save]").forEach((button) => {
+    button.addEventListener("click", () => {
+      void (async () => {
+        if (!settings) return;
+        const accountId = button.dataset.openaiCompatibleSave;
+        const account = accountById(accountId);
+        if (!accountId || !account || !accountIsOpenAiCompatible(account)) return;
+        const baseInput = document.querySelector<HTMLInputElement>(
+          `[data-openai-compatible-base-url="${CSS.escape(accountId)}"]`,
+        );
+        const keyInput = document.querySelector<HTMLInputElement>(
+          `[data-openai-compatible-api-key="${CSS.escape(accountId)}"]`,
+        );
+        const modelInput = document.querySelector<HTMLInputElement>(
+          `[data-openai-compatible-model="${CSS.escape(accountId)}"]`,
+        );
+        const baseUrl = normalizeOpenAiCompatibleBaseUrl(baseInput?.value ?? "");
+        if (!baseUrl) {
+          baseInput?.setCustomValidity("Saisis une URL HTTP(S) valide, sans identifiants ni paramètres.");
+          baseInput?.reportValidity();
+          return;
+        }
+        baseInput?.setCustomValidity("");
+        const apiKey = keyInput?.value.trim() ?? "";
+        if (apiKey && /[\u0000-\u001f\u007f]/.test(apiKey)) {
+          keyInput?.setCustomValidity("La clé API contient un caractère invalide.");
+          keyInput?.reportValidity();
+          return;
+        }
+        keyInput?.setCustomValidity("");
+
+        const previous = {
+          baseUrl: account.baseUrl,
+          model: account.model,
+          apiKey: account.apiKey,
+        };
+        account.baseUrl = baseUrl;
+        account.model = modelInput?.value.trim() || null;
+        if (apiKey) account.apiKey = apiKey;
+        button.disabled = true;
+        try {
+          settings = await invoke<AppSettings>("save_settings", { settings });
+          selectedAccountId = accountId;
+          chatModelCatalogs.delete(accountId);
+          chatModelCatalogErrors.delete(accountId);
+          await loadChatModelCatalog(accountId, true);
+          statusText = chatModelCatalogErrors.has(accountId)
+            ? `Configuration enregistrée · ${chatModelCatalogErrors.get(accountId)}`
+            : "Configuration OpenAI-compatible enregistrée";
+        } catch (error) {
+          account.baseUrl = previous.baseUrl;
+          account.model = previous.model;
+          account.apiKey = previous.apiKey;
+          statusText = String(error);
+        } finally {
+          render();
+        }
+      })();
     });
   });
 

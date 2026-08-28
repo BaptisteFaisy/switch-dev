@@ -519,9 +519,7 @@ fn discussion_files(home: &Path, provider: settings::Provider) -> Vec<PathBuf> {
             files
         }
         settings::Provider::Aihubmix => Vec::new(),
-        // Chats portes par Switch, pas par des fichiers du home.
-        settings::Provider::OpenAiCompatible => Vec::new(),
-        settings::Provider::OpenCode => {
+        settings::Provider::OpenCode | settings::Provider::OpenAiCompatible => {
             let root = home.join("data").join("opencode");
             ["opencode.db", "opencode.db-wal", "opencode.db-shm"]
                 .into_iter()
@@ -737,7 +735,7 @@ fn scan_account(account: &AccountProfile, provider_command: &str) -> DiscussionA
     let (mut discussions, error) = match account.provider {
         settings::Provider::Codex => (scan_codex_discussions(&home, account), None),
         settings::Provider::Claude => (scan_claude_discussions(&home, account), None),
-        settings::Provider::OpenCode => {
+        settings::Provider::OpenCode | settings::Provider::OpenAiCompatible => {
             match scan_opencode_discussions(&home, account, provider_command) {
                 Ok(discussions) => (discussions, None),
                 Err(error) => (Vec::new(), Some(error)),
@@ -745,8 +743,6 @@ fn scan_account(account: &AccountProfile, provider_command: &str) -> DiscussionA
         }
         settings::Provider::Freebuff => (scan_freebuff_discussions(&home, account), None),
         settings::Provider::Aihubmix => (Vec::new(), None),
-        // Chats portes par Switch : aucun dossier local a scanner.
-        settings::Provider::OpenAiCompatible => (Vec::new(), None),
     };
     let session_busy = account.provider == settings::Provider::Freebuff
         && crate::provider::freebuff_instance_busy(&home);
@@ -1022,7 +1018,7 @@ fn opencode_summaries_from_value(
                 rollout_id: row.id,
                 resume_id: None,
                 fork_count: 1,
-                provider: settings::Provider::OpenCode,
+                provider: account.provider,
                 account_id: account.id.clone(),
                 account_label: account.label.clone(),
                 codex_home: account.codex_home.clone(),
@@ -1109,7 +1105,10 @@ fn load_opencode_export(account_id: &str, session_id: &str) -> Result<Value, Str
         .iter()
         .find(|account| account.id == account_id)
         .ok_or_else(|| "Compte introuvable".to_string())?;
-    if account.provider != settings::Provider::OpenCode {
+    if !matches!(
+        account.provider,
+        settings::Provider::OpenCode | settings::Provider::OpenAiCompatible
+    ) {
         return Err("Ce compte n'utilise pas OpenCode".to_string());
     }
     let home = expand_home(&account.codex_home)?;
@@ -2104,12 +2103,11 @@ pub fn move_discussion_for_account(
         settings::Provider::Claude => {
             move_claude_discussion_impl(&account, &session_id, workspace_path)
         }
-        settings::Provider::OpenCode => {
+        settings::Provider::OpenCode | settings::Provider::OpenAiCompatible => {
             Err("Le deplacement des sessions OpenCode n'est pas encore pris en charge".to_string())
         }
         settings::Provider::Freebuff
-        | settings::Provider::Aihubmix
-        | settings::Provider::OpenAiCompatible => {
+        | settings::Provider::Aihubmix => {
             Err("Les sessions de ce fournisseur ne sont pas exposees par Switch".to_string())
         }
     }
@@ -2364,17 +2362,13 @@ pub fn delete_discussion_for_account(
         settings::Provider::Claude => {
             delete_claude_discussion_impl(account.codex_home, session_id, archive)
         }
-        settings::Provider::OpenCode => {
+        settings::Provider::OpenCode | settings::Provider::OpenAiCompatible => {
             delete_opencode_discussion_impl(&settings, &account, &session_id, archive)
         }
         settings::Provider::Freebuff => {
             delete_freebuff_discussion_impl(&account, &session_id, archive)
         }
         settings::Provider::Aihubmix => Err("Les sessions AIHubMix ne sont pas encore exposees par Switch".to_string()),
-        // Chats portes par Switch : pas de fichier natif a supprimer ici.
-        settings::Provider::OpenAiCompatible => {
-            Err("Les sessions OpenAI-compatible sont gerees par Switch".to_string())
-        }
     }
 }
 
@@ -3057,11 +3051,10 @@ fn collect_transcript_turns(
     Ok(match provider {
         settings::Provider::Codex => extract_codex_transcript(&file),
         settings::Provider::Claude => extract_claude_transcript(&file),
-        settings::Provider::OpenCode => {
+        settings::Provider::OpenCode | settings::Provider::OpenAiCompatible => {
             extract_opencode_semantic_transcript(&load_opencode_export(account_id, session_id)?)
         }
         settings::Provider::Freebuff | settings::Provider::Aihubmix => Vec::new(),
-        settings::Provider::OpenAiCompatible => Vec::new(),
     })
 }
 
@@ -3082,9 +3075,7 @@ fn discussion_source_for_account(
     let home = expand_home(&account.codex_home)?;
 
     let file = match account.provider {
-        settings::Provider::Freebuff
-        | settings::Provider::Aihubmix
-        | settings::Provider::OpenAiCompatible => {
+        settings::Provider::Freebuff | settings::Provider::Aihubmix => {
             return Err("Les sessions de ce fournisseur ne sont pas exposees par Switch".to_string())
         }
         settings::Provider::Codex => {
@@ -3101,7 +3092,7 @@ fn discussion_source_for_account(
             find_claude_session_file(&home.join("projects"), session_id)
                 .ok_or_else(|| "Discussion introuvable".to_string())?
         }
-        settings::Provider::OpenCode => {
+        settings::Provider::OpenCode | settings::Provider::OpenAiCompatible => {
             if !valid_opencode_session_id(session_id) {
                 return Err("Identifiant de session OpenCode invalide".to_string());
             }
@@ -3340,12 +3331,11 @@ pub fn transcript_for_account(
     let (messages, context_usage) = match provider {
         settings::Provider::Codex => extract_codex_display_transcript_with_context(&file),
         settings::Provider::Claude => (extract_claude_display_transcript(&file), None),
-        settings::Provider::OpenCode => (
+        settings::Provider::OpenCode | settings::Provider::OpenAiCompatible => (
             extract_opencode_display_transcript(&load_opencode_export(&account_id, &session_id)?),
             None,
         ),
         settings::Provider::Freebuff | settings::Provider::Aihubmix => (Vec::new(), None),
-        settings::Provider::OpenAiCompatible => (Vec::new(), None),
     };
     Ok(DiscussionTranscript {
         session_id,
