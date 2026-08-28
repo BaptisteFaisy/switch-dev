@@ -2,11 +2,14 @@ export type ExpertGridLayout = "auto" | "2" | "3" | "4";
 
 export type ExpertChatPageSize = number;
 export type ExpertChatPageSizeMode = "auto" | ExpertChatPageSize;
-export type ExpertChatDisplayMode = "all" | "available";
+export type ExpertChatDisplayMode = "created" | "all" | "available";
 
 export const DEFAULT_EXPERT_CHAT_PAGE_SIZE: ExpertChatPageSize = 6;
 export const DEFAULT_EXPERT_CHAT_PAGE_SIZE_MODE: ExpertChatPageSizeMode = "auto";
-export const DEFAULT_EXPERT_CHAT_DISPLAY_MODE: ExpertChatDisplayMode = "all";
+// Le mur principal reste concentre sur les conversations lancees par
+// l'utilisateur. Les sous-chats techniques de l'orchestrateur restent suivis
+// en arriere-plan et accessibles depuis la liste ou le mode « Tous ».
+export const DEFAULT_EXPERT_CHAT_DISPLAY_MODE: ExpertChatDisplayMode = "created";
 
 export const EXPERT_CHAT_AUTO_MAX_PAGE_SIZE = 16;
 export const EXPERT_CHAT_MIN_PANE_WIDTH = 340;
@@ -35,7 +38,7 @@ export const normalizeExpertChatPageSizeMode = (value: unknown): ExpertChatPageS
 };
 
 export const normalizeExpertChatDisplayMode = (value: unknown): ExpertChatDisplayMode =>
-  value === "available" ? "available" : DEFAULT_EXPERT_CHAT_DISPLAY_MODE;
+  value === "all" || value === "available" ? value : DEFAULT_EXPERT_CHAT_DISPLAY_MODE;
 
 /**
  * Un tour lance depuis le chat actif ne doit pas faire disparaitre ce chat du
@@ -100,7 +103,12 @@ export const expertChatsForDisplay = <T>(
   chats: readonly T[],
   mode: ExpertChatDisplayMode,
   isAvailable: (chat: T) => boolean,
-): T[] => mode === "available" ? chats.filter(isAvailable) : [...chats];
+  isCreatedByUser: (chat: T) => boolean = () => true,
+): T[] => {
+  if (mode === "available") return chats.filter(isAvailable);
+  if (mode === "created") return chats.filter(isCreatedByUser);
+  return [...chats];
+};
 
 /**
  * Le mur principal est une selection explicite de l'utilisateur. Les chats

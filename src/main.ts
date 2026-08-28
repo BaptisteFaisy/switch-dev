@@ -2758,6 +2758,10 @@ const automaticQuotaResumeVisibilityPins = new Set<string>();
 // moment de l'envoi) reste visible en mode « Disponibles ». Cette exception
 // est ephemere et expire a la fin du tour.
 const explicitlyOpenedBusyChatVisibilityPins = new Set<string>();
+// Le mode par defaut « Mes chats » masque les sous-chats fabriques par
+// l'orchestrateur. Un clic explicite dans la liste les revele pour la session
+// courante sans transformer ce choix ponctuel en preference globale.
+const explicitlyOpenedAuxiliaryChatVisibilityPins = new Set<string>();
 const CHAT_DRAG_MIME = "application/x-cst-chat";
 let draggedChatSessionId: string | null = null;
 let draggedChatAccountId: string | null = null;
@@ -3677,12 +3681,15 @@ const setExpertChatDisplayMode = (mode: ExpertChatDisplayMode): void => {
   if (nextMode === expertChatDisplayMode) return;
   expertChatDisplayMode = nextMode;
   if (nextMode !== "available") explicitlyOpenedBusyChatVisibilityPins.clear();
+  explicitlyOpenedAuxiliaryChatVisibilityPins.clear();
   localStorage.setItem(EXPERT_CHAT_DISPLAY_MODE_STORAGE_KEY, nextMode);
   expertChatPage = 0;
   reconcileExpertChatPage();
-  statusText = nextMode === "available"
-    ? "Les chats disponibles sont affichés ; un chat en cours reste accessible depuis la liste"
-    : "La fenêtre principale affiche tous les chats";
+  statusText = nextMode === "created"
+    ? "La fenêtre principale affiche vos chats ; les sous-chats restent en arrière-plan"
+    : nextMode === "available"
+      ? "Les chats disponibles sont affichés ; un chat en cours reste accessible depuis la liste"
+      : "La fenêtre principale affiche tous les chats";
   render();
   if (activeView === "chat") startAllExpertChatWork();
 };
@@ -11421,6 +11428,14 @@ const expertChatPaneIsAvailable = (pane: ExpertChatPane): boolean =>
   || automaticQuotaResumeVisibilityPins.has(pane.key)
   || explicitlyOpenedBusyChatVisibilityPins.has(pane.key);
 
+const expertChatPaneIsCreatedByUser = (pane: ExpertChatPane): boolean =>
+  pane.orchestrationRole !== "worker"
+  && !pane.orchestrationTesterId;
+
+const expertChatPaneIsCreatedOrExplicitlyOpened = (pane: ExpertChatPane): boolean =>
+  expertChatPaneIsCreatedByUser(pane)
+  || explicitlyOpenedAuxiliaryChatVisibilityPins.has(pane.key);
+
 const pinExplicitlyOpenedBusyExpertChat = (pane: ExpertChatPane): void => {
   if (
     pane.userOpened
@@ -11462,13 +11477,15 @@ const displayedExpertChatPanesForCurrentEnvironment = (): ExpertChatPane[] =>
     userOpenedExpertChatPanesForCurrentEnvironment(),
     expertChatDisplayMode,
     expertChatPaneIsAvailable,
+    expertChatPaneIsCreatedOrExplicitlyOpened,
   );
 
-const activeExpertChatPane = (): ExpertChatPane | null =>
-  userOpenedExpertChatPanesForCurrentEnvironment().find((pane) => pane.key === activeExpertChatKey) ??
-  displayedExpertChatPanesForCurrentEnvironment()[0] ??
-  userOpenedExpertChatPanesForCurrentEnvironment()[0] ??
-  null;
+const activeExpertChatPane = (): ExpertChatPane | null => {
+  const displayedPanes = displayedExpertChatPanesForCurrentEnvironment();
+  return displayedPanes.find((pane) => pane.key === activeExpertChatKey)
+    ?? displayedPanes[0]
+    ?? null;
+};
 
 const EXPERT_CHAT_DESKTOP_TOOLBAR_HEIGHT = 70;
 const EXPERT_CHAT_DESKTOP_GRID_INSET = 16;
@@ -11564,6 +11581,13 @@ const expertChatStatusText = (): string => {
   const displayedPanes = displayedExpertChatPanesForCurrentEnvironment();
   const count = displayedPanes.length;
   const totalPages = expertChatPageTotal();
+  if (expertChatDisplayMode === "created") {
+    const backgroundCount = totalCount - count;
+    const backgroundDetail = backgroundCount
+      ? ` · ${backgroundCount} sous-chat${backgroundCount > 1 ? "s" : ""} en arrière-plan`
+      : "";
+    return `${count} de vos chat${count > 1 ? "s" : ""} affiché${count > 1 ? "s" : ""} sur ${totalCount}${backgroundDetail} · page ${expertChatPage + 1}/${totalPages}`;
+  }
   if (expertChatDisplayMode === "available") {
     const visibleBusyCount = displayedPanes.filter(expertChatPaneHasBusyTurn).length;
     const busyDetail = visibleBusyCount
@@ -12080,13 +12104,11 @@ const restoreExpertChats = () => {
   expertChatPanes = (persisted?.panes ?? [])
     .flatMap((record) => {
       if (!record || typeof record.key !== "string") return [];
-      const normalizedRecord: PersistedExpertChatPane = {
-        ...record,
-        // La v1 ne permet pas de distinguer un chat ouvert volontairement
-        // d'un panneau adopte automatiquement. Ses discussions restent dans
-        // la barre laterale et repassent au premier plan au premier clic.
-        userOpened: persistedVersion === 2 ? record.userOpened !== false : !record.sessionId,
-      };
+      // Les anciennes versions pouvaient adopter un tour d'orchestration avant
+      // que son groupe ne soit charge, puis creer un second panneau lors de la
+      // reconciliation. Ces panneaux techniques se reconnaissent a leur cle
+      // serveur et doivent etre reconstruits uniquement par l'orchestrateur.
+      if (record.key.startsWith("orchestration:")) return [];
       const discussion = record.sessionId
         ? (
           record.accountId
@@ -12601,6 +12623,16 @@ const launchAutomaticOrchestration = async (
     focusExpertChatPrompt(pane);
     return false;
   }
+};
+
+const pinExplicitlyOpenedExpertChat = (pane: ExpertChatPane): void => {
+  if (
+    expertChatDisplayMode === "created"
+    && !expertChatPaneIsCreatedByUser(pane)
+  ) {
+    explicitlyOpenedAuxiliaryChatVisibilityPins.add(pane.key);
+  }
+  pinExplicitlyOpenedBusyExpertChat(pane);
 };
 
 const applyExpertChatTurnSnapshot = async (
@@ -13288,7 +13320,7 @@ const startAllExpertChatWork = () => {
         visiblePanes.has(pane)
         || pane.queuedSubmissions.length > 0
         || (
-          expertChatDisplayMode === "available"
+          expertChatDisplayMode !== "all"
           && currentEnvironmentPanes.has(pane)
         )
       )
@@ -13305,8 +13337,7 @@ const startAllExpertChatWork = () => {
 
 const activateExpertChatPane = (pane: ExpertChatPane, focusPrompt = false) => {
   if (!expertChatPanes.includes(pane)) return;
-  pane.userOpened = true;
-  pendingActiveExpertChatKey = null;
+  pinExplicitlyOpenedExpertChat(pane);
   activeExpertChatKey = pane.key;
   moveExpertChatPageToPane(pane);
   document.querySelectorAll<HTMLElement>("[data-chat-panel]").forEach((panel) => {
@@ -14057,6 +14088,7 @@ const closeExpertChatPane = (pane: ExpertChatPane) => {
   expertChatAccountTransitions.delete(pane.key);
   automaticQuotaResumeVisibilityPins.delete(pane.key);
   explicitlyOpenedBusyChatVisibilityPins.delete(pane.key);
+  explicitlyOpenedAuxiliaryChatVisibilityPins.delete(pane.key);
   expertChatPanes.splice(index, 1);
   const environmentPanes = userOpenedExpertChatPanesForCurrentEnvironment();
   if (activeExpertChatKey === pane.key) {
@@ -14835,8 +14867,8 @@ const bindDiscussionRowUi = () => {
       closeMobileOverlays();
       if (minimizeActiveBusyExpertChat(pane)) return;
       activeView = "chat";
-      activateExpertChatPane(pane);
-      pinExplicitlyOpenedBusyExpertChat(pane);
+      pinExplicitlyOpenedExpertChat(pane);
+      activateExpertChatPane(pane, true);
       statusText = expertChatStatusText();
       render();
       window.setTimeout(() => activateExpertChatPane(pane, true), 0);
@@ -17435,6 +17467,10 @@ const syncedChatPaneKey = (turn: ActiveChatTurnSummary): string => {
   return uid("chat-pane-synced");
 };
 
+const activeChatTurnIsManagedByOrchestration = (
+  turn: ActiveChatTurnSummary,
+): boolean => turn.sourceChatKey?.trim().startsWith("orchestration:") === true;
+
 const adoptMissingActiveChatTurns = async (
   turns: readonly ActiveChatTurnSummary[],
 ): Promise<boolean> => {
@@ -17443,6 +17479,7 @@ const adoptMissingActiveChatTurns = async (
   for (const turn of [...turns].sort((left, right) => left.startedAt - right.startedAt || left.id - right.id)) {
     if (
       !chatTurnIsBusy(turn.status)
+      || activeChatTurnIsManagedByOrchestration(turn)
       || expertChatPanes.some((pane) => expertChatPaneRepresentsActiveTurn(pane, turn))
     ) {
       continue;
@@ -23859,10 +23896,13 @@ const renderSettingsPanel = (): string => {
           <span class="settings-card-icon"><i data-lucide="layout-grid"></i></span>
           <span>
             <strong id="chatDisplaySettingsTitle">Affichage de la fenêtre principale</strong>
-            <small>Seuls les chats créés ou ouverts volontairement apparaissent ici. Les chats suivis en arrière-plan restent dans la liste de gauche.</small>
+            <small>« Mes chats » garde les conversations que vous avez lancées au premier plan. Les sous-chats automatiques restent accessibles depuis la liste.</small>
           </span>
         </div>
         <div class="theme-choice-group chat-display-choice-group" role="group" aria-label="Chats affichés dans la fenêtre principale">
+          <button type="button" data-chat-display-mode="created" class="${expertChatDisplayMode === "created" ? "active" : ""}" aria-pressed="${expertChatDisplayMode === "created"}">
+            <i data-lucide="message-square"></i><span>Mes chats</span>
+          </button>
           <button type="button" data-chat-display-mode="all" class="${expertChatDisplayMode === "all" ? "active" : ""}" aria-pressed="${expertChatDisplayMode === "all"}">
             <i data-lucide="layout-grid"></i><span>Ouverts</span>
           </button>
@@ -24770,16 +24810,23 @@ const renderExpertChatGrid = () => {
   const totalCount = allEnvironmentPanes.length;
   const count = environmentPanes.length;
   const visibleBusyCount = environmentPanes.filter(expertChatPaneHasBusyTurn).length;
-  const hiddenBusyCount = totalCount - count;
-  const filteredCountTitle = [
-    `${count - visibleBusyCount} chat${count - visibleBusyCount > 1 ? "s" : ""} disponible${count - visibleBusyCount > 1 ? "s" : ""}`,
-    visibleBusyCount
-      ? `${visibleBusyCount} en cours affiché${visibleBusyCount > 1 ? "s" : ""}`
-      : "",
-    hiddenBusyCount
-      ? `${hiddenBusyCount} en cours masqué${hiddenBusyCount > 1 ? "s" : ""}`
-      : "",
-  ].filter(Boolean).join(" · ");
+  const hiddenCount = totalCount - count;
+  const filteredCountTitle = expertChatDisplayMode === "created"
+    ? [
+      `${count} chat${count > 1 ? "s" : ""} au premier plan`,
+      hiddenCount
+        ? `${hiddenCount} sous-chat${hiddenCount > 1 ? "s" : ""} automatique${hiddenCount > 1 ? "s" : ""} en arrière-plan`
+        : "",
+    ].filter(Boolean).join(" · ")
+    : [
+      `${count - visibleBusyCount} chat${count - visibleBusyCount > 1 ? "s" : ""} disponible${count - visibleBusyCount > 1 ? "s" : ""}`,
+      visibleBusyCount
+        ? `${visibleBusyCount} en cours affiché${visibleBusyCount > 1 ? "s" : ""}`
+        : "",
+      hiddenCount
+        ? `${hiddenCount} en cours masqué${hiddenCount > 1 ? "s" : ""}`
+        : "",
+    ].filter(Boolean).join(" · ");
   const effectivePageSizeMode = effectiveExpertChatPageSizeMode();
   expertChatPage = clampExpertChatPage(expertChatPage, count, effectivePageSizeMode);
   const totalPages = expertChatPageTotal();
@@ -24863,7 +24910,7 @@ const renderExpertChatGrid = () => {
         </div>
         ${renderExpertChatGlobalUsage()}
         <div class="expert-chat-toolbar-actions">
-          <span class="expert-chat-count" title="${expertChatDisplayMode === "available" ? filteredCountTitle : `${totalCount} chat${totalCount > 1 ? "s" : ""} ouvert${totalCount > 1 ? "s" : ""}`}"><strong>${count}</strong> ${expertChatDisplayMode === "available" ? `affiché${count > 1 ? "s" : ""}` : `chat${count > 1 ? "s" : ""}`}</span>
+          <span class="expert-chat-count" title="${expertChatDisplayMode !== "all" ? filteredCountTitle : `${totalCount} chat${totalCount > 1 ? "s" : ""} ouvert${totalCount > 1 ? "s" : ""}`}"><strong>${count}</strong> ${expertChatDisplayMode !== "all" ? `affiché${count > 1 ? "s" : ""}` : `chat${count > 1 ? "s" : ""}`}</span>
           <label class="expert-grid-control expert-page-size-control" title="Saisissez le nombre de chats par page. Laissez le champ vide pour le mode automatique.">
             <span><i data-lucide="app-window"></i><small>Chats/page</small></span>
             <input id="expertChatPageSize" type="number" min="1" step="1" inputmode="numeric" autocomplete="off" value="${expertChatPageSizeMode === "auto" ? "" : expertChatPageSizeMode}" placeholder="Auto" aria-label="Nombre de chats par page" />

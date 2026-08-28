@@ -73,22 +73,30 @@ test("le mode auto adapte la grille au nombre de chats visibles", () => {
   assert.deepEqual(expertChatGridDimensions(37, 37), { columns: 7, rows: 6 });
 });
 
-test("le mode d'affichage peut ne garder que les chats disponibles", () => {
+test("le mode d'affichage montre par defaut les chats crees par l'utilisateur", () => {
   const chats = [
-    { id: "new", status: "idle" },
-    { id: "working", status: "running" },
-    { id: "syncing", status: "finalizing" },
-    { id: "done", status: "completed" },
+    { id: "new", status: "idle", created: true },
+    { id: "worker", status: "running", created: false },
+    { id: "syncing", status: "finalizing", created: true },
+    { id: "done", status: "completed", created: true },
   ];
   const isAvailable = (chat) => !["running", "finalizing"].includes(chat.status);
+  const isCreated = (chat) => chat.created;
 
-  assert.equal(DEFAULT_EXPERT_CHAT_DISPLAY_MODE, "all");
-  assert.equal(normalizeExpertChatDisplayMode(null), "all");
-  assert.equal(normalizeExpertChatDisplayMode("invalid"), "all");
+  assert.equal(DEFAULT_EXPERT_CHAT_DISPLAY_MODE, "created");
+  assert.equal(normalizeExpertChatDisplayMode(null), "created");
+  assert.equal(normalizeExpertChatDisplayMode("invalid"), "created");
+  assert.equal(normalizeExpertChatDisplayMode("created"), "created");
+  assert.equal(normalizeExpertChatDisplayMode("all"), "all");
   assert.equal(normalizeExpertChatDisplayMode("available"), "available");
-  assert.deepEqual(expertChatsForDisplay(chats, "all", isAvailable), chats);
+  assert.deepEqual(expertChatsForDisplay(chats, "created", isAvailable, isCreated), [
+    chats[0],
+    chats[2],
+    chats[3],
+  ]);
+  assert.deepEqual(expertChatsForDisplay(chats, "all", isAvailable, isCreated), chats);
   assert.deepEqual(
-    expertChatsForDisplay(chats, "available", isAvailable).map((chat) => chat.id),
+    expertChatsForDisplay(chats, "available", isAvailable, isCreated).map((chat) => chat.id),
     ["new", "done"],
   );
 });
@@ -229,8 +237,9 @@ test("les deux automatismes d'historique sont persistants dans Parametres", () =
   );
 });
 
-test("le reglage Disponibles pilote le mur principal et reste persistant", () => {
+test("le reglage du mur principal propose Mes chats par defaut et reste persistant", () => {
   assert.match(main, /id="chatDisplaySettingsTitle">Affichage de la fenêtre principale/);
+  assert.match(main, /data-chat-display-mode="created"/);
   assert.match(main, /data-chat-display-mode="all"/);
   assert.match(main, /data-chat-display-mode="available"/);
   assert.match(
@@ -240,14 +249,15 @@ test("le reglage Disponibles pilote le mur principal et reste persistant", () =>
   assert.match(main, /expertChatDisplayMode = loadExpertChatDisplayMode\(\)/);
   assert.match(
     main,
-    /expertChatsForDisplay\(\s*userOpenedExpertChatPanesForCurrentEnvironment\(\),\s*expertChatDisplayMode,\s*expertChatPaneIsAvailable,?\s*\)/,
+    /expertChatsForDisplay\(\s*expertChatPanesForCurrentEnvironment\(\),\s*expertChatDisplayMode,\s*expertChatPaneIsAvailable,\s*expertChatPaneIsCreatedOrExplicitlyOpened,?\s*\)/,
   );
+  assert.match(main, /const expertChatPaneIsCreatedByUser = [\s\S]*?pane\.orchestrationRole !== "worker"[\s\S]*?!pane\.orchestrationTesterId/);
 });
 
 test("un chat masque reste suivi et le mur est rerendu a la fin du tour", () => {
   assert.match(
     main,
-    /expertChatDisplayMode === "available"\s*&& currentEnvironmentPanes\.has\(pane\)/,
+    /expertChatDisplayMode !== "all"\s*&& currentEnvironmentPanes\.has\(pane\)/,
   );
   assert.match(main, /refreshExpertChatDisplayAfterAvailabilityChange/);
   assert.match(
@@ -280,12 +290,44 @@ test("un chat en cours ouvert explicitement reste visible en mode Disponibles", 
   );
   assert.match(
     main,
-    /\[data-open-pane\][\s\S]*?pinExplicitlyOpenedBusyExpertChat\(pane\);[\s\S]*?activateExpertChatPane\(pane, true\)/,
+    /\[data-open-pane\][\s\S]*?pinExplicitlyOpenedExpertChat\(pane\);[\s\S]*?activateExpertChatPane\(pane, true\)/,
   );
   assert.match(
     main,
     /if \(!chatTurnIsBusy\(snapshot\.status\)\) \{[\s\S]*?explicitlyOpenedBusyChatVisibilityPins\.delete\(pane\.key\)/,
   );
+});
+
+test("un sous-chat selectionne explicitement devient visible sans desynchroniser la selection", () => {
+  assert.match(
+    main,
+    /const pinExplicitlyOpenedExpertChat = \(pane: ExpertChatPane\): void =>[\s\S]*?expertChatDisplayMode === "created"[\s\S]*?explicitlyOpenedAuxiliaryChatVisibilityPins\.add\(pane\.key\)/,
+  );
+  assert.match(
+    main,
+    /const activateExpertChatPane = \(pane: ExpertChatPane, focusPrompt = false\) => \{[\s\S]*?pinExplicitlyOpenedExpertChat\(pane\);[\s\S]*?activeExpertChatKey = pane\.key;[\s\S]*?moveExpertChatPageToPane\(pane\)/,
+  );
+  assert.match(
+    main,
+    /const activeExpertChatPane = \(\): ExpertChatPane \| null => \{[\s\S]*?const displayedPanes = displayedExpertChatPanesForCurrentEnvironment\(\);[\s\S]*?displayedPanes\.find/,
+  );
+  assert.doesNotMatch(
+    main,
+    /const activeExpertChatPane = \(\): ExpertChatPane \| null =>[\s\S]{0,250}expertChatPanesForCurrentEnvironment\(\)\.find/,
+  );
+});
+
+test("les tours techniques d'orchestration ne sont ni adoptes ni restaures en double", () => {
+  const adoptionStart = main.indexOf("const adoptMissingActiveChatTurns = async");
+  const adoptionEnd = main.indexOf("const refreshActiveChatTurns = async", adoptionStart);
+  const adoption = main.slice(adoptionStart, adoptionEnd);
+  assert.match(adoption, /activeChatTurnIsManagedByOrchestration\(turn\)/);
+  assert.match(main, /turn\.sourceChatKey\?\.trim\(\)\.startsWith\("orchestration:"\)/);
+
+  const restoreStart = main.indexOf("const restoreExpertChats = () =>");
+  const restoreEnd = main.indexOf("const captureExpertChatScroll", restoreStart);
+  const restore = main.slice(restoreStart, restoreEnd);
+  assert.match(restore, /record\.key\.startsWith\("orchestration:"\)/);
 });
 
 test("un second clic sur le chat orange actif le reduit en mode Disponibles", () => {
@@ -314,7 +356,7 @@ test("un second clic sur le chat orange actif le reduit en mode Disponibles", ()
   );
   assert.match(
     main,
-    /\[data-open-pane\][\s\S]*?if \(minimizeActiveBusyExpertChat\(pane\)\) return;[\s\S]*?pinExplicitlyOpenedBusyExpertChat\(pane\)/,
+    /\[data-open-pane\][\s\S]*?if \(minimizeActiveBusyExpertChat\(pane\)\) return;[\s\S]*?pinExplicitlyOpenedExpertChat\(pane\)/,
   );
 });
 
