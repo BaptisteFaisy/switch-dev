@@ -11760,7 +11760,7 @@ const expertChatAutomaticOrchestrationOption = (
   return {
     enabled: pane.automaticOrchestrationEnabled,
     detail: pane.automaticOrchestrationEnabled
-      ? "Actif : chaque tâche lance immédiatement 5 workers et les orchestrateurs testeurs, avec ce chat comme orchestrateur principal."
+      ? "Actif : chaque tâche lance l’orchestrateur, qui choisit de 1 à 5 workers pour aller au plus vite sans découpage artificiel."
       : "Mode direct : ce chat traite seul les prochaines demandes.",
     disabled: pane.automaticOrchestrationLaunching,
   };
@@ -12570,7 +12570,7 @@ const launchAutomaticOrchestration = async (
     return false;
   }
 
-  statusText = `Orchestration automatique retenue · préparation de ${decision.workerCount} worker${decision.workerCount > 1 ? "s" : ""}`;
+  statusText = `Orchestration automatique retenue · l’orchestrateur choisit de ${decision.workerCount} à ${MAX_ORCHESTRATION_WORKER_COUNT} workers utiles`;
   refreshExpertChatPane(pane);
   try {
     const selection = requireValidatedAccountModelSelection(
@@ -12582,7 +12582,13 @@ const launchAutomaticOrchestration = async (
       request: {
         name: automaticOrchestrationName(submission.prompt) || null,
         objective,
+        // Le workerCount adaptatif est un plancher. L'orchestrateur choisit
+        // ensuite lui-meme la cardinalite utile jusqu'au plafond, en visant le
+        // maximum de missions paralleles sans doublon ni travail artificiel.
         workerCount: decision.workerCount,
+        adaptiveFanout: true,
+        maxTaskCount: MAX_ORCHESTRATION_WORKER_COUNT,
+        maxConcurrency: MAX_ORCHESTRATION_WORKER_COUNT,
         // Un nouveau chat n'a pas encore de session. Le backend cree alors
         // directement celle de l'orchestrateur pendant son tour de planification.
         orchestratorSessionId: sessionId || null,
@@ -12608,7 +12614,7 @@ const launchAutomaticOrchestration = async (
     orchestrationWorkerCount = created.workerCount;
     syncOrchestrationChatPanes();
     persistExpertChats();
-    statusText = `Orchestration automatique lancée · ${created.workerCount} worker${created.workerCount > 1 ? "s" : ""}`;
+    statusText = `Orchestration automatique lancée · planification adaptative jusqu’à ${MAX_ORCHESTRATION_WORKER_COUNT} workers`;
     render();
     startAllExpertChatWork();
     startOrchestrationsPoll();
@@ -13013,7 +13019,7 @@ const sendExpertChatMessage = async (
         deliveryState: "pending",
       },
     ];
-    statusText = `Mode orchestrateur · création immédiate de ${MAX_ORCHESTRATION_WORKER_COUNT} workers`;
+    statusText = `Mode orchestrateur · choix de 1 à ${MAX_ORCHESTRATION_WORKER_COUNT} workers par l’orchestrateur`;
     persistExpertChats();
     refreshExpertChatPane(pane);
 
@@ -13022,8 +13028,8 @@ const sendExpertChatMessage = async (
       submission,
       expertChatResumeSessionId(pane),
       {
-        workerCount: MAX_ORCHESTRATION_WORKER_COUNT,
-        reason: "Mode orchestrateur explicitement actif",
+        workerCount: 1,
+        reason: "Mode orchestrateur actif · cardinalité choisie par l’orchestrateur",
       },
     );
     if (!launched) {

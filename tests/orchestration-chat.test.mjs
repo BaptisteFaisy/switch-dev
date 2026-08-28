@@ -224,8 +224,12 @@ test("un chat normal force immédiatement l'équipe quand le bouton orchestrateu
   assert.match(main, /parseAutomaticOrchestrationDecision/);
   assert.match(main, /launchAutomaticOrchestration/);
   assert.match(main, /Le bouton est une commande, pas une suggestion adressee au modele/);
-  assert.match(main, /workerCount: MAX_ORCHESTRATION_WORKER_COUNT/);
-  assert.match(main, /reason: "Mode orchestrateur explicitement actif"/);
+  assert.match(main, /workerCount: 1/);
+  assert.match(main, /adaptiveFanout: true/);
+  assert.match(main, /maxTaskCount: MAX_ORCHESTRATION_WORKER_COUNT/);
+  assert.match(main, /maxConcurrency: MAX_ORCHESTRATION_WORKER_COUNT/);
+  assert.match(main, /planification adaptative jusqu’à \$\{MAX_ORCHESTRATION_WORKER_COUNT\} workers/);
+  assert.match(main, /reason: "Mode orchestrateur actif · cardinalité choisie par l’orchestrateur"/);
   const sendExpert = main.indexOf("const sendExpertChatMessage");
   const forcedCreation = main.indexOf("if (submission.automaticOrchestration)", sendExpert);
   const ordinaryTurn = main.indexOf('invoke<ChatTurnSnapshot>("start_chat_turn"', sendExpert);
