@@ -202,6 +202,11 @@ export type WorkspaceRegistryUpdate = {
   changed: boolean;
 };
 
+export type WorkspaceActivity = {
+  path: string | null | undefined;
+  lastActivity: number;
+};
+
 /**
  * Recalcule toujours l'id depuis le chemin puis fusionne les doublons. Garder
  * la premiere occurrence preserve son chemin d'affichage et son libelle, tout
@@ -268,6 +273,57 @@ export const mergeClosedWorkspaceIds = (ids: readonly string[]): string[] => {
     merged.push(id);
   });
   return merged;
+};
+
+/**
+ * Construit la liste des environnements proposes a partir du registre et des
+ * choix explicites de l'utilisateur. L'historique sert uniquement a trier les
+ * environnements deja connus : le simple cwd d'un ancien chat ne doit jamais
+ * promouvoir son dossier en environnement.
+ */
+export const selectableWorkspaceProfiles = (
+  profiles: readonly WorkspaceProfile[],
+  rememberedPaths: readonly (string | null | undefined)[],
+  activePath: string | null | undefined,
+  closedIds: readonly string[],
+  activity: readonly WorkspaceActivity[] = [],
+): WorkspaceProfile[] => {
+  const closed = new Set(mergeClosedWorkspaceIds(closedIds));
+  const byId = new Map<string, WorkspaceProfile>();
+
+  mergeWorkspaceProfiles(profiles).workspaces.forEach((profile) => {
+    if (!closed.has(profile.id)) byId.set(profile.id, profile);
+  });
+
+  const addExplicitPath = (rawPath: string | null | undefined) => {
+    const path = userEnvironmentPath(rawPath);
+    if (!path) return;
+    const id = workspaceIdForPath(path);
+    if (closed.has(id) || byId.has(id)) return;
+    byId.set(id, { id, label: workspaceBaseName(path), path, memory: "" });
+  };
+
+  addExplicitPath(activePath);
+  rememberedPaths.forEach(addExplicitPath);
+
+  const lastActivity = new Map<string, number>();
+  activity.forEach((item) => {
+    const path = userEnvironmentPath(item.path);
+    if (!path) return;
+    const id = workspaceIdForPath(path);
+    if (!byId.has(id)) return;
+    lastActivity.set(id, Math.max(lastActivity.get(id) ?? 0, item.lastActivity));
+  });
+
+  const active = userEnvironmentPath(activePath);
+  const activeId = active ? workspaceIdForPath(active) : null;
+  return [...byId.values()].sort((left, right) => {
+    if (left.id === activeId) return -1;
+    if (right.id === activeId) return 1;
+    const delta = (lastActivity.get(right.id) ?? 0) - (lastActivity.get(left.id) ?? 0);
+    if (delta !== 0) return delta;
+    return left.label.localeCompare(right.label);
+  });
 };
 
 /**
