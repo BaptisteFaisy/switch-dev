@@ -7102,6 +7102,81 @@ button.chat-workspace-select:hover,
 .chat-workspace-new svg,
 .chat-workspace-close svg { width: 12px; height: 12px; }
 .chat-workspace-terminals { padding: 4px; }
+.chat-workspace-chat-groups {
+  display: grid;
+  gap: 8px;
+  padding: 7px;
+}
+.chat-side-chat-group {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.085);
+  border-radius: 11px;
+  background: rgba(255, 255, 255, 0.018);
+}
+.chat-side-chat-group--orchestration {
+  border-color: rgba(139, 123, 255, 0.32);
+  background: linear-gradient(145deg, rgba(108, 92, 231, 0.09), rgba(255, 255, 255, 0.018) 48%);
+  box-shadow: inset 3px 0 0 rgba(139, 123, 255, 0.62);
+}
+.chat-side-chat-group > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 36px;
+  padding: 6px 9px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.065);
+  color: #a1a1aa;
+}
+.chat-side-chat-group > header > span {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+.chat-side-chat-group > header > span > span {
+  display: grid;
+  min-width: 0;
+  gap: 1px;
+}
+.chat-side-chat-group > header strong,
+.chat-side-chat-group > header small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chat-side-chat-group > header strong {
+  color: #c7c7d1;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.035em;
+}
+.chat-side-chat-group > header small {
+  color: #858595;
+  font-size: 9px;
+}
+.chat-side-chat-group > header svg {
+  width: 13px;
+  height: 13px;
+  flex: none;
+}
+.chat-side-chat-group--orchestration > header svg,
+.chat-side-chat-group--orchestration > header strong {
+  color: #aca0ff;
+}
+.chat-side-chat-group > header > b {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 20px;
+  padding-inline: 5px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.065);
+  color: #a4a4ad;
+  font-size: 9px;
+}
+.chat-side-chat-group > div { padding: 2px 4px 4px; }
 .chat-workspace-empty {
   padding: 8px;
   color: var(--chat-muted);
@@ -7261,6 +7336,14 @@ body.chat-dragging .chat-side-drag-handle {
   border-color: #f87171;
   background: #ef4444;
   box-shadow: 0 0 0 2px rgba(239, 68, 68, 0.14);
+}
+
+.chat-side-status--orchestrator {
+  width: 10px;
+  height: 10px;
+  border-width: 2px;
+  border-radius: 3px;
+  transform: rotate(45deg);
 }
 
 .chat-side-copy { display: grid; min-width: 0; gap: 2px; }

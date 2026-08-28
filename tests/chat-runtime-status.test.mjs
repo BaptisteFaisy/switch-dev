@@ -304,8 +304,14 @@ test("le bandeau et la colonne de gauche portent les statuts du chat", () => {
   assert.match(view, /"En cours" : "Disponible"/);
   assert.match(view, /if \(waitingForUser\) stateLabel = "Question"/);
   assert.match(main, /turnStatus\.outerHTML = renderChatTurnStatus\(model\)/);
-  assert.match(main, /renderChatSidebarStatus\(openedPane \?\? null, discussion\)/);
-  assert.match(main, /renderChatSidebarStatus\(pane\)/);
+  assert.match(
+    main,
+    /renderChatSidebarStatus\(openedPane \?\? null, discussion, orchestrationMember\?\.role === "orchestrator"\)/,
+  );
+  assert.match(
+    main,
+    /renderChatSidebarStatus\(pane, pane\.discussion, orchestrationMember\?\.role === "orchestrator"\)/,
+  );
   assert.match(main, /data-chat-status-pane/);
   assert.match(main, /invoke<ActiveChatTurnSummary\[]>\("list_active_chat_turns"\)/);
   assert.match(main, /activeChatTurnForDiscussion\(next, pane\.discussion\)/);

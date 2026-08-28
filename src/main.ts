@@ -315,8 +315,10 @@ import {
   defaultChatSidebarWidth,
   discussionIdentityKey,
   discussionForSession,
+  groupChatSidebarItems,
   normalizeChatSidebarPriorityMode,
   orderChatSidebarDiscussions,
+  type ChatSidebarOrchestrationRole,
   type ChatSidebarPriorityMode,
   type ChatSidebarStatus,
 } from "./chat/sidebar";
@@ -12016,14 +12018,17 @@ const expertChatSidebarStatus = (
 const renderChatSidebarStatus = (
   pane: ExpertChatPane | null,
   discussion: DiscussionSummary | null = pane?.discussion ?? null,
+  orchestrator = false,
 ): string => {
   const status = expertChatSidebarStatus(pane, discussion);
   if (pane) chatSidebarPaneStatuses.set(pane, status);
   const label = chatSidebarStatusLabel(status);
+  const accessibleLabel = orchestrator ? `Orchestrateur · ${label}` : label;
   const paneAttribute = pane
     ? ` data-chat-status-pane="${escapeAttr(pane.key)}"`
     : "";
-  return `<span class="chat-side-status chat-side-status--${status}"${paneAttribute} role="img" title="${escapeAttr(label)}" aria-label="Statut : ${escapeAttr(label)}"></span>`;
+  const roleClass = orchestrator ? " chat-side-status--orchestrator" : "";
+  return `<span class="chat-side-status chat-side-status--${status}${roleClass}"${paneAttribute} role="img" title="${escapeAttr(accessibleLabel)}" aria-label="Statut : ${escapeAttr(accessibleLabel)}"></span>`;
 };
 
 const refreshExpertChatSidebarStatus = (pane: ExpertChatPane) => {
@@ -12048,8 +12053,11 @@ const refreshExpertChatSidebarStatus = (pane: ExpertChatPane) => {
     "chat-side-status--question",
   );
   indicator.classList.add(`chat-side-status--${status}`);
-  indicator.title = label;
-  indicator.setAttribute("aria-label", `Statut : ${label}`);
+  const accessibleLabel = indicator.classList.contains("chat-side-status--orchestrator")
+    ? `Orchestrateur · ${label}`
+    : label;
+  indicator.title = accessibleLabel;
+  indicator.setAttribute("aria-label", `Statut : ${accessibleLabel}`);
 };
 
 const persistedRecentChatMessagesForPane = (
@@ -17289,6 +17297,134 @@ const renderChatSidebarOpenTerminals = (): string => {
   </section>`;
 };
 
+type ChatSidebarOrchestrationMember = {
+  run: OrchestrationSnapshot;
+  role: ChatSidebarOrchestrationRole;
+  position: number;
+};
+
+type ChatSidebarRenderedItem = {
+  status: ChatSidebarStatus;
+  html: string;
+  orchestrationId: string | null;
+  orchestrationRole: ChatSidebarOrchestrationRole | null;
+  orchestrationPosition: number;
+};
+
+const chatSidebarOrchestrationMember = (
+  pane: ExpertChatPane | null,
+  discussion: DiscussionSummary | null,
+): ChatSidebarOrchestrationMember | null => {
+  if (pane?.orchestrationId) {
+    const run = orchestrations.find((candidate) => candidate.id === pane.orchestrationId);
+    if (run && pane.orchestrationRole === "worker" && pane.orchestrationTaskId) {
+      const task = run.tasks.find((candidate) => candidate.id === pane.orchestrationTaskId);
+      if (task) return { run, role: "worker", position: task.position };
+    }
+    if (run && pane.orchestrationTesterId) {
+      const tester = run.testers.find(
+        (candidate) => candidate.id === pane.orchestrationTesterId,
+      );
+      if (tester) return { run, role: "tester", position: tester.position };
+    }
+    if (run && pane.orchestrationRole === "orchestrator") {
+      return { run, role: "orchestrator", position: 0 };
+    }
+  }
+
+  if (!discussion) return null;
+  const sessionIds = new Set(
+    [discussion.sessionId, discussion.rolloutId]
+      .map((value) => value?.trim())
+      .filter((value): value is string => !!value),
+  );
+  for (const run of orchestrations) {
+    if (
+      discussion.accountId === orchestrationOrchestratorAccountId(run)
+      && !!run.orchestratorSessionId
+      && sessionIds.has(run.orchestratorSessionId.trim())
+    ) {
+      return { run, role: "orchestrator", position: 0 };
+    }
+    const worker = run.tasks.find(
+      (task) =>
+        discussion.accountId === orchestrationWorkerAccountId(run, task)
+        && !!task.sessionId
+        && sessionIds.has(task.sessionId.trim()),
+    );
+    if (worker) return { run, role: "worker", position: worker.position };
+    const tester = run.testers.find(
+      (candidate) =>
+        discussion.accountId === orchestrationOrchestratorAccountId(run)
+        && !!candidate.sessionId
+        && sessionIds.has(candidate.sessionId.trim()),
+    );
+    if (tester) return { run, role: "tester", position: tester.position };
+  }
+  return null;
+};
+
+const chatSidebarMemberLabel = (
+  member: ChatSidebarOrchestrationMember | null,
+): string | null => {
+  if (!member) return null;
+  switch (member.role) {
+    case "orchestrator":
+      return "Orchestrateur";
+    case "worker":
+      return `Worker ${member.position}`;
+    case "tester":
+      return `Testeur ${member.position}`;
+  }
+};
+
+const chatSidebarMemberIcon = (
+  member: ChatSidebarOrchestrationMember | null,
+  fallback: string,
+): string => {
+  switch (member?.role) {
+    case "orchestrator":
+      return "brain-circuit";
+    case "worker":
+      return "bot";
+    case "tester":
+      return "flask-conical";
+    default:
+      return fallback;
+  }
+};
+
+const renderChatSidebarItemGroups = (
+  items: readonly ChatSidebarRenderedItem[],
+): string => {
+  const groups = groupChatSidebarItems(items);
+  const grouped = groups.some((group) => group.orchestrationId !== null);
+  if (!grouped) return groups.flatMap((group) => group.items).map((item) => item.html).join("");
+
+  return groups.map((group) => {
+    if (!group.orchestrationId) {
+      return `<section class="chat-side-chat-group chat-side-chat-group--direct">
+        <header><span><i data-lucide="messages-square"></i><strong>Chats directs</strong></span><b>${group.items.length}</b></header>
+        <div>${group.items.map((item) => item.html).join("")}</div>
+      </section>`;
+    }
+    const run = orchestrations.find((candidate) => candidate.id === group.orchestrationId);
+    const title = run?.name?.trim() || "Groupe orchestré";
+    const createdSubchatCount = run
+      ? run.tasks.filter((task) => !!task.sessionId).length
+        + run.testers.filter((tester) => !!tester.sessionId).length
+      : Math.max(0, group.items.length - 1);
+    const plannedSubchatCount = run
+      ? run.workerCount + run.testerCount
+      : createdSubchatCount;
+    const countLabel = `${createdSubchatCount} / ${plannedSubchatCount} sous-chat${plannedSubchatCount > 1 ? "s" : ""}`;
+    return `<section class="chat-side-chat-group chat-side-chat-group--orchestration" data-sidebar-orchestration-group="${escapeAttr(group.orchestrationId)}">
+      <header title="${escapeAttr(title)}"><span><i data-lucide="network"></i><span><strong>${escapeHtml(title)}</strong><small>${escapeHtml(countLabel)}</small></span></span><b>${group.items.length}</b></header>
+      <div>${group.items.map((item) => item.html).join("")}</div>
+    </section>`;
+  }).join("");
+};
+
 const renderChatSidebarConversations = (): string => {
   const query = chatSidebarSearch.trim().toLocaleLowerCase();
   const environmentPath = userEnvironmentPath(currentWorkspace());
@@ -17361,15 +17497,28 @@ const renderChatSidebarConversations = (): string => {
         || "Conversation sans titre";
       const busy = discussionIsBusy(discussion);
       const status = expertChatSidebarStatus(openedPane ?? null, discussion);
+      const orchestrationMember = chatSidebarOrchestrationMember(
+        openedPane ?? null,
+        discussion,
+      );
+      const memberLabel = chatSidebarMemberLabel(orchestrationMember);
+      const subtitle = [
+        memberLabel,
+        discussion.accountLabel,
+        providerLabel(discussion.provider ?? "codex"),
+      ].filter(Boolean).join(" · ");
       return {
         status,
+        orchestrationId: orchestrationMember?.run.id ?? null,
+        orchestrationRole: orchestrationMember?.role ?? null,
+        orchestrationPosition: orchestrationMember?.position ?? 0,
         html: `<div class="chat-side-item ${openedPane ? "active" : ""} ${current ? "current" : ""} ${busy ? "moving" : ""}" aria-busy="${busy}">
-        <button type="button" class="chat-side-open" data-open-chat="${escapeAttr(discussion.sessionId)}" data-open-account="${escapeAttr(discussion.accountId)}" title="${escapeAttr(title)}" ${current ? 'aria-current="true"' : ""}>
-          ${renderChatSidebarStatus(openedPane ?? null, discussion)}
-          <i class="chat-side-terminal-icon" data-lucide="message-square"></i>
+        <button type="button" class="chat-side-open" data-open-chat="${escapeAttr(discussion.sessionId)}" data-open-account="${escapeAttr(discussion.accountId)}" title="${escapeAttr(title)}">
+          ${renderChatSidebarStatus(openedPane ?? null, discussion, orchestrationMember?.role === "orchestrator")}
+          <i class="chat-side-terminal-icon" data-lucide="${chatSidebarMemberIcon(orchestrationMember, "message-square")}"></i>
           <span class="chat-side-copy">
             <strong>${escapeHtml(title)}</strong>
-            <small>${escapeHtml(discussion.accountLabel)} · ${escapeHtml(providerLabel(discussion.provider ?? "codex"))}</small>
+            <small>${escapeHtml(subtitle)}</small>
           </span>
         </button>
         <button type="button" class="chat-side-rename" data-rename-session="${escapeAttr(discussion.sessionId)}" data-rename-account="${escapeAttr(discussion.accountId)}" title="Renommer ce chat" aria-label="Renommer ${escapeAttr(title)}">
@@ -17404,15 +17553,21 @@ const renderChatSidebarConversations = (): string => {
         ? `${account.label} · ${accountProviderLabel(account)}`
         : "Choisissez un agent";
       const status = expertChatSidebarStatus(pane);
+      const orchestrationMember = chatSidebarOrchestrationMember(pane, pane.discussion);
+      const memberLabel = chatSidebarMemberLabel(orchestrationMember);
+      const memberSubtitle = memberLabel ? `${memberLabel} · ${subtitle}` : subtitle;
       return {
         status,
-        html: `<div class="chat-side-item ${pane.userOpened ? "active" : ""} ${current ? "current" : ""}">
-        <button type="button" class="chat-side-open" data-open-pane="${escapeAttr(pane.key)}" title="${escapeAttr(title)}" ${current ? 'aria-current="true"' : ""}>
-          ${renderChatSidebarStatus(pane)}
-          <i class="chat-side-terminal-icon" data-lucide="message-square-plus"></i>
+        orchestrationId: orchestrationMember?.run.id ?? null,
+        orchestrationRole: orchestrationMember?.role ?? null,
+        orchestrationPosition: orchestrationMember?.position ?? 0,
+        html: `<div class="chat-side-item active ${current ? "current" : ""}">
+        <button type="button" class="chat-side-open" data-open-pane="${escapeAttr(pane.key)}" title="${escapeAttr(title)}">
+          ${renderChatSidebarStatus(pane, pane.discussion, orchestrationMember?.role === "orchestrator")}
+          <i class="chat-side-terminal-icon" data-lucide="${chatSidebarMemberIcon(orchestrationMember, "message-square-plus")}"></i>
           <span class="chat-side-copy">
             <strong>${escapeHtml(title)}</strong>
-            <small>${escapeHtml(subtitle)}</small>
+            <small>${escapeHtml(memberSubtitle)}</small>
           </span>
         </button>
         <button type="button" class="chat-side-delete" data-close-pane="${escapeAttr(pane.key)}" title="Fermer ce chat" aria-label="Fermer ${escapeAttr(title)}">
@@ -17429,7 +17584,7 @@ const renderChatSidebarConversations = (): string => {
     chatSidebarHideRunning,
   );
   const hiddenRunningCount = totalCount - visibleItems.length;
-  const listItems = visibleItems.map((item) => item.html).join("");
+  const listItems = renderChatSidebarItemGroups(visibleItems);
   const countTitle = hiddenRunningCount > 0
     ? `${hiddenRunningCount} chat${hiddenRunningCount > 1 ? "s orange masqués" : " orange masqué"}`
     : `${totalCount} chat${totalCount > 1 ? "s affichés" : " affiché"}`;
@@ -17444,7 +17599,7 @@ const renderChatSidebarConversations = (): string => {
     <div class="chat-workspace-terminals">${environmentTerminalItems || `<div class="chat-workspace-empty">Aucun terminal ouvert.</div>`}</div>
   </section><section class="chat-workspace-group active chat-current-environment-chats">
     <div class="chat-folder-section-label"><span>Chats de cet environnement</span><b title="${escapeAttr(countTitle)}">${visibleItems.length}</b></div>
-    <div class="chat-workspace-terminals">
+    <div class="chat-workspace-terminals chat-workspace-chat-groups">
       ${listItems || `<div class="chat-workspace-empty">${escapeHtml(emptyMessage)}</div>`}
     </div>
   </section>`;

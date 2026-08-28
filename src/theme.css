@@ -3336,6 +3336,39 @@
   background: #b23b3b;
 }
 
+:root[data-theme="light"] .chat-side-chat-group {
+  border-color: rgba(24, 24, 27, 0.13);
+  background: rgba(24, 24, 27, 0.018);
+}
+
+:root[data-theme="light"] .chat-side-chat-group--orchestration {
+  border-color: rgba(91, 74, 206, 0.28);
+  background: linear-gradient(145deg, rgba(108, 92, 231, 0.075), rgba(255, 255, 255, 0.68) 48%);
+  box-shadow: inset 3px 0 0 rgba(91, 74, 206, 0.5);
+}
+
+:root[data-theme="light"] .chat-side-chat-group > header {
+  border-bottom-color: rgba(24, 24, 27, 0.09);
+  color: #5f6069;
+}
+
+:root[data-theme="light"] .chat-side-chat-group > header strong {
+  color: #3f4048;
+}
+
+:root[data-theme="light"] .chat-side-chat-group > header small {
+  color: #71717a;
+}
+
+:root[data-theme="light"] .chat-side-chat-group--orchestration > header :is(svg, strong) {
+  color: #5b4ace;
+}
+
+:root[data-theme="light"] .chat-side-chat-group > header > b {
+  background: rgba(24, 24, 27, 0.07);
+  color: #5f6069;
+}
+
 :root[data-theme="light"] .chat-turn-status--running {
   border-color: #96640e;
   color: #ffffff;

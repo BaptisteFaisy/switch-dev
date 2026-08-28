@@ -16,6 +16,22 @@ export type ChatSidebarPrioritizableItem = {
   status: ChatSidebarStatus;
 };
 
+export type ChatSidebarOrchestrationRole =
+  | "orchestrator"
+  | "worker"
+  | "tester";
+
+export type ChatSidebarGroupableItem = ChatSidebarPrioritizableItem & {
+  orchestrationId: string | null;
+  orchestrationRole: ChatSidebarOrchestrationRole | null;
+  orchestrationPosition: number;
+};
+
+export type ChatSidebarItemGroup<T extends ChatSidebarGroupableItem> = {
+  orchestrationId: string | null;
+  items: T[];
+};
+
 export type ChatSidebarDiscussionIdentity = {
   accountId: string;
   sessionId: string;
@@ -114,6 +130,52 @@ export const arrangeChatSidebarItems = <T extends ChatSidebarPrioritizableItem>(
       || left.index - right.index,
     )
     .map(({ item }) => item);
+};
+
+const orchestrationRoleRank = (
+  role: ChatSidebarOrchestrationRole | null,
+): number => {
+  switch (role) {
+    case "orchestrator":
+      return 0;
+    case "worker":
+      return 1;
+    case "tester":
+      return 2;
+    default:
+      return 3;
+  }
+};
+
+/**
+ * Conserve l'ordre de priorite entre les groupes, puis rend chaque equipe
+ * lisible comme une unite : pilote, workers par position, testeurs par position.
+ * Les chats directs partagent un groupe sans modifier leur ordre existant.
+ */
+export const groupChatSidebarItems = <T extends ChatSidebarGroupableItem>(
+  items: readonly T[],
+): ChatSidebarItemGroup<T>[] => {
+  const groups = new Map<string | null, Array<{ item: T; index: number }>>();
+  items.forEach((item, index) => {
+    const key = item.orchestrationId?.trim() || null;
+    const group = groups.get(key) ?? [];
+    group.push({ item, index });
+    groups.set(key, group);
+  });
+
+  return [...groups.entries()].map(([orchestrationId, entries]) => ({
+    orchestrationId,
+    items: orchestrationId
+      ? entries
+          .sort((left, right) =>
+            orchestrationRoleRank(left.item.orchestrationRole)
+            - orchestrationRoleRank(right.item.orchestrationRole)
+            || left.item.orchestrationPosition - right.item.orchestrationPosition
+            || left.index - right.index,
+          )
+          .map(({ item }) => item)
+      : entries.map(({ item }) => item),
+  }));
 };
 
 /**

@@ -14,6 +14,7 @@ import {
   clampChatSidebarWidth,
   defaultChatSidebarWidth,
   discussionForSession,
+  groupChatSidebarItems,
   normalizeChatSidebarPriorityMode,
   orderChatSidebarDiscussions,
 } from "../src/chat/sidebar.ts";
@@ -190,6 +191,44 @@ test("un chat orchestre s'ouvre avec son rollout courant", () => {
     discussions[0],
   );
   assert.equal(discussionForSession(discussions, "missing", "latest-rollout"), null);
+});
+
+test("les chats sont regroupes par orchestration avec le pilote en premier", () => {
+  const items = [
+    { id: "direct-a", status: "idle", orchestrationId: null, orchestrationRole: null, orchestrationPosition: 0 },
+    { id: "tester-2", status: "idle", orchestrationId: "run-a", orchestrationRole: "tester", orchestrationPosition: 2 },
+    { id: "worker-2", status: "running", orchestrationId: "run-a", orchestrationRole: "worker", orchestrationPosition: 2 },
+    { id: "orchestrator", status: "running", orchestrationId: "run-a", orchestrationRole: "orchestrator", orchestrationPosition: 0 },
+    { id: "worker-1", status: "idle", orchestrationId: "run-a", orchestrationRole: "worker", orchestrationPosition: 1 },
+    { id: "direct-b", status: "question", orchestrationId: null, orchestrationRole: null, orchestrationPosition: 0 },
+  ];
+
+  const groups = groupChatSidebarItems(items);
+
+  assert.deepEqual(groups.map(({ orchestrationId }) => orchestrationId), [null, "run-a"]);
+  assert.deepEqual(groups[0].items.map(({ id }) => id), ["direct-a", "direct-b"]);
+  assert.deepEqual(
+    groups[1].items.map(({ id }) => id),
+    ["orchestrator", "worker-1", "worker-2", "tester-2"],
+  );
+  assert.deepEqual(items.map(({ id }) => id), [
+    "direct-a",
+    "tester-2",
+    "worker-2",
+    "orchestrator",
+    "worker-1",
+    "direct-b",
+  ]);
+});
+
+test("la colonne de gauche rend des blocs d'equipe et distingue l'orchestrateur", () => {
+  assert.match(main, /data-sidebar-orchestration-group=/);
+  assert.match(main, /Chats directs/);
+  assert.match(main, /createdSubchatCount[\s\S]*plannedSubchatCount[\s\S]*sous-chat/);
+  assert.match(main, /chat-side-status--orchestrator/);
+  assert.match(main, /return "Orchestrateur"/);
+  assert.match(style, /\.chat-side-chat-group--orchestration\s*\{/);
+  assert.match(style, /\.chat-side-status--orchestrator\s*\{[^}]*transform:\s*rotate\(45deg\)/s);
 });
 
 test("l'activite d'un chat ne change jamais sa place dans l'environnement", () => {
