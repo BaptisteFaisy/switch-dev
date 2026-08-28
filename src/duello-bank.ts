@@ -272,6 +272,8 @@ const renderCreditModal = (wallets: DuelloBankWallet[]) => {
   </div>`;
 };
 
+
+
 export function renderDuelloBankPanel(): string {
   if (!hasRemoteAuth()) return renderAdminUnlock();
   if (!snapshot && !loadError) return renderLoading();

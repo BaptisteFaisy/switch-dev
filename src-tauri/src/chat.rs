@@ -13,9 +13,9 @@ use crate::{
         LIST_TIKTOK_SENDER_ACCOUNTS_TOOL_NAME, MANAGE_TIKTOK_SENDER_LOGIN_TOOL_NAME,
         MCP_BEARER_ENV, MCP_SERVER_NAME, PAUSE_AUTONOMOUS_AGENT_TOOL_NAME,
         PREPARE_TIKTOK_DM_CAMPAIGN_TOOL_NAME, QUEUE_TIKTOK_FOLLOWER_EXTRACTION_TOOL_NAME,
-        SELECT_TIKTOK_SENDER_ACCOUNT_TOOL_NAME, SEND_OUTLOOK_EMAIL_TOOL_NAME,
-        SEND_TIKTOK_DM_CAMPAIGN_TOOL_NAME, UPDATE_AUTONOMOUS_AGENT_TOOL_NAME,
-        UPDATE_CALENDAR_EVENT_TOOL_NAME,
+        SELECT_TIKTOK_SENDER_ACCOUNT_TOOL_NAME, SEND_CHAT_MESSAGE_TOOL_NAME,
+        SEND_OUTLOOK_EMAIL_TOOL_NAME, SEND_TIKTOK_DM_CAMPAIGN_TOOL_NAME,
+        UPDATE_AUTONOMOUS_AGENT_TOOL_NAME, UPDATE_CALENDAR_EVENT_TOOL_NAME,
     },
     chat_tools::{chat_skills_document, chat_tool_instructions, ChatAgentSkill, ChatAgentTool},
     discussions::{self, DiscussionContextUsage},
@@ -2628,12 +2628,41 @@ fn configure_codex_model_tool(command: &mut Command, config: Option<&ChatModelTo
     let prefix = format!("mcp_servers.{MCP_SERVER_NAME}");
     let url =
         serde_json::to_string(&config.url).expect("une URL Rust est toujours serialisable en JSON");
-    for value in [
+    // send_chat_message n'est ajoute aux outils exposes que si le canal a ete
+    // explicitement active (CST_AGENT_CHAT_POST=1), meme chose cote liste MCP.
+    let mut enabled_tool_names = vec![
+        AUTONOMOUS_AGENT_TOOL_NAME,
+        UPDATE_AUTONOMOUS_AGENT_TOOL_NAME,
+        PAUSE_AUTONOMOUS_AGENT_TOOL_NAME,
+        ACTIVATE_SUPERVISOR_GENERAL_REPORT_TOOL_NAME,
+        APPLY_AUTONOMOUS_AGENT_POLICY_TOOL_NAME,
+        CREATE_CHAT_TOOL_NAME,
+        LIST_OUTLOOK_MESSAGES_TOOL_NAME,
+        LIST_CALENDAR_EVENTS_TOOL_NAME,
+        SEND_OUTLOOK_EMAIL_TOOL_NAME,
+        CREATE_CALENDAR_EVENT_TOOL_NAME,
+        UPDATE_CALENDAR_EVENT_TOOL_NAME,
+        LIST_TIKTOK_DM_CAMPAIGNS_TOOL_NAME,
+        LIST_TIKTOK_SENDER_ACCOUNTS_TOOL_NAME,
+        MANAGE_TIKTOK_SENDER_LOGIN_TOOL_NAME,
+        SELECT_TIKTOK_SENDER_ACCOUNT_TOOL_NAME,
+        PREPARE_TIKTOK_DM_CAMPAIGN_TOOL_NAME,
+        SEND_TIKTOK_DM_CAMPAIGN_TOOL_NAME,
+        LIST_TIKTOK_FOLLOWER_EXTRACTIONS_TOOL_NAME,
+        QUEUE_TIKTOK_FOLLOWER_EXTRACTION_TOOL_NAME,
+    ];
+    if crate::chat_model_tools::chat_post_tool_enabled() {
+        enabled_tool_names.push(SEND_CHAT_MESSAGE_TOOL_NAME);
+    }
+    let enabled_tools_list = enabled_tool_names
+        .iter()
+        .map(|name| format!("\"{name}\""))
+        .collect::<Vec<_>>()
+        .join(",");
+    let mut model_tool_values = vec![
         format!("{prefix}.url={url}"),
         format!("{prefix}.bearer_token_env_var=\"{MCP_BEARER_ENV}\""),
-        format!(
-            "{prefix}.enabled_tools=[\"{AUTONOMOUS_AGENT_TOOL_NAME}\",\"{UPDATE_AUTONOMOUS_AGENT_TOOL_NAME}\",\"{PAUSE_AUTONOMOUS_AGENT_TOOL_NAME}\",\"{ACTIVATE_SUPERVISOR_GENERAL_REPORT_TOOL_NAME}\",\"{APPLY_AUTONOMOUS_AGENT_POLICY_TOOL_NAME}\",\"{CREATE_CHAT_TOOL_NAME}\",\"{LIST_OUTLOOK_MESSAGES_TOOL_NAME}\",\"{LIST_CALENDAR_EVENTS_TOOL_NAME}\",\"{SEND_OUTLOOK_EMAIL_TOOL_NAME}\",\"{CREATE_CALENDAR_EVENT_TOOL_NAME}\",\"{UPDATE_CALENDAR_EVENT_TOOL_NAME}\",\"{LIST_TIKTOK_DM_CAMPAIGNS_TOOL_NAME}\",\"{LIST_TIKTOK_SENDER_ACCOUNTS_TOOL_NAME}\",\"{MANAGE_TIKTOK_SENDER_LOGIN_TOOL_NAME}\",\"{SELECT_TIKTOK_SENDER_ACCOUNT_TOOL_NAME}\",\"{PREPARE_TIKTOK_DM_CAMPAIGN_TOOL_NAME}\",\"{SEND_TIKTOK_DM_CAMPAIGN_TOOL_NAME}\",\"{LIST_TIKTOK_FOLLOWER_EXTRACTIONS_TOOL_NAME}\",\"{QUEUE_TIKTOK_FOLLOWER_EXTRACTION_TOOL_NAME}\"]"
-        ),
+        format!("{prefix}.enabled_tools=[{enabled_tools_list}]"),
         format!("{prefix}.enabled=true"),
         format!("{prefix}.required=false"),
         format!("{prefix}.startup_timeout_sec={CHAT_MCP_STARTUP_TIMEOUT_SECONDS}"),
@@ -2670,7 +2699,13 @@ fn configure_codex_model_tool(command: &mut Command, config: Option<&ChatModelTo
         format!(
             "{prefix}.tools.{QUEUE_TIKTOK_FOLLOWER_EXTRACTION_TOOL_NAME}.approval_mode=\"approve\""
         ),
-    ] {
+    ];
+    if crate::chat_model_tools::chat_post_tool_enabled() {
+        model_tool_values.push(format!(
+            "{prefix}.tools.{SEND_CHAT_MESSAGE_TOOL_NAME}.approval_mode=\"approve\""
+        ));
+    }
+    for value in model_tool_values {
         command.arg("-c").arg(value);
     }
 }
@@ -2903,7 +2938,7 @@ Utilise-la comme contexte durable dans cette conversation. Une demande explicite
 }
 
 fn autonomous_agent_tool_instructions() -> &'static str {
-    "Capacite native Codex Switch Terminal : des outils MCP permettent de creer un goal durable, d'ouvrir un autre chat, de piloter les agents autonomes et d'utiliser le compte Microsoft 365 de l'utilisateur depuis un chat normal. Quand l'utilisateur demande explicitement un goal, appelle `create_goal` avec son objectif exact ; OpenCode expose ce meme outil sous le nom namespace `cst_chat_create_goal`, qu'il faut donc appeler dans ce runtime. Cet outil cree un agent autonome persistant qui herite du compte, du modele et de l'environnement du chat. Quand l'utilisateur demande explicitement d'ouvrir, creer ou lancer un chat normal separe, appelle `create_chat` avec son message initial. Le nouveau chat herite du compte, du modele, de l'effort de raisonnement et de l'environnement courants ; un seul chat peut etre cree par tour. Quand l'utilisateur demande explicitement de creer, lancer, demarrer ou rendre autonome un nouvel agent, appelle `create_autonomous_agent` avec un objectif precis. Quand il demande explicitement de mettre en pause l'agent autonome lie a ce chat, appelle `pause_autonomous_agent` sans demander d'identifiant ; cette pause arrete le cycle courant et empeche toute nouvelle planification jusqu'a une reprise explicite depuis l'interface. Quand il demande explicitement de modifier l'agent autonome lie a ce chat (nom, objectif, role, mode, frequence, validation humaine ou tests), appelle `update_autonomous_agent` avec uniquement les champs a changer. Quand il demande explicitement au superviseur d'activer, produire ou relancer le compte rendu general qui compile les rapports non lus par priorite, appelle `activate_supervisor_general_report` sans demander d'identifiant ; cet outil fonctionne depuis n'importe quel chat. Quand il demande explicitement d'ajouter une meme regle durable a plusieurs agents deja actifs qui utilisent la review humaine, appelle `apply_autonomous_agent_policy` avec une instruction precise et verifiable ; cet outil ne depend pas de la cle du chat, reste limite au compte courant et cible par defaut uniquement le projet courant. Utilise la portee `account` seulement si l'utilisateur vise explicitement tous ses projets. Pour une politique de validation visuelle, passe `requireVisualEvidence: true`, exige une capture ou maquette fidele avant autorisation, une capture du rendu reel apres implementation et une comparaison explicite avec correction des ecarts significatifs. Pour une politique non visuelle, passe `requireVisualEvidence: false`. Ne demande jamais d'identifiant d'agent. Deduis les reglages non critiques et conserve les objectifs, roles, frequences et garde-fous existants. N'appelle pas ces outils pour une question theorique. Ne pretends jamais qu'une creation, une modification ou une mise en pause a reussi si l'appel correspondant n'a pas reussi. Cinq outils supplementaires ouvrent le compte Microsoft 365 lie a l'utilisateur connecte. Quand il demande de consulter, chercher ou resumer ses e-mails, appelle `list_outlook_messages`. Quand il demande son planning, ses rendez-vous ou une disponibilite, appelle `list_calendar_events` ; les horaires retournes sont en UTC, convertis-les avant de les presenter et n'annonce jamais une heure sans avoir verifie le fuseau. Quand il demande d'ecrire ou d'envoyer un e-mail, appelle `send_outlook_email` avec un message complet et pret a partir. Quand il demande de poser un rendez-vous, appelle `create_calendar_event` apres avoir verifie le creneau avec `list_calendar_events`. Quand il demande de deplacer ou de modifier un evenement, appelle `update_calendar_event` avec l'identifiant obtenu par `list_calendar_events`. Ces trois derniers outils NE FONT PARTIR NI N'ECRIVENT RIEN : ils affichent une carte que l'utilisateur doit confirmer dans la conversation. N'ecris donc jamais que l'e-mail est parti, que l'invitation est envoyee ou que l'agenda est a jour ; dis que la proposition attend sa validation. La boite et l'agenda sont ceux du compte connecte : ne demande jamais d'identifiant, de mot de passe ni de boite tierce, et n'invente aucune adresse de destinataire. Si l'utilisateur a lie plusieurs boites Microsoft, sa boite principale sert par defaut ; quand il precise laquelle utiliser, passe son adresse dans le champ `account`, en n'y mettant qu'une de ses propres adresses liees."
+    "Capacite native Codex Switch Terminal : des outils MCP permettent de creer un goal durable, d'ouvrir un autre chat, de piloter les agents autonomes et d'utiliser le compte Microsoft 365 de l'utilisateur depuis un chat normal. Quand l'utilisateur demande explicitement un goal, appelle `create_goal` avec son objectif exact ; OpenCode expose ce meme outil sous le nom namespace `cst_chat_create_goal`, qu'il faut donc appeler dans ce runtime. Cet outil cree un agent autonome persistant qui herite du compte, du modele et de l'environnement du chat. Quand l'utilisateur demande explicitement d'ouvrir, creer ou lancer un chat normal separe, appelle `create_chat` avec son message initial. Le nouveau chat herite du compte, du modele, de l'effort de raisonnement et de l'environnement courants ; un seul chat peut etre cree par tour. Quand l'utilisateur demande explicitement d'envoyer, poster ou lancer un message dans un chat deja ouvert, appelle `send_chat_message` avec le message exact ; `chat` absent ou « current » vise le chat courant, sinon passe l'identifiant de session d'un autre chat ouvert. Ce canal n'est actif que s'il a ete active explicitement : ne le mentionne jamais theoriquement et ne t'envoie jamais un message a toi-meme en boucle. Les mots de passe, codes de verification et donnees bancaires y sont refuses et doivent etre saisis par l'utilisateur. Quand l'utilisateur demande explicitement de creer, lancer, demarrer ou rendre autonome un nouvel agent, appelle `create_autonomous_agent` avec un objectif precis. Quand il demande explicitement de mettre en pause l'agent autonome lie a ce chat, appelle `pause_autonomous_agent` sans demander d'identifiant ; cette pause arrete le cycle courant et empeche toute nouvelle planification jusqu'a une reprise explicite depuis l'interface. Quand il demande explicitement de modifier l'agent autonome lie a ce chat (nom, objectif, role, mode, frequence, validation humaine ou tests), appelle `update_autonomous_agent` avec uniquement les champs a changer. Quand il demande explicitement au superviseur d'activer, produire ou relancer le compte rendu general qui compile les rapports non lus par priorite, appelle `activate_supervisor_general_report` sans demander d'identifiant ; cet outil fonctionne depuis n'importe quel chat. Quand il demande explicitement d'ajouter une meme regle durable a plusieurs agents deja actifs qui utilisent la review humaine, appelle `apply_autonomous_agent_policy` avec une instruction precise et verifiable ; cet outil ne depend pas de la cle du chat, reste limite au compte courant et cible par defaut uniquement le projet courant. Utilise la portee `account` seulement si l'utilisateur vise explicitement tous ses projets. Pour une politique de validation visuelle, passe `requireVisualEvidence: true`, exige une capture ou maquette fidele avant autorisation, une capture du rendu reel apres implementation et une comparaison explicite avec correction des ecarts significatifs. Pour une politique non visuelle, passe `requireVisualEvidence: false`. Ne demande jamais d'identifiant d'agent. Deduis les reglages non critiques et conserve les objectifs, roles, frequences et garde-fous existants. N'appelle pas ces outils pour une question theorique. Ne pretends jamais qu'une creation, une modification ou une mise en pause a reussi si l'appel correspondant n'a pas reussi. Cinq outils supplementaires ouvrent le compte Microsoft 365 lie a l'utilisateur connecte. Quand il demande de consulter, chercher ou resumer ses e-mails, appelle `list_outlook_messages`. Quand il demande son planning, ses rendez-vous ou une disponibilite, appelle `list_calendar_events` ; les horaires retournes sont en UTC, convertis-les avant de les presenter et n'annonce jamais une heure sans avoir verifie le fuseau. Quand il demande d'ecrire ou d'envoyer un e-mail, appelle `send_outlook_email` avec un message complet et pret a partir. Quand il demande de poser un rendez-vous, appelle `create_calendar_event` apres avoir verifie le creneau avec `list_calendar_events`. Quand il demande de deplacer ou de modifier un evenement, appelle `update_calendar_event` avec l'identifiant obtenu par `list_calendar_events`. Ces trois derniers outils NE FONT PARTIR NI N'ECRIVENT RIEN : ils affichent une carte que l'utilisateur doit confirmer dans la conversation. N'ecris donc jamais que l'e-mail est parti, que l'invitation est envoyee ou que l'agenda est a jour ; dis que la proposition attend sa validation. La boite et l'agenda sont ceux du compte connecte : ne demande jamais d'identifiant, de mot de passe ni de boite tierce, et n'invente aucune adresse de destinataire. Si l'utilisateur a lie plusieurs boites Microsoft, sa boite principale sert par defaut ; quand il precise laquelle utiliser, passe son adresse dans le champ `account`, en n'y mettant qu'une de ses propres adresses liees."
 }
 
 fn merge_turn_instructions(
@@ -4619,6 +4654,8 @@ mod tests {
             model: Some("modele-par-defaut".to_string()),
             reasoning_effort: Some("medium".to_string()),
             fast_mode: false,
+            base_url: None,
+            reasoning_effort_field: None,
             completed_on: None,
             api_key: None,
         }
@@ -5605,6 +5642,7 @@ mod tests {
 
     #[test]
     fn codex_chat_gets_the_scoped_autonomous_agent_mcp_tool() {
+        let _env_guard = crate::chat_model_tools::CHAT_POST_ENV_LOCK.lock().unwrap();
         let account = test_account(Provider::Codex);
         let config = ChatModelToolServerConfig {
             url: "http://127.0.0.1:8080/mcp/chat-tools".to_string(),
@@ -5655,10 +5693,9 @@ mod tests {
             "mcp_servers.cst_chat.tools.send_tiktok_dm_campaign.approval_mode=\"approve\"",
             "mcp_servers.cst_chat.tools.list_tiktok_follower_extractions.approval_mode=\"approve\"",
             "mcp_servers.cst_chat.tools.extract_tiktok_followers.approval_mode=\"approve\"",
-        ] {
-            assert!(args
-                .windows(2)
-                .any(|pair| pair[0] == "-c" && pair[1] == expected));
+        ] {        assert!(args
+            .windows(2)
+            .any(|pair| pair[0] == "-c" && pair[1] == expected));
         }
         let environment = command
             .get_envs()
@@ -5697,6 +5734,30 @@ mod tests {
         // Le garde-fou central : le modele ne doit jamais annoncer un envoi que
         // seule la confirmation humaine declenche reellement.
         assert!(autonomous_agent_tool_instructions().contains("NE FONT PARTIR NI N'ECRIVENT RIEN"));
+        // Le canal d'envoi de message est documente dans les instructions mais
+        // pas expose sans le flag explicite : il n'apparait pas dans la liste
+        // enabled_tools ci-dessus, ni comme outil a approuver.
+        assert!(autonomous_agent_tool_instructions().contains("appelle `send_chat_message`"));
+        let enabled_tools_arg = args
+            .iter()
+            .find(|arg| arg.contains("enabled_tools"))
+            .expect("la config MCP contient une liste enabled_tools");
+        assert!(!enabled_tools_arg.contains(SEND_CHAT_MESSAGE_TOOL_NAME));
+        assert!(!args.iter().any(|arg| {
+            arg.contains("tools.")
+                && arg.contains(SEND_CHAT_MESSAGE_TOOL_NAME)
+                && arg.contains("approval_mode")
+        }));
+    }
+
+    #[test]
+    fn send_chat_message_is_enabled_only_with_the_explicit_flag() {
+        let _env_guard = crate::chat_model_tools::CHAT_POST_ENV_LOCK.lock().unwrap();
+        std::env::remove_var("CST_AGENT_CHAT_POST");
+        assert!(!crate::chat_model_tools::chat_post_tool_enabled());
+        std::env::set_var("CST_AGENT_CHAT_POST", "1");
+        assert!(crate::chat_model_tools::chat_post_tool_enabled());
+        std::env::remove_var("CST_AGENT_CHAT_POST");
     }
 
     #[test]
@@ -5969,9 +6030,16 @@ mod tests {
             selected_reasoning_effort(Provider::Claude, None, None, Some("medium")).unwrap(),
             None
         );
-        // Les autres fournisseurs OpenCode ne gerent pas l'intensite.
+        // DeepSeek (b.ai / comptes DeepSeek) : l'intensite demandee ou celle du
+        // compte est appliquee ; les autres fournisseurs OpenCode ne gerent pas
+        // l'intensite.
         assert_eq!(
             selected_reasoning_effort(Provider::OpenCode, Some("deepseek"), Some("high"), None)
+                .unwrap(),
+            Some("high".to_string())
+        );
+        assert_eq!(
+            selected_reasoning_effort(Provider::OpenCode, Some("freebuff"), Some("high"), None)
                 .unwrap(),
             None
         );

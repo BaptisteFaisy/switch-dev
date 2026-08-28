@@ -16,7 +16,7 @@ const publicError = (error) => ({
     .slice(0, 1000),
 });
 
-export const createAgentScreenBroker = ({ controller = new AgentScreenController() } = {}) => {
+export const createAgentScreenBroker = ({ controller = new AgentScreenController(), log = () => undefined } = {}) => {
   const server = createServer((socket) => {
     let request = "";
     let handled = false;
@@ -42,6 +42,10 @@ export const createAgentScreenBroker = ({ controller = new AgentScreenController
       }
       void controller.handle(value)
         .then((result) => {
+          // Trace d'audit des changements d'etat de session armee.
+          if (result && typeof result.armed === "boolean") {
+            log(`session ${String(value?.sessionId || "?").slice(0, 40)} ${result.armed ? "armee" : "desarmee"}${result.armed ? ` (${result.minutes} min)` : ""}`);
+          }
           const encoded = JSON.stringify(result);
           if (Buffer.byteLength(encoded, "utf8") > MAX_AGENT_SCREEN_RESPONSE_BYTES) {
             socket.end(`${JSON.stringify(publicError("La capture d'ecran est trop volumineuse pour etre transmise."))}\n`);
@@ -80,7 +84,7 @@ export const runAgentScreenBroker = ({ logFile } = {}) => {
     }
   };
   const controller = new AgentScreenController();
-  const { server } = createAgentScreenBroker({ controller });
+  const { server } = createAgentScreenBroker({ controller, log });
   const shutdown = () => {
     log("arret demande");
     server.close(() => void controller.close().finally(() => process.exit(0)));

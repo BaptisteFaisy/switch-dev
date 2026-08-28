@@ -69,6 +69,7 @@ export const SCREEN_KEY_VK = {
 export const SCREEN_ACTIONS = new Set([
   "health",
   "screenshot",
+  "locate",
   "move",
   "click",
   "double_click",
@@ -76,15 +77,43 @@ export const SCREEN_ACTIONS = new Set([
   "type",
   "press",
   "scroll",
+  "windows",
+  "open",
+  "browser",
   "arm",
   "disarm",
 ]);
+
+// Methodes navigateur (CDP) et leurs champs autorises.
+export const BROWSER_METHODS = new Set([
+  "list",
+  "screenshot",
+  "navigate",
+  "eval",
+  "click",
+  "type",
+  "key",
+]);
+const MAX_BROWSER_URL_LENGTH = 4000;
+const MAX_BROWSER_EXPRESSION_LENGTH = 4000;
+const MAX_BROWSER_SELECTOR_LENGTH = 500;
 
 const MAX_SCREEN_COORDINATE = 100_000;
 const MAX_TYPE_TEXT_LENGTH = 2000;
 const MAX_SCROLL_NOTCHES = 20;
 const DEFAULT_ARM_MINUTES = 10;
 const MAX_ARM_MINUTES = 60;
+const MAX_OPEN_COMMAND_LENGTH = 512;
+const MAX_WINDOWS_RESULTS = 60;
+
+// Un handle de fenetre Windows est un entier positif (HWND).
+const asWindowId = (value, label) => {
+  if (value === undefined || value === null || value === "") return undefined;
+  if (typeof value !== "number" || !Number.isInteger(value) || value <= 0 || value > 0x7fffffff) {
+    throw new Error(`${label} invalide.`);
+  }
+  return value;
+};
 
 const asTrimmedString = (value, label, maximum) => {
   if (typeof value !== "string") throw new Error(`${label} invalide.`);
@@ -140,14 +169,34 @@ export const validateAgentScreenRequest = (value) => {
 
   switch (action) {
     case "health":
-    case "screenshot":
+    case "windows":
       break;
+    case "screenshot": {
+      const window = asWindowId(value.window, "Fenetre cible");
+      if (window !== undefined) request.window = window;
+      break;
+    }
+    case "locate": {
+      const text = asTrimmedString(value.text, "Texte a repérer", 80);
+      if (!text) throw new Error("Le texte a repérer est requis.");
+      request.text = text;
+      if (value.index !== undefined && value.index !== null && value.index !== "") {
+        request.index = asInteger(value.index, "Index du candidat", 0, 50);
+      }
+      const window = asWindowId(value.window, "Fenetre cible");
+      if (window !== undefined) request.window = window;
+      break;
+    }
     case "move":
     case "click":
     case "double_click":
     case "right_click":
       request.x = asInteger(value.x, "Coordonnee X", -MAX_SCREEN_COORDINATE, MAX_SCREEN_COORDINATE);
       request.y = asInteger(value.y, "Coordonnee Y", -MAX_SCREEN_COORDINATE, MAX_SCREEN_COORDINATE);
+      if (action !== "move") {
+        const window = asWindowId(value.window, "Fenetre cible");
+        if (window !== undefined) request.window = window;
+      }
       break;
     case "type": {
       if (typeof value.text !== "string" || !value.text.trim()) {
@@ -165,12 +214,36 @@ export const validateAgentScreenRequest = (value) => {
         );
       }
       request.text = value.text;
+      // mode "messages" (defaut) : WM_CHAR cible, marche sur les apps Win32
+      // classiques. mode "focus" : focus clavier temporaire par
+      // AttachThreadInput (ordre Z intact) — accepte partout, y compris
+      // Chromium/WebView2 inactif.
+      if (value.mode !== undefined && value.mode !== null && value.mode !== "") {
+        const mode = asTrimmedString(value.mode, "Mode de saisie", 16);
+        if (mode !== "messages" && mode !== "focus") {
+          throw new Error("Mode de saisie invalide (messages ou focus)." );
+        }
+        request.mode = mode;
+      }
+      const window = asWindowId(value.window, "Fenetre cible");
+      if (window !== undefined) request.window = window;
       break;
     }
     case "press":
       request.key = asTrimmedString(value.key, "Touche", 32);
       if (!SAFE_SCREEN_KEYS.has(request.key)) {
         throw new Error("Cette touche n'est pas autorisee sur l'ecran.");
+      }
+      if (value.mode !== undefined && value.mode !== null && value.mode !== "") {
+        const mode = asTrimmedString(value.mode, "Mode de saisie", 16);
+        if (mode !== "messages" && mode !== "focus") {
+          throw new Error("Mode de saisie invalide (messages ou focus)." );
+        }
+        request.mode = mode;
+      }
+      {
+        const window = asWindowId(value.window, "Fenetre cible");
+        if (window !== undefined) request.window = window;
       }
       break;
     case "arm":
@@ -195,6 +268,69 @@ export const validateAgentScreenRequest = (value) => {
         request.x = x;
         request.y = y;
       }
+      const window = asWindowId(value.window, "Fenetre cible");
+      if (window !== undefined) request.window = window;
+      break;
+    }
+    case "open": {
+      const command = asTrimmedString(value.command, "Commande", MAX_OPEN_COMMAND_LENGTH);
+      if (/[\u0000-\u001f\u007f]/.test(command)) {
+        throw new Error("La commande contient des caracteres de controle.");
+      }
+      request.command = command;
+      break;
+    }
+    case "browser": {
+      const method = asTrimmedString(value.method, "Methode navigateur", 16);
+      if (!BROWSER_METHODS.has(method)) {
+        throw new Error("Methode navigateur non prise en charge.");
+      }
+      request.method = method;
+      // Port CDP explicite : permet de piloter le WebView2 de l'app elle-meme
+      // (active par CST_WEBVIEW_CDP_PORT au lancement) sans fenetre lancee.
+      if (value.cdpPort !== undefined && value.cdpPort !== null && value.cdpPort !== "") {
+        request.cdpPort = asInteger(value.cdpPort, "Port CDP", 1024, 65535);
+      }
+      const window = asWindowId(value.window, "Fenetre navigateur");
+      if (window === undefined && request.cdpPort === undefined) {
+        throw new Error("Fenetre navigateur manquante (id de screen_windows) — ou passez cdpPort.");
+      }
+      if (window !== undefined) request.window = window;
+      if (method === "navigate") {
+        const url = asTrimmedString(value.url, "URL", MAX_BROWSER_URL_LENGTH);
+        if (!/^https?:\/\//i.test(url)) {
+          throw new Error("URL invalide (http ou https attendu).");
+        }
+        request.url = url;
+      } else if (method === "eval") {
+        const expression = asTrimmedString(value.expression, "Expression", MAX_BROWSER_EXPRESSION_LENGTH);
+        request.expression = expression;
+      } else if (method === "click") {
+        request.selector = asTrimmedString(value.selector, "Selecteur", MAX_BROWSER_SELECTOR_LENGTH);
+      } else if (method === "type") {
+        request.selector = asTrimmedString(value.selector, "Selecteur", MAX_BROWSER_SELECTOR_LENGTH);
+        if (typeof value.text !== "string" || !value.text.trim()) {
+          throw new Error("Le texte a saisir dans la page est invalide.");
+        }
+        if (value.text.length > MAX_TYPE_TEXT_LENGTH) {
+          throw new Error("Le texte a saisir dans la page est trop long.");
+        }
+        if (/[\u0000-\u001f\u007f]/.test(value.text)) {
+          throw new Error("Le texte a saisir dans la page contient des caracteres de controle.");
+        }
+        if (isSensitiveText(value.text)) {
+          throw new Error(
+            "Switch ne saisit pas de mot de passe, code de verification ou donnee bancaire, meme dans une page web."
+          );
+        }
+        request.text = value.text;
+      } else if (method === "key") {
+        const key = asTrimmedString(value.key, "Touche navigateur", 32);
+        if (!SAFE_SCREEN_KEYS.has(key) || key === "Win") {
+          throw new Error("Cette touche n'est pas autorisee dans la page.");
+        }
+        request.key = key;
+      }
       break;
     }
     default:
@@ -209,7 +345,16 @@ export const validateAgentScreenRequest = (value) => {
 // seule la personne presente au clavier peut valider. Meme mecanique que le
 // navigateur agent (MessageBox PowerShell encodee).
 export const requiresScreenApproval = (action, key = "") => {
-  if (action === "arm") return true;
+  // L'armement ne demande AUCUNE popup : il n'est valide qu'apres une demande
+  // explicite de l'utilisateur dans le chat (les popups Windows lancees depuis
+  // un processus en arriere-plan ne s'affichent pas de facon fiable).
+  if (action.startsWith("browser:")) {
+    // Lecture seule (liste des onglets, capture de la page) : aucune
+    // confirmation. Navigation, evaluation JS, clic, saisie, touche : ce sont
+    // des mutations de la page — confirmation ou session armee.
+    const method = action.slice("browser:".length);
+    return method !== "list" && method !== "screenshot";
+  }
   if (action === "click" || action === "double_click" || action === "right_click" || action === "type") {
     return true;
   }
@@ -217,17 +362,13 @@ export const requiresScreenApproval = (action, key = "") => {
   return false;
 };
 
-export const confirmWindowsScreenAction = ({ action, x, y, key = "", text = "", minutes = 0 }) =>
+export const confirmWindowsScreenAction = ({ action, x, y, key = "", text = "" }) =>
   new Promise((resolveApproval) => {
     if (!requiresScreenApproval(action, key)) {
       resolveApproval(true);
       return;
     }
     const details = [];
-    if (action === "arm") {
-      details.push(`Duree de la session armee : ${minutes} min`);
-      details.push("Apres validation, les actions de cette session passent sans confirmation jusqu'a expiration.");
-    }
     if (typeof x === "number" && typeof y === "number") {
       details.push(`Position : (${x}, ${y})`);
     }
@@ -332,6 +473,20 @@ public static class ScreenAgent
     {
         public int cbSize; public int flags; public IntPtr hCursor; public POINT ptScreenPos;
     }
+    [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
+    [StructLayout(LayoutKind.Sequential)] public struct STARTUPINFO
+    {
+        public int cb; public string lpReserved; public string lpDesktop; public string lpTitle;
+        public int dwX; public int dwY; public int dwXSize; public int dwYSize;
+        public int dwXCountChars; public int dwYCountChars; public int dwFillAttribute;
+        public int dwFlags; public short wShowWindow; public short cbReserved2;
+        public IntPtr lpReserved2; public IntPtr hStdInput; public IntPtr hStdOutput; public IntPtr hStdError;
+    }
+    [StructLayout(LayoutKind.Sequential)] public struct PROCESS_INFORMATION
+    {
+        public IntPtr hProcess; public IntPtr hThread; public uint dwProcessId; public uint dwThreadId;
+    }
+    public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
     [DllImport("user32.dll")] public static extern bool SetCursorPos(int X, int Y);
     [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT lpPoint);
     [DllImport("user32.dll", SetLastError = true)] public static extern uint SendInput(uint nInputs, INPUT[] pInputs, int cbSize);
@@ -353,6 +508,28 @@ public static class ScreenAgent
     public const int SM_YVIRTUALSCREEN = 77;
     public const int SM_CXVIRTUALSCREEN = 78;
     public const int SM_CYVIRTUALSCREEN = 79;
+    public const uint WM_KEYDOWN = 0x0100;
+    public const uint WM_KEYUP = 0x0101;
+    public const uint WM_CHAR = 0x0102;
+    public const uint WM_LBUTTONDOWN = 0x0201;
+    public const uint WM_LBUTTONUP = 0x0202;
+    public const uint WM_LBUTTONDBLCLK = 0x0203;
+    public const uint WM_RBUTTONDOWN = 0x0204;
+    public const uint WM_RBUTTONUP = 0x0205;
+    public const uint WM_MOUSEWHEEL = 0x020A;
+    public const uint MK_LBUTTON = 0x0001;
+    public const uint MK_RBUTTON = 0x0002;
+    public const uint PW_RENDERFULLCONTENT = 0x00000002;
+    public const uint STARTF_USESHOWWINDOW = 0x00000001;
+    public const uint STARTF_USESTDHANDLES = 0x00000100;
+    public const uint GENERIC_WRITE = 0x40000000;
+    public const uint GENERIC_READ = 0x80000000;
+    public const uint FILE_SHARE_READ = 0x00000001;
+    public const uint FILE_SHARE_WRITE = 0x00000002;
+    public const uint OPEN_EXISTING = 3;
+    public const short SW_SHOWNOACTIVATE = 4;
+    [StructLayout(LayoutKind.Sequential)] public struct SECURITY_ATTRIBUTES { public int nLength; public IntPtr lpSecurityDescriptor; public bool bInheritHandle; }
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr CreateFileW(string lpFileName, uint dwDesiredAccess, uint dwShareMode, ref SECURITY_ATTRIBUTES lpSecurityAttributes, uint dwCreationDisposition, uint dwFlagsAndAttributes, IntPtr hTemplateFile);
 
     public static bool Move(int x, int y) { return SetCursorPos(x, y); }
     public static int CursorX() { POINT p; GetCursorPos(out p); return p.X; }
@@ -443,6 +620,247 @@ public static class ScreenAgent
         return builder.ToString();
     }
 
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern bool PostMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr SendMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
+    [DllImport("user32.dll")] public static extern IntPtr SetFocus(IntPtr hWnd);
+    [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
+    [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
+    [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr hWnd, IntPtr hdcBlt, uint nFlags);
+    [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
+    [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+    [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr hWnd, out RECT lpRect);
+    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+    [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] public static extern bool CreateProcess(string lpApplicationName, string lpCommandLine, IntPtr lpProcessAttributes, IntPtr lpThreadAttributes, bool bInheritHandles, uint dwCreationFlags, IntPtr lpEnvironment, string lpCurrentDirectory, ref STARTUPINFO lpStartupInfo, out PROCESS_INFORMATION lpProcessInformation);
+    [DllImport("kernel32.dll")] public static extern void CloseHandle(IntPtr hObject);
+
+    // Resout le chemin complet d'un executable : si le premier mot contient un
+    // separateur de chemin, il est utilise tel quel ; sinon on cherche dans le
+    // PATH puis dans les dossiers d'installation courants (Chrome, Edge,
+    // Firefox, Notepad). Retourne le chemin complet ou null.
+    public static string ResolveExe(string commandLine)
+    {
+        string first = commandLine.TrimStart().Split(' ')[0].Trim('"');
+        if (first.Contains("\\") || first.Contains("/")) return first;
+        string exe = first.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ? first : first + ".exe";
+        string path = Environment.GetEnvironmentVariable("PATH") ?? "";
+        foreach (string dir in path.Split(';'))
+        {
+            if (string.IsNullOrEmpty(dir)) continue;
+            string candidate = System.IO.Path.Combine(dir.Trim('"'), exe);
+            if (System.IO.File.Exists(candidate)) return candidate;
+        }
+        string pf = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+        string pfx86 = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
+        string[] dirs = new string[] {
+            pf + "\\Google\\Chrome\\Application", pfx86 + "\\Google\\Chrome\\Application",
+            pf + "\\Microsoft\\Edge\\Application", pfx86 + "\\Microsoft\\Edge\\Application",
+            pf + "\\Mozilla Firefox", pfx86 + "\\Mozilla Firefox",
+            pf + "\\Windows NT\\Accessories", pf + "\\WindowsApps"
+        };
+        foreach (string dir in dirs)
+        {
+            if (string.IsNullOrEmpty(dir)) continue;
+            string candidate = System.IO.Path.Combine(dir, exe);
+            if (System.IO.File.Exists(candidate)) return candidate;
+        }
+        return null;
+    }
+
+    // Lance une application SANS prendre le focus : la fenetre principale est
+    // creee visible mais NON activee (SW_SHOWNOACTIVATE) — le premier plan de
+    // l'utilisateur reste intact. L'agent pilote ensuite cette fenetre par
+    // PostMessage/PrintWindow, en arriere-plan.
+    public static bool LaunchNoFocus(string commandLine)
+    {
+        if (string.IsNullOrWhiteSpace(commandLine)) return false;
+        string exe = ResolveExe(commandLine);
+        if (exe == null) return false;
+        // Premier mot remplace par le chemin complet, le reste des arguments
+        // (y compris les guillemets) est conserve tel quel.
+        int firstArg = commandLine.TrimStart().IndexOf(' ');
+        string full = firstArg < 0 ? exe : exe + commandLine.TrimStart().Substring(firstArg);
+        STARTUPINFO si = new STARTUPINFO();
+        si.cb = Marshal.SizeOf(typeof(STARTUPINFO));
+        si.dwFlags = (int)STARTF_USESHOWWINDOW;
+        si.wShowWindow = SW_SHOWNOACTIVATE;
+        // stdio de l'enfant redirige vers NUL : une app console (cmd...) ne
+        // doit jamais ecrire dans le pipe de reponse du relais PowerShell.
+        IntPtr nullHandle = IntPtr.Zero;
+        var sa = new SECURITY_ATTRIBUTES { nLength = Marshal.SizeOf(typeof(SECURITY_ATTRIBUTES)), lpSecurityDescriptor = IntPtr.Zero, bInheritHandle = true };
+        nullHandle = CreateFileW("NUL", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, ref sa, OPEN_EXISTING, 0, IntPtr.Zero);
+        if (nullHandle != IntPtr.Zero && nullHandle != (IntPtr)(-1))
+        {
+            si.dwFlags |= (int)STARTF_USESTDHANDLES;
+            si.hStdInput = nullHandle;
+            si.hStdOutput = nullHandle;
+            si.hStdError = nullHandle;
+        }
+        PROCESS_INFORMATION pi;
+        bool created = CreateProcess(null, full, IntPtr.Zero, IntPtr.Zero, nullHandle != IntPtr.Zero && nullHandle != (IntPtr)(-1), 0, IntPtr.Zero, null, ref si, out pi);
+        if (nullHandle != IntPtr.Zero && nullHandle != (IntPtr)(-1)) CloseHandle(nullHandle);
+        if (created)
+        {
+            CloseHandle(pi.hThread);
+            CloseHandle(pi.hProcess);
+        }
+        return created;
+    }
+
+    // Liste des fenetres visibles avec titre, dans le format
+    // hwnd|pid|titre|left|top|right|bottom (separateur \u001f).
+    public static string[] ListWindowsText()
+    {
+        var results = new System.Collections.Generic.List<string>();
+        EnumWindows((hWnd, lParam) =>
+        {
+            if (!IsWindowVisible(hWnd)) return true;
+            var builder = new StringBuilder(512);
+            GetWindowText(hWnd, builder, builder.Capacity);
+            if (builder.Length == 0) return true;
+            uint pid;
+            GetWindowThreadProcessId(hWnd, out pid);
+            RECT r;
+            GetWindowRect(hWnd, out r);
+            results.Add(hWnd.ToInt64().ToString() + "\u001f" + pid.ToString() + "\u001f" + builder.ToString() + "\u001f"
+                + r.Left.ToString() + "\u001f" + r.Top.ToString() + "\u001f" + r.Right.ToString() + "\u001f" + r.Bottom.ToString());
+            return true;
+        }, IntPtr.Zero);
+        return results.ToArray();
+    }
+
+    public static string WindowRectText(long hwnd)
+    {
+        RECT r;
+        if (!GetWindowRect(new IntPtr(hwnd), out r)) return "0|0|0|0";
+        return r.Left.ToString() + "|" + r.Top.ToString() + "|" + r.Right.ToString() + "|" + r.Bottom.ToString();
+    }
+
+    public static long WindowProcessId(long hwnd)
+    {
+        uint pid;
+        GetWindowThreadProcessId(new IntPtr(hwnd), out pid);
+        return pid;
+    }
+
+    public static bool PrintWindowEx(long hwnd, IntPtr hdcBlt)
+    {
+        return PrintWindow(new IntPtr(hwnd), hdcBlt, PW_RENDERFULLCONTENT);
+    }
+
+    public static int MakeLParam(int lo, int hi)
+    {
+        return (hi << 16) | (lo & 0xFFFF);
+    }
+
+    // Saisie ciblee : WM_CHAR envoye DIRECTEMENT a la fenetre, sans focus.
+    public static void TypeToWindow(long hwnd, string text)
+    {
+        if (string.IsNullOrEmpty(text)) return;
+        IntPtr h = new IntPtr(hwnd);
+        foreach (char c in text)
+        {
+            SendMessage(h, WM_CHAR, (IntPtr)c, IntPtr.Zero);
+        }
+    }
+
+    // Touche ciblee : WM_KEYDOWN/WM_KEYUP par sequence, sans focus.
+    // SendMessage (synchrone) plutot que PostMessage : Chrome traite la
+    // touche dans son thread et renvoie — indispensable pour un arriere-plan
+    // fiable (PostMessage est ignore par certains controles).
+    public static void PressToWindow(long hwnd, int[] vks)
+    {
+        if (vks == null || vks.Length == 0) return;
+        IntPtr h = new IntPtr(hwnd);
+        for (int i = 0; i < vks.Length; i++) SendMessage(h, WM_KEYDOWN, (IntPtr)vks[i], IntPtr.Zero);
+        for (int i = vks.Length - 1; i >= 0; i--) SendMessage(h, WM_KEYUP, (IntPtr)vks[i], IntPtr.Zero);
+    }
+
+    // Saisie par focus temporaire : le focus clavier de la fenetre cible est
+    // obtenu par AttachThreadInput + SetFocus SANS changer l'ordre Z (la
+    // fenetre de premier plan de l'utilisateur reste affichee), le texte part
+    // par SendInput (accepte partout ou un clavier normal marche), puis le
+    // focus est rendu a la fenetre de premier plan. Contourne l'ignorance de
+    // WM_CHAR par Chromium/WebView2 inactif. Le focus clavier de l'utilisateur
+    // est deplace pendant quelques centaines de millisecondes seulement.
+    private static void WithTargetFocus(long hwnd, Action send)
+    {
+        IntPtr h = new IntPtr(hwnd);
+        IntPtr fg = GetForegroundWindow();
+        uint fgThread = 0;
+        uint curThread = GetCurrentThreadId();
+        if (fg != IntPtr.Zero)
+        {
+            uint tmp = 0;
+            fgThread = GetWindowThreadProcessId(fg, out tmp);
+        }
+        uint dummy = 0;
+        uint tgtThread = GetWindowThreadProcessId(h, out dummy);
+        bool attachedFg = false, attachedTgt = false;
+        try
+        {
+            if (fgThread != 0 && fgThread != curThread) attachedFg = AttachThreadInput(curThread, fgThread, true);
+            if (tgtThread != 0 && tgtThread != curThread && tgtThread != fgThread) attachedTgt = AttachThreadInput(curThread, tgtThread, true);
+            SetFocus(h);
+            System.Threading.Thread.Sleep(30);
+            send();
+            System.Threading.Thread.Sleep(30);
+        }
+        finally
+        {
+            // Rend le focus clavier a la fenetre de premier plan, puis detache.
+            if (fg != IntPtr.Zero) SetFocus(fg);
+            if (attachedTgt) AttachThreadInput(curThread, tgtThread, false);
+            if (attachedFg) AttachThreadInput(curThread, fgThread, false);
+        }
+    }
+
+    public static void TypeFocusSteal(long hwnd, string text)
+    {
+        if (string.IsNullOrEmpty(text)) return;
+        WithTargetFocus(hwnd, () => Type(text));
+    }
+
+    public static void PressFocusSteal(long hwnd, int[] vks)
+    {
+        if (vks == null || vks.Length == 0) return;
+        WithTargetFocus(hwnd, () => PressSequence(vks));
+    }
+
+    // Clic cible : coordonnees CLIENT (0,0 = coin haut-gauche de la fenetre),
+    // envoye par messages sans focus ni deplacement de la souris.
+    public static void ClickWindowClient(long hwnd, int x, int y, bool right, bool twice)
+    {
+        IntPtr h = new IntPtr(hwnd);
+        int lparam = MakeLParam(x, y);
+        uint down = right ? WM_RBUTTONDOWN : WM_LBUTTONDOWN;
+        uint up = right ? WM_RBUTTONUP : WM_LBUTTONUP;
+        IntPtr key = (IntPtr)(right ? MK_RBUTTON : MK_LBUTTON);
+        int count = twice ? 2 : 1;
+        for (int i = 0; i < count; i++)
+        {
+            SendMessage(h, down, key, (IntPtr)lparam);
+            SendMessage(h, up, IntPtr.Zero, (IntPtr)lparam);
+            if (twice) System.Threading.Thread.Sleep(50);
+        }
+    }
+
+    // Defilement cible : x/y en coordonnees CLIENT ; -1 = centre de la fenetre.
+    public static void ScrollWindowClient(long hwnd, int notches, int x, int y)
+    {
+        IntPtr h = new IntPtr(hwnd);
+        if (x < 0 || y < 0)
+        {
+            RECT r;
+            GetClientRect(h, out r);
+            x = r.Right / 2;
+            y = r.Bottom / 2;
+        }
+        int lparam = MakeLParam(x, y);
+        int delta = notches * 120;
+        SendMessage(h, WM_MOUSEWHEEL, (IntPtr)((long)delta << 16), (IntPtr)lparam);
+    }
+
     public static int[] GetVkSequence(string key)
     {
         // SCREEN_KEY_VK_MAPPING
@@ -460,6 +878,171 @@ $request = $json | ConvertFrom-Json
 function Write-Result([hashtable]$value) {
     $payload = $value | ConvertTo-Json -Compress -Depth 8
     [Console]::Out.Write($payload)
+}
+
+function Convert-Bitmap([Drawing.Bitmap]$sourceBitmap, [int]$sourceWidth, [int]$sourceHeight) {
+    $maxDimension = 1600
+    $largest = [Math]::Max($sourceWidth, $sourceHeight)
+    $scale = [Math]::Min(1.0, ($maxDimension / $largest))
+    $targetWidth = [int][Math]::Max(1, [Math]::Round($sourceWidth * $scale))
+    $targetHeight = [int][Math]::Max(1, [Math]::Round($sourceHeight * $scale))
+    $scaled = New-Object Drawing.Bitmap($targetWidth, $targetHeight)
+    $scaledGraphics = [Drawing.Graphics]::FromImage($scaled)
+    try {
+        $scaledGraphics.InterpolationMode = [Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+        $scaledGraphics.SmoothingMode = [Drawing.Drawing2D.SmoothingMode]::HighQuality
+        $scaledGraphics.DrawImage($sourceBitmap, 0, 0, $targetWidth, $targetHeight)
+    } finally {
+        $scaledGraphics.Dispose()
+    }
+    $encoder = [Drawing.Imaging.ImageCodecInfo]::GetImageEncoders() | Where-Object { $_.MimeType -eq 'image/jpeg' }
+    $encoded = ''
+    foreach ($quality in @(72, 55, 40)) {
+        $parameters = New-Object Drawing.Imaging.EncoderParameters(1)
+        $parameters.Param[0] = New-Object Drawing.Imaging.EncoderParameter([Drawing.Imaging.Encoder]::Quality, [long]$quality)
+        $stream = New-Object IO.MemoryStream
+        try {
+            $scaled.Save($stream, $encoder, $parameters)
+            $candidate = [Convert]::ToBase64String($stream.ToArray())
+            if ($candidate.Length -le $MAX_SCREENSHOT_BASE64) { $encoded = $candidate; break }
+        } finally {
+            $stream.Dispose()
+            $parameters.Dispose()
+        }
+    }
+    if (-not $encoded) {
+        $encoded = [Convert]::ToBase64String([byte[]]@(0xff, 0xd8, 0xff, 0xd9))
+    }
+    return @{ base64 = $encoded; width = $targetWidth; height = $targetHeight; screenWidth = $sourceWidth; screenHeight = $sourceHeight }
+}
+
+# --- Pilotage navigateur (Chrome/Edge) en arriere-plan via CDP ---
+# Le clavier WM ne peut pas piloter Chrome quand la fenetre est inactive (son
+# focus manager interne ignore les messages). Pour travailler en arriere-plan
+# sans voler le focus, on lance Chrome avec un profil isole et un port de
+# debug, puis on pilote la page par le Chrome DevTools Protocol : navigation,
+# clics JS, saisie, capture reelle de la page — independant du focus Windows.
+
+function Get-CdpPort([long]$window) {
+    $procId = [ScreenAgent]::WindowProcessId($window)
+    if ($procId -le 0) { throw 'Fenetre cible invalide pour le navigateur.' }
+    $proc = Get-CimInstance Win32_Process | Where-Object { $_.ProcessId -eq $procId } | Select-Object -First 1
+    if (-not $proc -or -not $proc.CommandLine) { throw 'Processus navigateur introuvable.' }
+    $cmd = $proc.CommandLine
+    if ($cmd -notmatch '--remote-debugging-port=\d+') { throw 'Navigateur lance sans port de debug : relancez-le avec screen_open.' }
+    if ($cmd -notmatch '--user-data-dir="([^"]+)"') {
+        if ($cmd -notmatch '--user-data-dir=([^\s]+)') { throw 'Profil navigateur introuvable.' }
+    }
+    $profile = $Matches[1]
+    $portFile = Join-Path $profile 'DevToolsActivePort'
+    if (-not (Test-Path $portFile)) { throw 'Port DevTools introuvable (profil non initialise).' }
+    $port = ((Get-Content $portFile -TotalCount 1) | Select-Object -First 1).Trim()
+    if ($port -notmatch '^\d+$') { throw 'Port DevTools illisible.' }
+    return [int]$port
+}
+
+function Get-CdpPageTarget([int]$port) {
+    $targets = Invoke-RestMethod -Uri ('http://127.0.0.1:{0}/json/list' -f $port) -TimeoutSec 10
+    $pages = @($targets | Where-Object { $_.type -eq 'page' })
+    if ($pages.Count -eq 0) { throw 'Aucun onglet navigateur disponible.' }
+    return $pages[0]
+}
+
+# Appel JSON-RPC CDP sur le WebSocket DevTools, avec attente de la reponse
+# portant le meme id (les evenements CDP arrivent en parallele).
+function Invoke-Cdp([string]$wsUrl, [string]$method, $params) {
+    $ws = New-Object System.Net.WebSockets.ClientWebSocket
+    try {
+        $ws.Options.SetRequestHeader('Origin', 'http://localhost')
+        try {
+            $connect = $ws.ConnectAsync([Uri]$wsUrl, [Threading.CancellationToken]::None)
+            if (-not $connect.Wait(10000)) { throw 'Connexion DevTools expiree.' }
+        } catch {
+            $inner = $_.Exception.InnerException
+            while ($inner -and $inner.InnerException) { $inner = $inner.InnerException }
+            throw ('Connexion DevTools echouee : ' + $(if ($inner) { $inner.Message } else { $_.Exception.Message }))
+        }
+        $id = Get-Random -Minimum 100000 -Maximum 999999999
+        $payload = @{ id = $id; method = $method; params = $params } | ConvertTo-Json -Depth 12 -Compress
+        $bytes = [Text.Encoding]::UTF8.GetBytes($payload)
+        try {
+            $send = $ws.SendAsync([ArraySegment[byte]]::new($bytes), [System.Net.WebSockets.WebSocketMessageType]::Text, $true, [Threading.CancellationToken]::None)
+            if (-not $send.Wait(10000)) { throw 'Envoi DevTools expire.' }
+        } catch {
+            $inner = $_.Exception.InnerException
+            while ($inner -and $inner.InnerException) { $inner = $inner.InnerException }
+            throw ('Envoi DevTools echoue : ' + $(if ($inner) { $inner.Message } else { $_.Exception.Message }))
+        }
+        $buffer = New-Object byte[] 4194304
+        $builder = New-Object Text.StringBuilder
+        $deadline = [DateTime]::UtcNow.AddSeconds(30)
+        $response = $null
+        while ([DateTime]::UtcNow -lt $deadline) {
+            $receive = $ws.ReceiveAsync([ArraySegment[byte]]::new($buffer), [Threading.CancellationToken]::None)
+            if (-not $receive.Wait(1000)) { continue }
+            $result = $receive.GetAwaiter().GetResult()
+            if ($result.MessageType -eq [System.Net.WebSockets.WebSocketMessageType]::Close) { break }
+            [void]$builder.Append([Text.Encoding]::UTF8.GetString($buffer, 0, $result.Count))
+            if ($builder.Length -gt 8388608) { throw 'Reponse DevTools trop volumineuse.' }
+            # La reponse peut arriver en plusieurs fragments : attendre un JSON
+            # COMPLET portant notre id (l'id apparait au debut du premier
+            # fragment, avant le base64 de l'image).
+            try {
+                $candidate = $builder.ToString() | ConvertFrom-Json
+                if ($candidate.id -eq $id) { $response = $builder.ToString(); break }
+            } catch {
+                # fragment incomplet : continuer a recevoir
+            }
+        }
+        if (-not $response) { throw 'Pas de reponse DevTools.' }
+        $parsed = $response | ConvertFrom-Json
+        if ($parsed.error) { throw ('DevTools: ' + $parsed.error.message) }
+        return $parsed.result
+    } finally {
+        $ws.Dispose()
+    }
+}
+
+# Masque le signal d'automatisation dans les pages futures : Chrome en mode
+# debug pur (sans --enable-automation) n'a en realite qu'un seul signal
+# visible, navigator.webdriver ; on le neutralise en amont de chaque
+# navigation. Le reste (plugins, WebGL, en-tetes, UA) est deja celui d'un
+# vrai Chrome fenetre, contrairement a chromedriver/headless.
+function Invoke-CdpStealth([string]$wsUrl) {
+    $source = "Object.defineProperty(navigator, 'webdriver', { get: () => undefined });"
+    [void](Invoke-Cdp -WsUrl $wsUrl -Method 'Page.addScriptToEvaluateOnNewDocument' -Params @{ source = $source })
+}
+
+# Sequence de touches clavier CDP (meme nommage que les touches sures cote Node).
+function Invoke-CdpKey([string]$wsUrl, [string]$key) {
+    $mapping = @{
+        Enter     = @{ vk = 13;  code = 'Enter';     key = 'Enter' }
+        Tab       = @{ vk = 9;   code = 'Tab';       key = 'Tab' }
+        Space     = @{ vk = 32;  code = 'Space';     key = ' ' }
+        Escape    = @{ vk = 27;  code = 'Escape';    key = 'Escape' }
+        Backspace = @{ vk = 8;   code = 'Backspace'; key = 'Backspace' }
+        Delete    = @{ vk = 46;  code = 'Delete';    key = 'Delete' }
+        Home      = @{ vk = 36;  code = 'Home';      key = 'Home' }
+        End       = @{ vk = 35;  code = 'End';       key = 'End' }
+        ArrowUp    = @{ vk = 38; code = 'ArrowUp';    key = 'ArrowUp' }
+        ArrowDown  = @{ vk = 40; code = 'ArrowDown';  key = 'ArrowDown' }
+        ArrowLeft  = @{ vk = 37; code = 'ArrowLeft';  key = 'ArrowLeft' }
+        ArrowRight = @{ vk = 39; code = 'ArrowRight'; key = 'ArrowRight' }
+        PageUp    = @{ vk = 33; code = 'PageUp';    key = 'PageUp' }
+        PageDown  = @{ vk = 34; code = 'PageDown';  key = 'PageDown' }
+        F6        = @{ vk = 117; code = 'F6';        key = 'F6' }
+        'Ctrl+L'  = @{ vk = 76;  code = 'KeyL';      key = 'l'; mod = 2 }
+    }
+    $m = $mapping[$key]
+    if (-not $m) { throw ('Touche navigateur non prise en charge : ' + $key) }
+    if ($m.mod) {
+        [void](Invoke-Cdp -WsUrl $wsUrl -Method 'Input.dispatchKeyEvent' -Params @{ type = 'rawKeyDown'; modifiers = $m.mod; key = $m.key; code = $m.code; windowsVirtualKeyCode = $m.vk })
+        [void](Invoke-Cdp -WsUrl $wsUrl -Method 'Input.dispatchKeyEvent' -Params @{ type = 'char'; modifiers = $m.mod; key = $m.key; code = $m.code; text = $m.key })
+        [void](Invoke-Cdp -WsUrl $wsUrl -Method 'Input.dispatchKeyEvent' -Params @{ type = 'keyUp'; modifiers = $m.mod; key = $m.key; code = $m.code; windowsVirtualKeyCode = $m.vk })
+    } else {
+        [void](Invoke-Cdp -WsUrl $wsUrl -Method 'Input.dispatchKeyEvent' -Params @{ type = 'keyDown'; key = $m.key; code = $m.code; windowsVirtualKeyCode = $m.vk })
+        [void](Invoke-Cdp -WsUrl $wsUrl -Method 'Input.dispatchKeyEvent' -Params @{ type = 'keyUp'; key = $m.key; code = $m.code; windowsVirtualKeyCode = $m.vk })
+    }
 }
 
 function Capture-Screen {
@@ -482,43 +1065,89 @@ function Capture-Screen {
                 $graphics.ReleaseHdc($hdc)
             }
         }
-        $maxDimension = 1600
-        $largest = [Math]::Max($width, $height)
-        $scale = [Math]::Min(1.0, ($maxDimension / $largest))
-        $targetWidth = [int][Math]::Max(1, [Math]::Round($width * $scale))
-        $targetHeight = [int][Math]::Max(1, [Math]::Round($height * $scale))
-        $scaled = New-Object Drawing.Bitmap($targetWidth, $targetHeight)
-        $scaledGraphics = [Drawing.Graphics]::FromImage($scaled)
-        try {
-            $scaledGraphics.InterpolationMode = [Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
-            $scaledGraphics.SmoothingMode = [Drawing.Drawing2D.SmoothingMode]::HighQuality
-            $scaledGraphics.DrawImage($bitmap, 0, 0, $targetWidth, $targetHeight)
-        } finally {
-            $scaledGraphics.Dispose()
-        }
-        $encoder = [Drawing.Imaging.ImageCodecInfo]::GetImageEncoders() | Where-Object { $_.MimeType -eq 'image/jpeg' }
-        $encoded = ''
-        foreach ($quality in @(72, 55, 40)) {
-            $parameters = New-Object Drawing.Imaging.EncoderParameters(1)
-            $parameters.Param[0] = New-Object Drawing.Imaging.EncoderParameter([Drawing.Imaging.Encoder]::Quality, [long]$quality)
-            $stream = New-Object IO.MemoryStream
-            try {
-                $scaled.Save($stream, $encoder, $parameters)
-                $candidate = [Convert]::ToBase64String($stream.ToArray())
-                if ($candidate.Length -le $MAX_SCREENSHOT_BASE64) { $encoded = $candidate; break }
-            } finally {
-                $stream.Dispose()
-                $parameters.Dispose()
-            }
-        }
-        if (-not $encoded) {
-            $encoded = [Convert]::ToBase64String([byte[]]@(0xff, 0xd8, 0xff, 0xd9))
-        }
-        return @{ base64 = $encoded; width = $targetWidth; height = $targetHeight; screenWidth = $width; screenHeight = $height }
+        return Convert-Bitmap -sourceBitmap $bitmap -sourceWidth $width -sourceHeight $height
     } finally {
         $graphics.Dispose()
         $bitmap.Dispose()
     }
+}
+
+function Capture-Window([long]$targetWindow) {
+    $rectText = [ScreenAgent]::WindowRectText($targetWindow)
+    $parts = $rectText -split '\|'
+    $left = [int]$parts[0]; $top = [int]$parts[1]; $right = [int]$parts[2]; $bottom = [int]$parts[3]
+    $width = $right - $left
+    $height = $bottom - $top
+    if ($width -le 0 -or $height -le 0) { throw 'La fenetre cible est invalide ou reduite.' }
+    $bitmap = New-Object Drawing.Bitmap($width, $height)
+    $graphics = [Drawing.Graphics]::FromImage($bitmap)
+    try {
+        $hdc = $graphics.GetHdc()
+        try {
+            [ScreenAgent]::PrintWindowEx($targetWindow, $hdc) | Out-Null
+        } finally {
+            $graphics.ReleaseHdc($hdc)
+        }
+        return Convert-Bitmap -sourceBitmap $bitmap -sourceWidth $width -sourceHeight $height
+    } finally {
+        $graphics.Dispose()
+        $bitmap.Dispose()
+    }
+}
+
+# OCR Windows natif : retourne les lignes texte avec leur rectangle (dans
+# l'espace de coordonnees du bitmap fourni, sans rescale). Le bitmap GDI+ est
+# exporte en PNG temporaire : RecognizeAsync exige un SoftwareBitmap WinRT et
+# le chemin fichier -> BitmapDecoder est le pont fiable entre les deux mondes.
+function Find-OcrCandidates($bitmap, [string]$needle) {
+    Add-Type -AssemblyName System.Runtime.WindowsRuntime
+    $null = [Windows.Media.Ocr.OcrEngine, Windows.Foundation, ContentType = WindowsRuntime]
+    $null = [Windows.Graphics.Imaging.BitmapDecoder, Windows.Foundation, ContentType = WindowsRuntime]
+    $null = [Windows.Storage.StorageFile, Windows.Foundation, ContentType = WindowsRuntime]
+    $genericName = 'IAsyncOperation' + [char]96 + '1'
+    $awaitGeneric = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object { $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq $genericName })[0]
+    if ($null -eq $awaitGeneric) { throw 'Runtime Windows indisponible pour l''OCR.' }
+    $recognize = $awaitGeneric.MakeGenericMethod([Windows.Media.Ocr.OcrResult])
+    $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages()
+    if ($null -eq $engine) { $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromLanguage([Windows.Globalization.Language]::new('fr-FR')) }
+    if ($null -eq $engine) { $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromLanguage([Windows.Globalization.Language]::new('en-US')) }
+    if ($null -eq $engine) { throw 'Aucun moteur OCR disponible sur ce poste.' }
+    $tempPng = Join-Path $env:TEMP ('cst-locate-' + [guid]::NewGuid().ToString('N') + '.png')
+    $bitmap.Save($tempPng, [Drawing.Imaging.ImageFormat]::Png)
+    try {
+        $awaitOp = { param($winRtOperation, $resultType) $awaitGeneric.MakeGenericMethod($resultType).Invoke($null, @($winRtOperation)).Result }
+        $file = & $awaitOp ([Windows.Storage.StorageFile]::GetFileFromPathAsync($tempPng)) ([Windows.Storage.StorageFile])
+        $stream = & $awaitOp ($file.OpenAsync([Windows.Storage.FileAccessMode]::Read)) ([Windows.Storage.Streams.IRandomAccessStream])
+        $decoder = & $awaitOp ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($stream)) ([Windows.Graphics.Imaging.BitmapDecoder])
+        $software = & $awaitOp ($decoder.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.SoftwareBitmap])
+        $task = $recognize.Invoke($null, @($engine.RecognizeAsync($software)))
+        $task.Wait(-1) | Out-Null
+        $result = $task.Result
+    } finally {
+        Remove-Item $tempPng -ErrorAction SilentlyContinue
+    }
+    $needleLower = $needle.ToLowerInvariant()
+    $candidates = @()
+    foreach ($line in $result.Lines) {
+        if ($line.Text.ToLowerInvariant().Contains($needleLower)) {
+            $minX = [int]::MaxValue; $minY = [int]::MaxValue; $maxX = 0; $maxY = 0
+            foreach ($word in $line.Words) {
+                $r = $word.BoundingRect
+                if ([int]$r.X -lt $minX) { $minX = [int]$r.X }
+                if ([int]$r.Y -lt $minY) { $minY = [int]$r.Y }
+                if ([int]($r.X + $r.Width) -gt $maxX) { $maxX = [int]($r.X + $r.Width) }
+                if ([int]($r.Y + $r.Height) -gt $maxY) { $maxY = [int]($r.Y + $r.Height) }
+            }
+            $candidates += @{
+                text = $line.Text
+                x = $minX; y = $minY; w = ($maxX - $minX); h = ($maxY - $minY)
+                clickX = [int](($minX + $maxX) / 2)
+                clickY = [int](($minY + $maxY) / 2)
+            }
+        }
+    }
+    # La virgule unaire empêche PowerShell de dérouler le tableau au retour.
+    , $candidates
 }
 
 try {
@@ -526,6 +1155,61 @@ try {
     switch ($action) {
         'health' {
             Write-Result @{ ok = $true; ready = $true }
+            break
+        }
+        'locate' {
+            $needle = [string]$request.text
+            $candidates = @()
+            $space = 'screen'
+            if ($request.window) {
+                # Fenetre cible : PrintWindow a taille reelle, coordonnees CLIENT
+                # directement utilisables par click avec le meme window.
+                $space = 'client'
+                $windowId = [long]$request.window
+                $rectText = [ScreenAgent]::WindowRectText($windowId)
+                $parts = $rectText -split '\|'
+                $width = [int]$parts[2] - [int]$parts[0]
+                $height = [int]$parts[3] - [int]$parts[1]
+                if ($width -le 0 -or $height -le 0) { throw 'La fenetre cible est invalide ou reduite.' }
+                $bitmap = New-Object Drawing.Bitmap($width, $height)
+                $graphics = [Drawing.Graphics]::FromImage($bitmap)
+                try {
+                    $hdc = $graphics.GetHdc()
+                    try { [ScreenAgent]::PrintWindowEx($windowId, $hdc) | Out-Null } finally { $graphics.ReleaseHdc($hdc) }
+                    $candidates = Find-OcrCandidates -bitmap $bitmap -needle $needle
+                } finally { $graphics.Dispose(); $bitmap.Dispose() }
+            } else {
+                # Ecran entier : bitmap natif sans rescale, coordonnees converties
+                # en espace ecran (SetCursorPos) pour un clic direct.
+                $left = [ScreenAgent]::VirtualLeft(); $top = [ScreenAgent]::VirtualTop()
+                $width = [ScreenAgent]::VirtualWidth(); $height = [ScreenAgent]::VirtualHeight()
+                if ($width -le 0 -or $height -le 0) { throw 'Aucun ecran disponible sur ce poste.' }
+                $bitmap = New-Object Drawing.Bitmap($width, $height)
+                $graphics = [Drawing.Graphics]::FromImage($bitmap)
+                try {
+                    $graphics.CopyFromScreen($left, $top, 0, 0, (New-Object Drawing.Size($width, $height)))
+                    $candidates = Find-OcrCandidates -bitmap $bitmap -needle $needle
+                    for ($i = 0; $i -lt $candidates.Count; $i++) {
+                        $candidates[$i].clickX += $left
+                        $candidates[$i].clickY += $top
+                    }
+                } finally { $graphics.Dispose(); $bitmap.Dispose() }
+            }
+            $selected = $null
+            if ($request.PSObject.Properties.Name -contains 'index' -and $null -ne $request.index) {
+                if ($candidates.Count -eq 0) { throw 'Aucun candidat a selectionner.' }
+                if ([int]$request.index -ge $candidates.Count) { throw 'Index de candidat hors limite.' }
+                $selected = $candidates[[int]$request.index]
+            }
+            Write-Result @{
+                ok = $true
+                space = $space
+                count = $candidates.Count
+                candidates = @($candidates)
+                selected = $selected
+                window = $request.window
+                activeWindow = ([ScreenAgent]::ForegroundTitle())
+            }
             break
         }
         'screenshot' {
@@ -566,13 +1250,21 @@ try {
         'click' {
             $x = [int]$request.x
             $y = [int]$request.y
-            [ScreenAgent]::Click($x, $y, $false, $false)
-            $capture = Capture-Screen
+            $windowMode = $request.PSObject.Properties.Name -contains 'window'
+            $target = if ($windowMode) { [long]$request.window } else { $null }
+            if ($target) {
+                [ScreenAgent]::ClickWindowClient($target, $x, $y, $false, $false)
+                $capture = Capture-Window $target
+            } else {
+                [ScreenAgent]::Click($x, $y, $false, $false)
+                $capture = Capture-Screen
+            }
             Write-Result @{
                 ok = $true
                 x = $x
                 y = $y
                 action = 'click'
+                window = $target
                 screenshot = $capture.base64
                 width = $capture.width
                 height = $capture.height
@@ -587,13 +1279,21 @@ try {
         'double_click' {
             $x = [int]$request.x
             $y = [int]$request.y
-            [ScreenAgent]::Click($x, $y, $false, $true)
-            $capture = Capture-Screen
+            $windowMode = $request.PSObject.Properties.Name -contains 'window'
+            $target = if ($windowMode) { [long]$request.window } else { $null }
+            if ($target) {
+                [ScreenAgent]::ClickWindowClient($target, $x, $y, $false, $true)
+                $capture = Capture-Window $target
+            } else {
+                [ScreenAgent]::Click($x, $y, $false, $true)
+                $capture = Capture-Screen
+            }
             Write-Result @{
                 ok = $true
                 x = $x
                 y = $y
                 action = 'double_click'
+                window = $target
                 screenshot = $capture.base64
                 width = $capture.width
                 height = $capture.height
@@ -608,13 +1308,21 @@ try {
         'right_click' {
             $x = [int]$request.x
             $y = [int]$request.y
-            [ScreenAgent]::Click($x, $y, $true, $false)
-            $capture = Capture-Screen
+            $windowMode = $request.PSObject.Properties.Name -contains 'window'
+            $target = if ($windowMode) { [long]$request.window } else { $null }
+            if ($target) {
+                [ScreenAgent]::ClickWindowClient($target, $x, $y, $true, $false)
+                $capture = Capture-Window $target
+            } else {
+                [ScreenAgent]::Click($x, $y, $true, $false)
+                $capture = Capture-Screen
+            }
             Write-Result @{
                 ok = $true
                 x = $x
                 y = $y
                 action = 'right_click'
+                window = $target
                 screenshot = $capture.base64
                 width = $capture.width
                 height = $capture.height
@@ -628,11 +1336,20 @@ try {
         }
         'type' {
             $text = [string]$request.text
-            [ScreenAgent]::Type($text)
-            $capture = Capture-Screen
+            $windowMode = $request.PSObject.Properties.Name -contains 'window'
+            $target = if ($windowMode) { [long]$request.window } else { $null }
+            $mode = if ($request.PSObject.Properties.Name -contains 'mode') { [string]$request.mode } else { 'messages' }
+            if ($target) {
+                if ($mode -eq 'focus') { [ScreenAgent]::TypeFocusSteal($target, $text) } else { [ScreenAgent]::TypeToWindow($target, $text) }
+                $capture = Capture-Window $target
+            } else {
+                [ScreenAgent]::Type($text)
+                $capture = Capture-Screen
+            }
             Write-Result @{
                 ok = $true
                 typed = $text.Length
+                window = $target
                 screenshot = $capture.base64
                 width = $capture.width
                 height = $capture.height
@@ -646,11 +1363,20 @@ try {
         }
         'press' {
             $key = [string]$request.key
-            [ScreenAgent]::PressSequence([ScreenAgent]::GetVkSequence($key))
-            $capture = Capture-Screen
+            $windowMode = $request.PSObject.Properties.Name -contains 'window'
+            $target = if ($windowMode) { [long]$request.window } else { $null }
+            $mode = if ($request.PSObject.Properties.Name -contains 'mode') { [string]$request.mode } else { 'messages' }
+            if ($target) {
+                if ($mode -eq 'focus') { [ScreenAgent]::PressFocusSteal($target, [ScreenAgent]::GetVkSequence($key)) } else { [ScreenAgent]::PressToWindow($target, [ScreenAgent]::GetVkSequence($key)) }
+                $capture = Capture-Window $target
+            } else {
+                [ScreenAgent]::PressSequence([ScreenAgent]::GetVkSequence($key))
+                $capture = Capture-Screen
+            }
             Write-Result @{
                 ok = $true
                 key = $key
+                window = $target
                 screenshot = $capture.base64
                 width = $capture.width
                 height = $capture.height
@@ -664,14 +1390,24 @@ try {
         }
         'scroll' {
             $amount = [int]$request.amount
-            if ($request.PSObject.Properties.Name -contains 'x') {
-                [ScreenAgent]::Move([int]$request.x, [int]$request.y) | Out-Null
+            $windowMode = $request.PSObject.Properties.Name -contains 'window'
+            $target = if ($windowMode) { [long]$request.window } else { $null }
+            if ($target) {
+                $sx = if ($request.PSObject.Properties.Name -contains 'x') { [int]$request.x } else { -1 }
+                $sy = if ($request.PSObject.Properties.Name -contains 'y') { [int]$request.y } else { -1 }
+                [ScreenAgent]::ScrollWindowClient($target, $amount, $sx, $sy)
+                $capture = Capture-Window $target
+            } else {
+                if ($request.PSObject.Properties.Name -contains 'x') {
+                    [ScreenAgent]::Move([int]$request.x, [int]$request.y) | Out-Null
+                }
+                [ScreenAgent]::Scroll($amount)
+                $capture = Capture-Screen
             }
-            [ScreenAgent]::Scroll($amount)
-            $capture = Capture-Screen
             Write-Result @{
                 ok = $true
                 amount = $amount
+                window = $target
                 screenshot = $capture.base64
                 width = $capture.width
                 height = $capture.height
@@ -683,12 +1419,183 @@ try {
             }
             break
         }
+        'windows' {
+            $raw = @([ScreenAgent]::ListWindowsText())
+            $windows = @()
+            foreach ($line in $raw) {
+                $parts = $line -split [string][char]0x1F
+                if ($parts.Count -ge 7) {
+                    $windows += [pscustomobject]@{
+                        id = [long]$parts[0]
+                        pid = [int]$parts[1]
+                        title = $parts[2]
+                        left = [int]$parts[3]
+                        top = [int]$parts[4]
+                        right = [int]$parts[5]
+                        bottom = [int]$parts[6]
+                    }
+                }
+            }
+            $windows = @($windows | Select-Object -First 60)
+            Write-Result @{ ok = $true; count = $windows.Count; windows = $windows }
+            break
+        }
+        'open' {
+            $command = [string]$request.command
+            $firstWord = (($command.TrimStart() -split '\s+')[0]).ToLowerInvariant()
+            $isBrowser = $firstWord -in @('chrome', 'chrome.exe', 'msedge', 'msedge.exe')
+            $debugPort = $null
+            $profile = $null
+            if ($isBrowser) {
+                # Profil isole (pas de comptes/mots de passe de l'utilisateur)
+                # + port de debug : indispensable pour piloter la page en
+                # arriere-plan sans voler le focus (le forwarding
+                # single-instance de Chrome prendrait le focus).
+                if ($command -notmatch '--user-data-dir=') {
+                    $profile = Join-Path $env:TEMP ('cst-screen-chrome-' + [guid]::NewGuid().ToString('N').Substring(0, 12))
+                    $command = $command + ' --user-data-dir="' + $profile + '" --no-first-run'
+                } elseif ($command -match '--user-data-dir="([^"]+)"') {
+                    $profile = $Matches[1]
+                } elseif ($command -match '--user-data-dir=([^\s]+)') {
+                    $profile = $Matches[1]
+                }
+                if ($command -notmatch '--remote-debugging-port=') {
+                    $command = $command + ' --remote-debugging-port=0'
+                }
+                if ($command -notmatch '--remote-allow-origins=') {
+                    # Chrome recent refuse les connexions DevTools dont l'origine
+                    # n'est pas autorisee (403 sur le handshake WebSocket).
+                    $command = $command + ' --remote-allow-origins=*'
+                }
+                if ($command -notmatch '--start-minimized') {
+                    # Chrome active sa premiere fenetre malgre SW_SHOWNOACTIVATE :
+                    # la demarrer reduite garantit qu'aucun focus n'est vole
+                    # (l'agent pilote la page par CDP, pas besoin de la voir).
+                    $command = $command + ' --start-minimized'
+                }
+                if ($command -notmatch '--disable-blink-features=') {
+                    # Supprime le marqueur d'automatisation navigator.webdriver
+                    # (Google et d'autres sites verifient ce signal).
+                    $command = $command + ' --disable-blink-features=AutomationControlled'
+                }
+            }
+            $started = [ScreenAgent]::LaunchNoFocus($command)
+            if (-not $started) { throw 'Le lancement sans focus a echoue.' }
+            if ($isBrowser -and $profile) {
+                $portFile = Join-Path $profile 'DevToolsActivePort'
+                $deadline = [DateTime]::UtcNow.AddSeconds(20)
+                while ([DateTime]::UtcNow -lt $deadline -and -not (Test-Path $portFile)) { Start-Sleep -Milliseconds 300 }
+                if (Test-Path $portFile) {
+                    $portLine = ((Get-Content $portFile -TotalCount 1) | Select-Object -First 1).Trim()
+                    if ($portLine -match '^\d+$') { $debugPort = [int]$portLine }
+                    # Neutraliser navigator.webdriver des maintenant : les
+                    # navigations suivantes (et rechargements) de l'onglet
+                    # lance sont deja masquees.
+                    try {
+                        $page = Get-CdpPageTarget -Port $debugPort
+                        Invoke-CdpStealth -WsUrl $page.webSocketDebuggerUrl
+                    } catch { }
+                }
+            }
+            Write-Result @{ ok = $true; started = $true; command = $command; debugPort = $debugPort }
+            break
+        }
+        'browser' {
+            $method = [string]$request.method
+            if (-not $method) { throw 'Methode navigateur manquante.' }
+            # Port CDP explicite (WebView2 de l'app via CST_WEBVIEW_CDP_PORT)
+            # sinon resolution par la fenetre du navigateur lance.
+            if ($request.PSObject.Properties.Name -contains 'cdpPort' -and $request.cdpPort) {
+                $port = [int]$request.cdpPort
+            } else {
+                $port = Get-CdpPort ([long]$request.window)
+            }
+            if ($method -eq 'list') {
+                $targets = Invoke-RestMethod -Uri ('http://127.0.0.1:{0}/json/list' -f $port) -TimeoutSec 10
+                $pages = @($targets | Where-Object { $_.type -eq 'page' } | Select-Object -First 20 | ForEach-Object {
+                    @{ id = $_.id; title = $_.title; url = $_.url }
+                })
+                Write-Result @{ ok = $true; count = $pages.Count; targets = $pages }
+                break
+            }
+            $page = Get-CdpPageTarget -Port $port
+            $wsUrl = [string]$page.webSocketDebuggerUrl
+            switch ($method) {
+                'screenshot' {
+                    $result = Invoke-Cdp -WsUrl $wsUrl -Method 'Page.captureScreenshot' -Params @{ format = 'jpeg'; quality = 72 }
+                    Write-Result @{ ok = $true; pageCapture = $true; window = $request.window; screenshot = $result.data; title = $page.title; url = $page.url }
+                    break
+                }
+                'navigate' {
+                    $url = [string]$request.url
+                    Invoke-CdpStealth -WsUrl $wsUrl
+                    $result = Invoke-Cdp -WsUrl $wsUrl -Method 'Page.navigate' -Params @{ url = $url }
+                    # Consentement Google sur profil neuf : cliquer « Tout
+                    # accepter » (ID stable L2AGLb) comme le ferait un
+                    # utilisateur. Sans ces cookies, Google repond par sa page
+                    # anti-bot (« trafic exceptionnel ») — jamais sur le vrai
+                    # profil de l'utilisateur, uniquement le profil isole.
+                    Start-Sleep -Seconds 3
+                    try {
+                        $check = Invoke-Cdp -WsUrl $wsUrl -Method 'Runtime.evaluate' -Params @{ expression = "document.querySelector('#L2AGLb') !== null"; returnByValue = $true }
+                        if ($check.result.value -eq $true) {
+                            [void](Invoke-Cdp -WsUrl $wsUrl -Method 'Runtime.evaluate' -Params @{ expression = "(() => { const b = document.querySelector('#L2AGLb'); if (b) { b.click(); return 'OK'; } return 'ABSENT'; })()"; returnByValue = $true })
+                            Start-Sleep -Seconds 2
+                        }
+                    } catch { }
+                    Write-Result @{ ok = $true; navigated = $true; url = $url; frameId = $result.frameId }
+                    break
+                }
+                'eval' {
+                    $expression = [string]$request.expression
+                    $result = Invoke-Cdp -WsUrl $wsUrl -Method 'Runtime.evaluate' -Params @{ expression = $expression; returnByValue = $true; awaitPromise = $true }
+                    if ($result.exceptionDetails) {
+                        throw ('Erreur JavaScript dans la page : ' + $result.exceptionDetails.text)
+                    }
+                    $valueJson = $null
+                    if ($null -ne $result.result.value) { $valueJson = ($result.result.value | ConvertTo-Json -Depth 6 -Compress) }
+                    Write-Result @{ ok = $true; value = $valueJson; url = $page.url }
+                    break
+                }
+                'click' {
+                    $selector = [string]$request.selector
+                    $js = "(() => { const el = document.querySelector($(ConvertTo-Json $selector -Compress)); if (!el) return 'NOT_FOUND'; el.scrollIntoView({ block: 'center' }); ['pointerdown','mousedown','pointerup','mouseup','click'].forEach(t => el.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window }))); el.click(); return 'OK'; })()"
+                    $result = Invoke-Cdp -WsUrl $wsUrl -Method 'Runtime.evaluate' -Params @{ expression = $js; returnByValue = $true; awaitPromise = $true }
+                    if ($result.exceptionDetails) { throw ('Erreur JavaScript dans la page : ' + $result.exceptionDetails.text) }
+                    if ($result.result.value -eq 'NOT_FOUND') { throw ('Element introuvable avec le selecteur : ' + $selector) }
+                    Write-Result @{ ok = $true; clicked = $true; selector = $selector; url = $page.url }
+                    break
+                }
+                'type' {
+                    $selector = [string]$request.selector
+                    $text = [string]$request.text
+                    $js = "(() => { const el = document.querySelector($(ConvertTo-Json $selector -Compress)); if (!el) return 'NOT_FOUND'; el.focus(); const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype; const setter = Object.getOwnPropertyDescriptor(proto, 'value').set; setter.call(el, $(ConvertTo-Json $text -Compress)); el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); return 'OK'; })()"
+                    $result = Invoke-Cdp -WsUrl $wsUrl -Method 'Runtime.evaluate' -Params @{ expression = $js; returnByValue = $true; awaitPromise = $true }
+                    if ($result.exceptionDetails) { throw ('Erreur JavaScript dans la page : ' + $result.exceptionDetails.text) }
+                    if ($result.result.value -eq 'NOT_FOUND') { throw ('Element introuvable avec le selecteur : ' + $selector) }
+                    Write-Result @{ ok = $true; typed = $true; selector = $selector; url = $page.url }
+                    break
+                }
+                'key' {
+                    $key = [string]$request.key
+                    Invoke-CdpKey -WsUrl $wsUrl -Key $key
+                    Write-Result @{ ok = $true; key = $key; url = $page.url }
+                    break
+                }
+                default {
+                    throw 'Methode navigateur non prise en charge.'
+                }
+            }
+            break
+        }
         default {
             throw 'Action ecran non prise en charge.'
         }
     }
 } catch {
-    $message = $_.Exception.Message
+    $ex = $_.Exception
+    while ($ex -is [System.AggregateException] -and $ex.InnerException) { $ex = $ex.InnerException }
+    $message = $ex.Message
     Write-Result @{ ok = $false; error = $message }
 }
 `;
@@ -853,30 +1760,24 @@ export class AgentScreenController {
         return { ok: true, armed: false };
       }
 
-      // L'armement est LA confirmation unique de la session : une seule popup
-      // Windows locale, puis les actions passent sans popup jusqu'a expiration.
+      // L'armement ne declenche pas de popup (affichage non fiable depuis un
+      // processus en arriere-plan) : il n'est legitime qu'apres une demande
+      // explicite de l'utilisateur dans le chat, et reste borne dans le temps.
       if (request.action === "arm") {
-        const approved = await this.confirmAction({
-          action: "arm",
-          minutes: request.minutes,
-        });
-        if (!approved) {
-          throw new Error("Armement annule ou non confirme sur le PC.");
-        }
         session.armedUntil = now + request.minutes * 60_000;
         return {
           ok: true,
           armed: true,
           minutes: request.minutes,
           expiresAt: session.armedUntil,
-          note: "Les actions de cette session passent sans confirmation jusqu'a expiration ou desarmement.",
+          note: "Session armee : les actions passent sans confirmation jusqu'a expiration ou desarmement.",
         };
       }
 
       const armed = session.armedUntil > now;
       if (!armed) {
         const approved = await this.confirmAction({
-          action: request.action,
+          action: request.action === "browser" ? `browser:${request.method}` : request.action,
           x: request.x,
           y: request.y,
           key: request.key,

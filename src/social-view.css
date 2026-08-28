@@ -1,0 +1,92 @@
+/* Onglet « Réseaux sociaux » : plein écran dans la zone admin, l'iframe du
+   dashboard Social Analytics occupe toute la hauteur et défile en interne. */
+.social-dashboard-panel {
+  position: relative;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr);
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  background: #070909;
+}
+
+.social-dashboard-host {
+  display: grid;
+  min-height: 0;
+}
+
+.social-dashboard-frame {
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  border: 0;
+  background: #070909;
+}
+
+.social-status-card {
+  align-self: center;
+  justify-self: center;
+  display: grid;
+  justify-items: center;
+  gap: 12px;
+  max-width: min(460px, calc(100% - 48px));
+  padding: 30px 34px;
+  border: 1px solid var(--line, #2d3533);
+  border-radius: 16px;
+  color: var(--text, #f2f5f3);
+  background: #0b0d0c;
+  text-align: center;
+}
+
+.social-status-icon {
+  display: grid;
+  width: 42px;
+  height: 42px;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, #65e8df 30%, transparent);
+  border-radius: 50%;
+  color: #65e8df;
+  background: color-mix(in srgb, #65e8df 8%, transparent);
+}
+
+.social-status-icon svg {
+  width: 18px;
+  height: 18px;
+}
+
+.social-status-icon.is-spinning svg {
+  animation: social-spin 0.9s linear infinite;
+}
+
+@keyframes social-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.social-status-card strong {
+  font: 650 16px/1.2 var(--font-head, Inter, sans-serif);
+  letter-spacing: -0.01em;
+}
+
+.social-status-card p {
+  margin: 0;
+  color: var(--muted-2, #8a918e);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.social-status-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: center;
+  margin-top: 4px;
+}
+
+.social-status-actions .tool-button {
+  min-height: 34px;
+  border-radius: 999px;
+  font-family: var(--font-head, Inter, sans-serif);
+}

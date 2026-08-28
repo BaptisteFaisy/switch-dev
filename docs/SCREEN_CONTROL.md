@@ -17,15 +17,18 @@ profil Chrome dedie.
 - Actions : capturer l'ecran (tous les moniteurs, re-echantillonne en JPEG),
   deplacer la souris, clic gauche/droit, double-clic, defiler (molette),
   appuyer sur une touche de navigation sure, saisir un texte non sensible,
-  lire la fenetre active. **Chaque action renvoie automatiquement une nouvelle
-  capture** : le chat suit l'ecran a chaque etape sans action supplementaire.
+  lire la fenetre active, lister les fenetres, lancer une application sans
+  focus. **Chaque action renvoie automatiquement une nouvelle capture** : le
+  chat suit l'ecran a chaque etape sans action supplementaire.
 - Touches autorisees : Enter, Escape, Tab, Shift+Tab, Backspace, Delete,
   fleches, Home, End, PageUp, PageDown, Space, F6 (cycler
   barre d'adresse/contenu dans les navigateurs), Ctrl+L (focaliser la barre
   d'adresse) et Win (menu Demarrer, puis saisie pour lancer une application).
-- Interdits : presse-papiers, JavaScript arbitraire, fichiers, uploads,
-  downloads, mots de passe, PIN, OTP, carte/compte bancaire, commandes hote,
-  Alt+Tab, Ctrl+Alt+Suppr, Ctrl+W, Ctrl+T et toute combinaison hors liste.
+- Interdits : presse-papiers, JavaScript arbitraire sur le poste, fichiers,
+  uploads, downloads, mots de passe, PIN, OTP, carte/compte bancaire,
+  commandes hote, Alt+Tab, Ctrl+Alt+Suppr, Ctrl+W, Ctrl+T et toute
+  combinaison hors liste. Le JavaScript autorise dans une page web via
+  `browser_eval` reste confine a CETTE page (profil isole, sans comptes).
 
 ## Frontiere reseau et cible de deploiement
 
@@ -51,10 +54,91 @@ autres touches de navigation passent sans confirmation.
 
 **Mode session armee (`screen_arm` / `screen_disarm`)** : pour une mission
 autonome bornee, le chat peut armer sa session (`minutes` 1 a 60, defaut 10).
-Une **seule** confirmation Windows locale s'affiche au moment de l'armement ;
-ensuite, toutes les actions de cette session (clics, saisies, touches)
-passent sans popup jusqu'a expiration ou `screen_disarm`. A n'utiliser
-qu'apres une demande explicite de l'utilisateur, pour une duree bornee.
+Ensuite, toutes les actions de cette session (clics, saisies, touches)
+passent sans popup jusqu'a expiration ou `screen_disarm`.
+
+**Aucune popup Windows ne valide l'armement** : les fenetres de confirmation
+lancees depuis un processus en arriere-plan ne s'affichent pas de facon
+fiable (visible=False), et l'armement doit donc rester **exclusivement
+autorise par une demande explicite et non ambigue de l'utilisateur dans le
+chat** (ex. « fais-le tout seul », « ouvre Chrome et cherche X »), pour une
+duree bornee. L'armement et le desarmement sont traces dans le journal du
+broker (`agent-screen-broker.log`).
+
+## Mode arriere-plan : cibler une fenetre sans prendre le focus
+
+Le chat peut travailler **en arriere-plan** pendant que l'utilisateur utilise
+son PC : la fenetre active de l'utilisateur ne change jamais.
+
+- `screen_windows` liste les fenetres visibles (id, pid, titre, position).
+  L'id sert de parametre `window` aux autres outils.
+- Avec `window`, la capture utilise `PrintWindow` (la fenetre peut etre
+  derriere d'autres) et les clics/saisie/touches sont envoyes a CETTE fenetre
+  par messages (`SendMessage`), sans deplacement de souris ni activation.
+- `screen_open` lance une application **sans focus** (`CreateProcess` avec
+  `SW_SHOWNOACTIVATE`) : la fenetre active de l'utilisateur reste inchangee.
+- `screen_locate` repere un texte par OCR Windows natif et renvoie ses
+  coordonnees de clic pretes (`clickX`/`clickY` dans l'espace ecran sans
+  `window`, CLIENT avec `window`) : navigation sans calcul manuel, meme quand
+  l'interface change. Lecture seule, aucune confirmation.
+- `browser_*` accepte un `cdpPort` explicite pour piloter un Chromium deja
+  lance avec un port de debug — notamment le **WebView2 de l'app elle-meme** :
+  lancer l'application avec `CST_WEBVIEW_CDP_PORT=9223` expose le protocole
+  DevTools sur ce port loopback, et `browser_list`/`browser_screenshot`/
+  `browser_eval`/`browser_click` naviguent alors le DOM de l'app sans aucun
+  focus ni souris. Desactive par defaut (aucun port ouvert sans ce choix
+  explicite).
+
+**Limite honnete des messages fenetres** : les applications modernes
+(Chrome/Edge, WebView2, applications WinUI) ignorent les messages clavier
+(`WM_CHAR`) quand leur fenetre est inactive — verifie en test sur l'app :
+le clic fantome passe (la fenetre reagit sans voler le focus) mais la saisie
+clavier n'atteint pas le composeur. Les applications classiques (Boite de
+dialogue, console, fenetres Win32 natives) repondent bien ; Chrome, Edge et
+l'app elle-meme sont pilotes par CDP (ci-dessous), beaucoup plus fiable.
+
+### Pilotage navigateur Chrome/Edge par CDP (`browser_*`)
+
+Pour Chrome/Edge, `screen_open` ajoute automatiquement : un **profil isole**
+(dossier temporaire, sans comptes ni mots de passe de l'utilisateur),
+`--remote-debugging-port=0` (port aleatoire, lu dans `DevToolsActivePort`) et
+`--start-minimized` (la fenetre demarre reduite : aucun focus vole, Chrome
+active sinon sa premiere fenetre malgre `SW_SHOWNOACTIVATE`). La commande
+renvoie `debugPort`.
+
+Les outils `browser_list`, `browser_screenshot`, `browser_navigate`,
+`browser_eval`, `browser_click`, `browser_type` et `browser_key` pilotent
+alors la page via le Chrome DevTools Protocol, **independamment du focus et
+meme si la fenetre est reduite ou masquee** : capture reelle de la page,
+navigation, lecture de texte (`document.body.innerText`), clics par selecteur
+CSS, saisie de formulaire, touches. La saisie de texte y applique les memes
+refus (mots de passe, OTP, donnees bancaires).
+
+Les methodes mutantes (`navigate`, `eval`, `click`, `type`, `key`) demandent
+autorisation (confirmation ou session armee) ; `list` et `screenshot` sont en
+lecture seule.
+
+### Recherche Google sans interstitiel anti-bot
+
+Google affiche sa page « trafic exceptionnel » sur un profil neuf sans
+cookies de consentement. Le pilotage CDP neutralise les signaux
+d'automatisation (un vrai Chrome fenetre ne fuit presque rien : pas de
+`cdc_`, plugins et WebGL reels, en-tetes `sec-ch-ua` presents) :
+
+- `--disable-blink-features=AutomationControlled` au lancement,
+- surcharge de `navigator.webdriver` injectee par
+  `Page.addScriptToEvaluateOnNewDocument` avant chaque navigation,
+- **consentement Google accepte automatiquement** : si la page contient le
+  bouton « Tout accepter » (`#L2AGLb`), `browser_navigate` clique dessus
+  apres navigation, comme le ferait un utilisateur. Ceci ne concerne que le
+  profil isole de l'agent (jamais le profil reel de l'utilisateur) et pose
+  les cookies de consentement dans ce profil.
+
+Verifie en reel sur le poste : deux profils neufs successifs, recherche
+Google OK des la premiere navigation (et les suivantes, cookies poses),
+avec `navigator.webdriver` propre et focus utilisateur inchange. Si Google
+renvoie quand meme l'interstitiel (rare, selon IP/reseau), l'agent peut
+utiliser un autre moteur (DuckDuckGo, Bing) via `browser_navigate`.
 
 ## Pont Windows borne
 
@@ -116,9 +200,11 @@ l'entree MCP au prochain provisionnement du compte.
 
 - `cst-agent-screen-mcp.mjs` expose les outils `screen_snapshot`,
   `screen_move`, `screen_click`, `screen_double_click`, `screen_right_click`,
-  `screen_type`, `screen_press`, `screen_scroll`, `screen_arm`,
-  `screen_disarm` et `screen_health`. Il relaie chaque demande au pont
-  `cst-connect-windows-screen`
+  `screen_type`, `screen_press`, `screen_scroll`, `screen_windows`,
+  `screen_open`, `screen_arm`, `screen_disarm`, `screen_health` et les outils
+  navigateur `browser_list`, `browser_screenshot`, `browser_navigate`,
+  `browser_eval`, `browser_click`, `browser_type`, `browser_key`. Il relaie
+  chaque demande au pont `cst-connect-windows-screen`
   (`/usr/local/bin/cst-connect-windows-screen`), qui ouvre le SSH force vers
   le poste avec la cle `windows_screen_ed25519` et le known hosts partage.
 - La capture est renvoyee en contenu image (`image/jpeg`) accompagnee d'un
@@ -141,8 +227,10 @@ l'entree MCP au prochain provisionnement du compte.
   sensible (mot de passe, OTP, donnees bancaires, suites de 13 a 19 chiffres).
 - Touches : uniquement la liste autorisee (navigation + F6, Ctrl+L, Win),
   chaque touche etant une sequence de codes virtuels relachee en sens inverse
-  (modificateurs inclus).
+  (modificateurs inclus). Dans une page (CDP), Win est exclu.
 - Defilement : -20 a +20 crans, position optionnelle du curseur.
+- Navigateur : selecteurs CSS <= 500 caracteres, expressions <= 4000, URL
+  http/https <= 4000, texte de saisie <= 2000 sans contenu sensible.
 
 ## Verification
 
@@ -161,3 +249,15 @@ La capture doit revenir dans le terminal avec la resolution reelle, la souris
 doit se deplacer sans confirmation, et la fenetre active doit etre nommee.
 Un clic ou une saisie doivent au contraire declencher la confirmation Windows
 locale avant de s'executer.
+
+Test manuel attendu du mode arriere-plan :
+
+```text
+arme 10 minutes, ouvre Chrome en arriere-plan et cherche « meteo Paris »,
+puis rends-moi le titre du premier resultat, sans prendre le focus.
+```
+
+La fenetre active de l'utilisateur doit rester inchangee pendant toute la
+mission ; Chrome demarre reduit avec un profil isole ; chaque etape
+(navigation, lecture, clic) passe par CDP avec capture reelle de la page ;
+la session est desarmee a la fin.

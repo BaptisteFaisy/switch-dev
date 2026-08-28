@@ -5,6 +5,16 @@ OAuth officiels. Il stocke les jetons chiffrés, sépare les données par utilis
 Switch et affiche les vues quotidiennes par compte sur un graphique 2D, avec les
 détails par Reel ou vidéo lorsque le fournisseur expose un compteur exact.
 
+## Onglet « Réseaux sociaux » dans l'application
+
+Le dashboard est aussi accessible comme **onglet natif** de l'application
+(barre latérale → Suivi → **Réseaux sociaux**, et menu mobile) : il charge la
+page `/social/` dans une iframe same-origin, la conserve entre les re-rendus,
+et ouvre automatiquement l'onglet au retour d'un OAuth Instagram/TikTok
+(`/?switch_social=connected`). L'ancien loader injecté
+(`public/social-loader.js`) qui ouvrait le dashboard en dialogue a été
+remplacé par cet onglet.
+
 ## Configuration locale
 
 1. Copier `social-analytics/social.env.example` vers

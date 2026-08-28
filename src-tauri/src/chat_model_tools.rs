@@ -32,6 +32,7 @@ pub const PAUSE_AUTONOMOUS_AGENT_TOOL_NAME: &str = "pause_autonomous_agent";
 pub const APPLY_AUTONOMOUS_AGENT_POLICY_TOOL_NAME: &str = "apply_autonomous_agent_policy";
 pub const ACTIVATE_SUPERVISOR_GENERAL_REPORT_TOOL_NAME: &str = "activate_supervisor_general_report";
 pub const CREATE_CHAT_TOOL_NAME: &str = "create_chat";
+pub const SEND_CHAT_MESSAGE_TOOL_NAME: &str = "send_chat_message";
 pub const LIST_PRIVATE_MESSAGE_USERS_TOOL_NAME: &str = "list_private_message_users";
 pub const LIST_PRIVATE_MESSAGE_CAMPAIGNS_TOOL_NAME: &str = "list_private_message_campaigns";
 pub const CREATE_PRIVATE_MESSAGE_CAMPAIGN_TOOL_NAME: &str = "create_private_message_campaign";
@@ -64,7 +65,86 @@ const MAX_CHAT_CREATIONS_PER_TURN: u8 = 1;
 const MAX_EXTERNAL_ACTIONS_PER_TURN: u8 = 3;
 const CHAT_OPEN_REQUEST_TTL_SECONDS: i64 = 2 * 60 * 60;
 const MAX_PENDING_CHAT_OPEN_REQUESTS: usize = 32;
+const CHAT_POST_REQUEST_TTL_SECONDS: i64 = 2 * 60 * 60;
+const MAX_PENDING_CHAT_POST_REQUESTS: usize = 32;
 const MAX_CHAT_PROMPT_LENGTH: usize = 32_768;
+
+/// Le canal `send_chat_message` poste un message dans un chat de l'interface
+/// web. Desactif par defaut : il n'est expose que si l'utilisateur l'a
+/// explicitement active (CST_AGENT_CHAT_POST=1).
+pub(crate) fn chat_post_tool_enabled() -> bool {
+    std::env::var("CST_AGENT_CHAT_POST").as_deref() == Ok("1")
+}
+
+/// Verrou partage par les tests qui manipulent la variable d'environnement du
+/// canal (course possible entre les modules de tests executes en parallele).
+#[cfg(test)]
+pub(crate) static CHAT_POST_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+/// Refuse les contenus sensibles : identifiants, mots de passe, codes de
+/// verification et donnees bancaires ne doivent jamais etre postes par le
+/// modele dans un chat (l'utilisateur les saisit lui-meme). Meme regle que
+/// l'outil de controle d'ecran (isSensitiveText cote TS).
+pub(crate) fn is_sensitive_text(value: &str) -> bool {
+    let text = value.trim();
+    if text.is_empty() {
+        return false;
+    }
+    let mut normalized = String::new();
+    let mut dash_pending = false;
+    for ch in text.to_lowercase().chars() {
+        if ch.is_ascii_alphanumeric() {
+            if dash_pending && !normalized.is_empty() {
+                normalized.push('-');
+            }
+            dash_pending = false;
+            normalized.push(ch);
+        } else {
+            dash_pending = true;
+        }
+    }
+    let tokens = [
+        "password",
+        "passwd",
+        "passphrase",
+        "passcode",
+        "pin",
+        "one-time-code",
+        "otp",
+        "totp",
+        "verification-code",
+        "security-code",
+        "auth-code",
+        "cvv",
+        "cvc",
+        "csc",
+        "cid",
+        "card-number",
+        "cardnumber",
+        "credit-card",
+        "debit-card",
+        "bank-account",
+        "account-number",
+        "routing-number",
+        "sort-code",
+        "iban",
+        "mot-de-passe",
+        "code-secret",
+        "mdp",
+    ];
+    let has_token = tokens.iter().any(|token| {
+        normalized == *token
+            || normalized.starts_with(&format!("{token}-"))
+            || normalized.ends_with(&format!("-{token}"))
+            || normalized.contains(&format!("-{token}-"))
+    });
+    if has_token {
+        return true;
+    }
+    // Suite contigue de 13 a 19 chiffres : numero de carte ou IBAN.
+    let digits: usize = text.chars().filter(|ch| ch.is_ascii_digit()).count();
+    (13..=19).contains(&digits)
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct ChatModelToolServerConfig {
@@ -339,6 +419,56 @@ impl CreateChatToolArguments {
     }
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct SendChatMessageToolArguments {
+    /// "current" (ou absent) pour le chat courant du modele ; sinon
+    /// identifiant de session d'un autre chat deja ouvert dans l'interface.
+    #[serde(default)]
+    pub chat: Option<String>,
+    pub message: String,
+}
+
+impl SendChatMessageToolArguments {
+    pub fn into_request(
+        self,
+        context: &AutonomousAgentToolContext,
+    ) -> Result<ChatPostRequest, String> {
+        let message = self.message.trim().to_string();
+        if message.is_empty() {
+            return Err("Le message a poster dans le chat est requis".to_string());
+        }
+        if message.chars().count() > MAX_CHAT_PROMPT_LENGTH {
+            return Err(format!(
+                "Le message a poster depasse {MAX_CHAT_PROMPT_LENGTH} caracteres"
+            ));
+        }
+        if is_sensitive_text(&message) {
+            return Err(
+                "Switch ne poste pas de mot de passe, code de verification ou donnee bancaire dans un chat".to_string(),
+            );
+        }
+        let target_session_id = match self.chat.as_deref() {
+            None | Some("current") => None,
+            Some(value) => {
+                let trimmed = value.trim();
+                if trimmed.is_empty() || trimmed.chars().count() > 128 {
+                    return Err("Cible de chat invalide".to_string());
+                }
+                Some(trimmed.to_string())
+            }
+        };
+        Ok(ChatPostRequest {
+            id: Uuid::new_v4().to_string(),
+            account_id: context.account_id.clone(),
+            source_chat_key: context.source_chat_key.clone(),
+            target_session_id,
+            message,
+            created_at: metrics::now_ts(),
+        })
+    }
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct ChatOpenRequestRegistry {
     inner: Arc<Mutex<VecDeque<ChatOpenRequest>>>,
@@ -366,6 +496,50 @@ impl ChatOpenRequestRegistry {
             .lock()
             .map_err(|_| "File d'ouverture des chats indisponible".to_string())?;
         requests.retain(|item| item.created_at + CHAT_OPEN_REQUEST_TTL_SECONDS >= now);
+        Ok(requests.drain(..).collect())
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ChatPostRequest {
+    pub id: String,
+    pub account_id: String,
+    /// Cle du chat qui a demande l'envoi (le chat courant du modele).
+    pub source_chat_key: Option<String>,
+    /// Session cible : `None` = le chat courant (source_chat_key).
+    pub target_session_id: Option<String>,
+    pub message: String,
+    pub created_at: i64,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct ChatPostRequestRegistry {
+    inner: Arc<Mutex<VecDeque<ChatPostRequest>>>,
+}
+
+impl ChatPostRequestRegistry {
+    pub fn enqueue(&self, request: ChatPostRequest) -> Result<ChatPostRequest, String> {
+        let now = metrics::now_ts();
+        let mut requests = self
+            .inner
+            .lock()
+            .map_err(|_| "File d'envoi des messages indisponible".to_string())?;
+        requests.retain(|item| item.created_at + CHAT_POST_REQUEST_TTL_SECONDS >= now);
+        if requests.len() >= MAX_PENDING_CHAT_POST_REQUESTS {
+            return Err("Trop de demandes d'envoi de message sont en attente".to_string());
+        }
+        requests.push_back(request.clone());
+        Ok(request)
+    }
+
+    pub fn claim(&self) -> Result<Vec<ChatPostRequest>, String> {
+        let now = metrics::now_ts();
+        let mut requests = self
+            .inner
+            .lock()
+            .map_err(|_| "File d'envoi des messages indisponible".to_string())?;
+        requests.retain(|item| item.created_at + CHAT_POST_REQUEST_TTL_SECONDS >= now);
         Ok(requests.drain(..).collect())
     }
 }
@@ -787,17 +961,20 @@ pub(crate) fn tools_list_response(id: Value, scope: ChatToolScope) -> Value {
         return goal_tools_response(id);
     }
     let mut response = all_tools_response(id);
-    if scope != ChatToolScope::Full {
-        if let Some(tools) = response
-            .pointer_mut("/result/tools")
-            .and_then(Value::as_array_mut)
-        {
-            tools.retain(|tool| {
-                tool.get("name")
-                    .and_then(Value::as_str)
-                    .is_some_and(|name| scope.allows(name))
-            });
-        }
+    if let Some(tools) = response
+        .pointer_mut("/result/tools")
+        .and_then(Value::as_array_mut)
+    {
+        tools.retain(|tool| {
+            let name = tool.get("name").and_then(Value::as_str);
+            if name == Some(SEND_CHAT_MESSAGE_TOOL_NAME) && !chat_post_tool_enabled() {
+                return false;
+            }
+            if scope != ChatToolScope::Full {
+                return name.is_some_and(|name| scope.allows(name));
+            }
+            true
+        });
     }
     response
 }
@@ -1293,6 +1470,37 @@ fn all_tools_response(id: Value) -> Value {
                     "outputSchema": chat_output_schema,
                     "annotations": {
                         "title": "Ouvrir un nouveau chat",
+                        "readOnlyHint": false,
+                        "destructiveHint": false,
+                        "idempotentHint": false,
+                        "openWorldHint": false
+                    }
+                },
+                {
+                    "name": SEND_CHAT_MESSAGE_TOOL_NAME,
+                    "title": "Envoyer un message dans un chat",
+                    "description": "Poste un message dans un chat deja ouvert de l'interface web, comme si l'utilisateur l'avait saisi, puis le chat cible traite ce message normalement. Utilise cet outil uniquement quand l'utilisateur demande explicitement d'envoyer, poster, lancer ou mettre un message dans un chat precis. Par defaut (chat absent ou \"current\"), le message part dans le chat courant du modele ; pour un autre chat deja ouvert, passe son identifiant de session dans chat. Le compte, le modele et l'environnement du chat cible sont conserves. Les mots de passe, codes de verification et donnees bancaires sont refuses : l'utilisateur les saisit lui-meme. N'utilise pas cet outil pour une question theorique ni pour t'envoyer un message a toi-meme en boucle.",
+                    "inputSchema": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                            "chat": {
+                                "type": "string",
+                                "maxLength": 128,
+                                "description": "Cible facultative : \"current\" ou absent pour le chat courant, sinon identifiant de session d'un autre chat deja ouvert."
+                            },
+                            "message": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 32768,
+                                "description": "Message complet a poster dans le chat cible, tel qu'il sera envoye."
+                            }
+                        },
+                        "required": ["message"]
+                    },
+                    "outputSchema": chat_output_schema,
+                    "annotations": {
+                        "title": "Envoyer un message dans un chat",
                         "readOnlyHint": false,
                         "destructiveHint": false,
                         "idempotentHint": false,
@@ -2162,6 +2370,27 @@ pub(crate) fn tool_chat_open_response(id: Value, request: &ChatOpenRequest) -> V
     })
 }
 
+pub(crate) fn tool_chat_post_response(id: Value, request: &ChatPostRequest) -> Value {
+    let structured = json!({
+        "requestId": request.id,
+        "status": "queued",
+        "targetSessionId": request.target_session_id,
+        "sourceChatKey": request.source_chat_key,
+    });
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "result": {
+            "content": [{
+                "type": "text",
+                "text": "Le message a ete demande dans le chat cible. L'interface web va l'envoyer comme un message normal de l'utilisateur."
+            }],
+            "structuredContent": structured,
+            "isError": false
+        }
+    })
+}
+
 pub(crate) fn tool_success_response(id: Value, agent: &AutonomousAgentSnapshot) -> Value {
     let structured = json!({
         "agentId": agent.id,
@@ -2543,6 +2772,108 @@ mod tests {
         registry.enqueue(request).unwrap();
         assert_eq!(registry.claim().unwrap().len(), 1);
         assert!(registry.claim().unwrap().is_empty());
+    }
+
+    #[test]
+    fn chat_post_request_validates_message_target_and_queue() {
+        // Cible par defaut : le chat courant (source_chat_key).
+        let arguments: SendChatMessageToolArguments = serde_json::from_value(json!({
+            "message": "  Lance la migration maintenant.  "
+        }))
+        .unwrap();
+        let request = arguments.into_request(&context()).unwrap();
+        assert_eq!(request.account_id, "account-1");
+        assert_eq!(request.source_chat_key.as_deref(), Some("chat-1"));
+        assert_eq!(request.target_session_id, None);
+        assert_eq!(request.message, "Lance la migration maintenant.");
+
+        // Cible explicite : une autre session ouverte.
+        let arguments: SendChatMessageToolArguments = serde_json::from_value(json!({
+            "chat": "ses_target_123",
+            "message": "Bonjour"
+        }))
+        .unwrap();
+        let request = arguments.into_request(&context()).unwrap();
+        assert_eq!(request.target_session_id.as_deref(), Some("ses_target_123"));
+
+        // "current" est traite comme le chat courant.
+        let arguments: SendChatMessageToolArguments = serde_json::from_value(json!({
+            "chat": "current",
+            "message": "Ok"
+        }))
+        .unwrap();
+        assert_eq!(arguments.into_request(&context()).unwrap().target_session_id, None);
+
+        // La file reclame chaque demande une seule fois.
+        let registry = ChatPostRequestRegistry::default();
+        registry.enqueue(request).unwrap();
+        assert_eq!(registry.claim().unwrap().len(), 1);
+        assert!(registry.claim().unwrap().is_empty());
+    }
+
+    #[test]
+    fn chat_post_request_rejects_empty_targets_and_sensitive_content() {
+        assert!(serde_json::from_value::<SendChatMessageToolArguments>(json!({ "message": "" }))
+            .unwrap()
+            .into_request(&context())
+            .is_err());
+        assert!(serde_json::from_value::<SendChatMessageToolArguments>(json!({
+            "message": "Bonjour",
+            "chat": "  "
+        }))
+        .unwrap()
+        .into_request(&context())
+        .is_err());
+        for sensitive in [
+            "mon password est secret",
+            "voici le mot de passe : azerty",
+            "code OTP 482913",
+            "verification-code 123456",
+            "le numero 4111111111111111 a ete debite",
+            "IBAN FR7630006000011234567890189",
+        ] {
+            let arguments: SendChatMessageToolArguments =
+                serde_json::from_value(json!({ "message": sensitive })).unwrap();
+            assert!(arguments.into_request(&context()).is_err(), "{sensitive}");
+        }
+        for acceptable in [
+            "Bonjour, je suis pret",
+            "rendez-vous a 15h30",
+            "le code postal est 75001",
+            "il passe par ici",
+        ] {
+            let arguments: SendChatMessageToolArguments =
+                serde_json::from_value(json!({ "message": acceptable })).unwrap();
+            assert!(arguments.into_request(&context()).is_ok(), "{acceptable}");
+        }
+    }
+
+    #[test]
+    fn chat_post_tool_is_listed_only_when_explicitly_enabled() {
+        let _env_guard = CHAT_POST_ENV_LOCK.lock().unwrap();
+        std::env::set_var("CST_AGENT_CHAT_POST", "0");
+        let response = tools_list_response(json!(1), ChatToolScope::Full);
+        let tools = response["result"]["tools"].as_array().unwrap();
+        assert!(!tools
+            .iter()
+            .any(|tool| tool["name"].as_str() == Some(SEND_CHAT_MESSAGE_TOOL_NAME)));
+        std::env::set_var("CST_AGENT_CHAT_POST", "1");
+        let response = tools_list_response(json!(2), ChatToolScope::Full);
+        let tools = response["result"]["tools"].as_array().unwrap();
+        let tool = tools
+            .iter()
+            .find(|tool| tool["name"].as_str() == Some(SEND_CHAT_MESSAGE_TOOL_NAME))
+            .unwrap();
+        assert_eq!(tool["inputSchema"]["required"], json!(["message"]));
+        assert_eq!(
+            tool["inputSchema"]["additionalProperties"],
+            json!(false)
+        );
+        assert!(tool["description"]
+            .as_str()
+            .unwrap()
+            .contains("demande explicitement"));
+        std::env::remove_var("CST_AGENT_CHAT_POST");
     }
 
     #[test]

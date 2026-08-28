@@ -11,9 +11,9 @@ use crate::{
     chat::{ChatTurnManager, StartChatTurnRequest, MAX_CHAT_TURN_REQUEST_BYTES},
     chat_model_tools::{
         self, ApplyAutonomousAgentPolicyToolArguments, AutonomousAgentToolContext,
-        ChatModelToolServerConfig, ChatOpenRequestRegistry, ChatToolCapabilityRegistry,
-        ChatToolScope, CreateAutonomousAgentToolArguments, CreateAutonomousGoalToolArguments,
-        CreateChatToolArguments, CreateTerminalGoalToolArguments,
+        ChatModelToolServerConfig, ChatOpenRequestRegistry, ChatPostRequestRegistry,
+        ChatToolCapabilityRegistry, ChatToolScope, CreateAutonomousAgentToolArguments,
+        CreateAutonomousGoalToolArguments,        CreateChatToolArguments, CreateTerminalGoalToolArguments, SendChatMessageToolArguments,
         UpdateAutonomousAgentToolArguments, UpdateGoalToolArguments,
         ACTIVATE_SUPERVISOR_GENERAL_REPORT_TOOL_NAME, APPLY_AUTONOMOUS_AGENT_POLICY_TOOL_NAME,
         AUTONOMOUS_AGENT_TOOL_NAME, CONTROL_DEVICE_TOOL_NAME,
@@ -26,8 +26,9 @@ use crate::{
         LIST_TIKTOK_SENDER_ACCOUNTS_TOOL_NAME, MANAGE_TIKTOK_SENDER_LOGIN_TOOL_NAME,
         PAUSE_AUTONOMOUS_AGENT_TOOL_NAME, PREPARE_TIKTOK_DM_CAMPAIGN_TOOL_NAME,
         QUEUE_TIKTOK_FOLLOWER_EXTRACTION_TOOL_NAME, SELECT_TIKTOK_SENDER_ACCOUNT_TOOL_NAME,
-        SEND_OUTLOOK_EMAIL_TOOL_NAME, SEND_TIKTOK_DM_CAMPAIGN_TOOL_NAME,
-        UPDATE_AUTONOMOUS_AGENT_TOOL_NAME, UPDATE_CALENDAR_EVENT_TOOL_NAME, UPDATE_GOAL_TOOL_NAME,
+        SEND_CHAT_MESSAGE_TOOL_NAME, SEND_OUTLOOK_EMAIL_TOOL_NAME,
+        SEND_TIKTOK_DM_CAMPAIGN_TOOL_NAME, UPDATE_AUTONOMOUS_AGENT_TOOL_NAME,
+        UPDATE_CALENDAR_EVENT_TOOL_NAME, UPDATE_GOAL_TOOL_NAME,
     },
     creative_accounts::{self, ConnectCreativeAccountRequest, CreativeAccountIdRequest},
     freebuff_cloud::{self, AgentRunStreamQuery, ConnectFreebuffCloudRequest, ConnectRepoRequest, CreateBlankProjectRequest, DeleteProjectRequest},
@@ -252,6 +253,7 @@ struct ServerState {
     chat: ChatTurnManager,
     chat_tool_capabilities: ChatToolCapabilityRegistry,
     chat_open_requests: ChatOpenRequestRegistry,
+    chat_post_requests: ChatPostRequestRegistry,
     microsoft: MicrosoftManager,
     autonomous: AutonomousAgentManager,
     terminal_goals: TerminalGoalManager,
@@ -1874,6 +1876,7 @@ pub async fn run(config: ServerConfig) -> Result<(), String> {
         chat,
         chat_tool_capabilities,
         chat_open_requests: ChatOpenRequestRegistry::default(),
+        chat_post_requests: ChatPostRequestRegistry::default(),
         microsoft: microsoft.clone(),
         autonomous,
         terminal_goals,
@@ -2091,6 +2094,10 @@ pub async fn run(config: ServerConfig) -> Result<(), String> {
         .route(
             "/chat/open-requests/claim",
             post(api_claim_chat_open_requests),
+        )
+        .route(
+            "/chat/post-requests/claim",
+            post(api_claim_chat_post_requests),
         )
         .route(
             "/voice/process",
@@ -5722,6 +5729,7 @@ async fn mcp_chat_tools(
                 && name != ACTIVATE_SUPERVISOR_GENERAL_REPORT_TOOL_NAME
                 && name != APPLY_AUTONOMOUS_AGENT_POLICY_TOOL_NAME
                 && name != CREATE_CHAT_TOOL_NAME
+                && name != SEND_CHAT_MESSAGE_TOOL_NAME
                 && name != LIST_CONTROL_DEVICES_TOOL_NAME
                 && name != CONTROL_DEVICE_TOOL_NAME
                 && name != GET_CONTROL_DEVICE_ACTION_TOOL_NAME
@@ -5935,6 +5943,42 @@ async fn mcp_chat_tools(
                     match state.chat_open_requests.enqueue(request) {
                         Ok(request) => {
                             json_response(chat_model_tools::tool_chat_open_response(id, &request))
+                        }
+                        Err(error) => {
+                            json_response(chat_model_tools::tool_error_response(id, &error))
+                        }
+                    }
+                }
+                SEND_CHAT_MESSAGE_TOOL_NAME => {
+                    // Canal desactive par defaut : meme reponse qu'un outil
+                    // inexistant pour ne pas le laisser sonder l'outil.
+                    if !chat_model_tools::chat_post_tool_enabled() {
+                        return json_response(chat_model_tools::protocol_error(
+                            id,
+                            -32602,
+                            "Outil MCP inconnu",
+                        ));
+                    }
+                    let arguments = match serde_json::from_value::<SendChatMessageToolArguments>(
+                        arguments,
+                    ) {
+                        Ok(value) => value,
+                        Err(error) => {
+                            return json_response(chat_model_tools::tool_error_response(
+                                id,
+                                &format!("Arguments invalides pour l'envoi du message : {error}"),
+                            ))
+                        }
+                    };
+                    let request = match arguments.into_request(&context) {
+                        Ok(value) => value,
+                        Err(error) => {
+                            return json_response(chat_model_tools::tool_error_response(id, &error))
+                        }
+                    };
+                    match state.chat_post_requests.enqueue(request) {
+                        Ok(request) => {
+                            json_response(chat_model_tools::tool_chat_post_response(id, &request))
                         }
                         Err(error) => {
                             json_response(chat_model_tools::tool_error_response(id, &error))
@@ -8418,6 +8462,15 @@ async fn api_claim_chat_open_requests(
 ) -> Response {
     auth_or(&state, &headers, || {
         state.chat_open_requests.claim().map(json_response)
+    })
+}
+
+async fn api_claim_chat_post_requests(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+) -> Response {
+    auth_or(&state, &headers, || {
+        state.chat_post_requests.claim().map(json_response)
     })
 }
 

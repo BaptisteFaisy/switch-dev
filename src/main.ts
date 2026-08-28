@@ -825,6 +825,29 @@ const loadTikTokAccountsModule = (): Promise<TikTokAccountsModule> => {
   return tiktokAccountsModulePromise;
 };
 
+type SocialViewModule = typeof import("./social-view");
+
+let socialViewModule: SocialViewModule | null = null;
+let socialViewModulePromise: Promise<SocialViewModule> | null = null;
+
+const loadSocialViewModule = (): Promise<SocialViewModule> => {
+  if (socialViewModule) return Promise.resolve(socialViewModule);
+  if (!socialViewModulePromise) {
+    socialViewModulePromise = Promise.all([
+      import("./social-view"),
+      import("./social-view.css"),
+    ]).then(([module]) => {
+      socialViewModule = module;
+      return module;
+    }).catch((error) => {
+      socialViewModulePromise = null;
+      scheduleStaleChunkRecovery(error);
+      throw error;
+    });
+  }
+  return socialViewModulePromise;
+};
+
 type DeviceFleetModule = typeof import("./device-fleet");
 
 let deviceFleetModule: DeviceFleetModule | null = null;
@@ -1713,6 +1736,7 @@ type AppView =
   | "forum"
   | "messaging"
   | "tiktok"
+  | "social"
   | "android"
   | "discussions"
   | "history"
@@ -1743,6 +1767,7 @@ const lazyModuleViews = new Set<AppView>([
   "forum",
   "messaging",
   "tiktok",
+  "social",
   "android",
   "dashboard",
   "tracking",
@@ -1798,6 +1823,31 @@ const consumeRecoveredLazyView = (): AppView | null => {
   recoveryUrl.searchParams.delete(STALE_CHUNK_VIEW_PARAM);
   window.history.replaceState(window.history.state, "", recoveryUrl.toString());
   return lazyModuleViews.has(candidate as AppView) ? candidate as AppView : null;
+};
+
+type SwitchSocialCallback = {
+  status: "connected" | "error";
+  provider: string;
+};
+
+// Retour OAuth du dashboard social : le fournisseur redirige sur
+// `/?switch_social=connected&provider=...` (même origine, via social-gateway).
+// On retient le statut pour l'onglet Réseaux sociaux avant de nettoyer l'URL.
+let pendingSwitchSocialCallback: SwitchSocialCallback | null = null;
+
+const takeSwitchSocialCallback = (): SwitchSocialCallback | null => {
+  const url = new URL(window.location.href);
+  const status = url.searchParams.get("switch_social");
+  if (status !== "connected" && status !== "error") return null;
+  const provider = url.searchParams.get("provider") ?? "";
+  url.searchParams.delete("switch_social");
+  url.searchParams.delete("provider");
+  window.history.replaceState(
+    window.history.state ?? {},
+    "",
+    `${url.pathname}${url.search}${url.hash}`,
+  );
+  return { status, provider };
 };
 
 type DiscussionSummary = {
@@ -1900,6 +1950,17 @@ type ChatOpenRequest = {
   model?: string | null;
   reasoningEffort?: string | null;
   createdAt: number;
+};
+
+// Demande d'envoi de message dans un chat deja ouvert (canal send_chat_message,
+// active explicitement par CST_AGENT_CHAT_POST=1). targetSessionId absent =
+// le chat courant (sourceChatKey).
+type ChatPostRequest = {
+  requestId: string;
+  accountId: string;
+  sourceChatKey?: string | null;
+  targetSessionId?: string | null;
+  message: string;
 };
 
 type ChatSubmitIntent = "message" | "goal";
@@ -2648,6 +2709,7 @@ const runtimeSyncRetryTimers = new Map<RuntimeSyncTopic, number>();
 let accountCompletionsSyncInFlight = false;
 let privateMessagesSyncInFlight = false;
 let chatOpenRequestsInFlight = false;
+let chatPostRequestsInFlight = false;
 let chatRuntimeClock: number | null = null;
 let chatDraft = "";
 // Le brouillon du chat principal survit aux rechargements imposes (web-update,
@@ -7059,6 +7121,24 @@ const setActiveView = (view: AppView) => {
       });
     return;
   }
+  if (view === "social" && !socialViewModule) {
+    void loadSocialViewModule()
+      .then((module) => {
+        if (pendingSwitchSocialCallback) {
+          module.setSocialCallbackResult(
+            pendingSwitchSocialCallback.status,
+            pendingSwitchSocialCallback.provider,
+          );
+          pendingSwitchSocialCallback = null;
+        }
+        setActiveView(view);
+      })
+      .catch((error) => {
+        statusText = `Réseaux sociaux indisponibles : ${String(error)}`;
+        render();
+      });
+    return;
+  }
   if (view === "devices" && !deviceFleetModule) {
     void loadDeviceFleetModule()
       .then(() => setActiveView(view))
@@ -7191,6 +7271,7 @@ const setActiveView = (view: AppView) => {
     forum: "Forum communautaire",
     messaging: "Messagerie privée",
     tiktok: "Comptes émetteurs TikTok",
+    social: "Réseaux sociaux — vues Instagram et TikTok",
     devices: "Appareils USB Android et iOS",
     android: "Contrôle Android USB",
     design: "Espace Design",
@@ -7282,6 +7363,7 @@ const setActiveView = (view: AppView) => {
   messagingModule?.setMessagingVisible(activeView === "messaging");
   messagingModule?.startMessagingPolling(render);
   if (activeView !== "tiktok") tiktokAccountsModule?.deactivateTikTokAccountsPanel();
+  if (activeView !== "social") socialViewModule?.deactivateSocialPanel();
   if (activeView !== "devices") deviceFleetModule?.deactivateDeviceFleetPanel();
   if (activeView !== "android") androidControlModule?.deactivateAndroidControlPanel();
 
@@ -7343,6 +7425,9 @@ const setActiveView = (view: AppView) => {
   if (activeView === "messaging") void messagingModule?.refreshMessaging(render);
   if (activeView === "tiktok") {
     tiktokAccountsModule?.activateTikTokAccountsPanel(render, isRemoteMode());
+  }
+  if (activeView === "social") {
+    socialViewModule?.activateSocialPanel(render, isRemoteMode());
   }
   if (activeView === "devices") {
     deviceFleetModule?.activateDeviceFleetPanel(render, isRemoteMode());
@@ -15988,6 +16073,8 @@ function mobileViewLabel(view: AppView): string {
       return "Messagerie";
     case "tiktok":
       return "TikTok";
+    case "social":
+      return "Réseaux sociaux";
     case "devices":
       return "Appareils";
     case "android":
@@ -16205,6 +16292,7 @@ function ensureMobileChrome(): void {
           <button type="button" role="menuitem" data-view="android"><i data-lucide="smartphone"></i><span>Android</span></button>
           <button type="button" role="menuitem" data-view="limits"><i data-lucide="calendar-clock"></i><span>Limites</span></button>
           <button type="button" role="menuitem" data-view="dashboard"><i data-lucide="bar-chart-3"></i><span>Stats</span></button>
+          ${isRemoteMode() ? `<button type="button" role="menuitem" data-view="social"><i data-lucide="clapperboard"></i><span>Réseaux sociaux</span></button>` : ""}
           ${isRemoteMode() ? `<button type="button" role="menuitem" data-view="tracking"><i data-lucide="route"></i><span>Tracking</span></button>` : ""}
           ${isRemoteMode() ? `<button type="button" role="menuitem" data-view="duello-bank"><i data-lucide="landmark"></i><span>Banque Duello</span></button>` : ""}
           ${isRemoteMode() ? `<button type="button" role="menuitem" data-view="freebuff-cloud"><i data-lucide="cloud"></i><span>Freebuff Cloud</span></button>` : ""}
@@ -16778,6 +16866,61 @@ const claimChatOpenRequests = async (): Promise<void> => {
   }
 };
 
+// Envoie un message demande par le modele dans le chat cible (canal
+// send_chat_message) : cible par identifiant de session si fourni, sinon le
+// chat source du modele. Le message part comme un message normal du chat cible,
+// avec le compte et le modele de CE chat.
+const postChatMessageFromModelRequest = async (request: ChatPostRequest): Promise<void> => {
+  const targetSessionId = request.targetSessionId?.trim() || null;
+  const pane = targetSessionId
+    ? expertChatPanes.find(
+        (candidate) =>
+          candidate.accountId === request.accountId &&
+          (candidate.discussion?.sessionId === targetSessionId
+            || candidate.resumeSessionId === targetSessionId),
+      )
+    : expertChatPanes.find(
+        (candidate) =>
+          candidate.accountId === request.accountId
+          && !!request.sourceChatKey
+          && candidate.key === request.sourceChatKey,
+      );
+  if (!pane) {
+    throw new Error(
+      targetSessionId
+        ? "Le chat cible n'est pas ouvert dans l'interface."
+        : "Le chat source n'est plus ouvert dans l'interface.",
+    );
+  }
+  const sent = await sendExpertChatMessage(pane, expertChatPaneRoot(pane), request.message);
+  if (!sent) {
+    // Le message reste prepare dans le compositeur du chat cible plutot que
+    // d'etre perdu ; l'utilisateur peut le valider d'un clic.
+    throw new Error("Le message n'a pas pu etre envoye : il reste pret dans le compositeur du chat cible.");
+  }
+};
+
+const claimChatPostRequests = async (): Promise<void> => {
+  if (!isRemoteMode() || chatPostRequestsInFlight) return;
+  chatPostRequestsInFlight = true;
+  try {
+    const requests = await invoke<ChatPostRequest[]>("claim_chat_post_requests");
+    for (const request of requests) {
+      try {
+        await postChatMessageFromModelRequest(request);
+      } catch (error) {
+        statusText = `Envoi du message demande : ${String(error)}`;
+        render();
+      }
+    }
+  } catch {
+    // Serveur ancien sans la route : le prochain poll retentera sans casser
+    // le rafraichissement des tours.
+  } finally {
+    chatPostRequestsInFlight = false;
+  }
+};
+
 // Une erreur portant un httpStatus est un rejet serveur definitif (413, 401,
 // autre 4xx/5xx JSON) : le tour n'a pas demarre. Sans httpStatus, c'est une
 // coupure de transport, et le serveur a peut-etre deja lance le tour — il faut
@@ -16944,6 +17087,7 @@ const refreshActiveChatTurns = async (): Promise<boolean> => {
   activeChatTurnsRefreshRequested = false;
   try {
     await claimChatOpenRequests();
+    await claimChatPostRequests();
     const next = await invoke<ActiveChatTurnSummary[]>("list_active_chat_turns");
     const nextSidebarSignature = activeChatTurnsStatusSignature(next);
     const sidebarChanged = nextSidebarSignature !== activeChatTurnsSidebarSignature;
@@ -22164,6 +22308,8 @@ const appViewTitle = (view: AppView): string => {
       return "Messagerie";
     case "tiktok":
       return "Comptes TikTok";
+    case "social":
+      return "Réseaux sociaux";
     case "devices":
       return "Appareils";
     case "android":
@@ -23529,6 +23675,10 @@ const renderActiveAppPanel = (): string => {
       return tiktokAccountsModule?.renderTikTokAccountsPanel({
         remoteMode: isRemoteMode(),
       }) ?? "";
+    case "social":
+      return socialViewModule?.renderSocialPanel({
+        remoteMode: isRemoteMode(),
+      }) ?? "";
     case "devices":
       return deviceFleetModule?.renderDeviceFleetPanel({ remoteMode: isRemoteMode() }) ?? "";
     case "android":
@@ -24386,6 +24536,9 @@ const renderChatFirstShell = () => {
           <button type="button" id="dashboardToggle" class="${activeView === "dashboard" ? "active" : ""}" title="Statistiques d'utilisation" ${activeView === "dashboard" ? 'aria-current="page"' : ""}>
             <span class="chat-context-icon"><i data-lucide="bar-chart-3"></i></span><span class="chat-context-copy"><strong>Stats</strong><small>Usage et activité</small></span>
           </button>
+          ${isRemoteMode() ? `<button type="button" id="socialToggle" class="${activeView === "social" ? "active" : ""}" title="Vues quotidiennes des comptes Instagram et TikTok" ${activeView === "social" ? 'aria-current="page"' : ""}>
+            <span class="chat-context-icon"><i data-lucide="clapperboard"></i></span><span class="chat-context-copy"><strong>Réseaux sociaux</strong><small>Vues par jour · IG & TikTok</small></span>
+          </button>` : ""}
           ${isRemoteMode() ? `<button type="button" id="trackingToggle" class="${activeView === "tracking" ? "active" : ""}" title="Liens de tracking Duello" ${activeView === "tracking" ? 'aria-current="page"' : ""}>
             <span class="chat-context-icon"><i data-lucide="route"></i></span><span class="chat-context-copy"><strong>Tracking</strong><small>5 clics · 1 jour</small></span>
           </button>` : ""}
@@ -24700,6 +24853,10 @@ const renderLegacyTerminalShell = () => {
               <i data-lucide="bar-chart-3"></i>
               <span>Stats</span>
             </button>
+            ${isRemoteMode() ? `<button id="socialToggle" class="tool-button ${activeView === "social" ? "primary" : ""}" title="Vues Instagram et TikTok">
+              <i data-lucide="clapperboard"></i>
+              <span>Social</span>
+            </button>` : ""}
             ${isRemoteMode() ? `<button id="trackingToggle" class="tool-button ${activeView === "tracking" ? "primary" : ""}" title="Liens de tracking Duello">
               <i data-lucide="route"></i>
               <span>Tracking</span>
@@ -30288,6 +30445,7 @@ const bindUi = () => {
   maintenance.bindMaintenanceCard(render);
   videoModule?.bindVideoPanel(render, renderIcons);
   transcriptionModule?.bindTranscriptionPanel(render);
+  socialViewModule?.bindSocialPanel({ rerender: render });
   trackingViewModule?.bindTrackingPanel({ rerender: render, renderIcons });
   duelloBankModule?.bindDuelloBankPanel({ rerender: render, renderIcons });
   freebuffCloudModule?.bindFreebuffCloudPanel({ rerender: render, renderIcons });
@@ -31477,6 +31635,11 @@ const bindUi = () => {
   });
   document.querySelector<HTMLButtonElement>("#tiktokToggle")?.addEventListener("click", () => {
     setActiveView("tiktok");
+  });
+  document.querySelectorAll<HTMLButtonElement>("#socialToggle").forEach((button) => {
+    button.addEventListener("click", () => {
+      setActiveView("social");
+    });
   });
   document.querySelector<HTMLButtonElement>("#devicesToggle")?.addEventListener("click", () => {
     setActiveView("devices");
@@ -34394,6 +34557,14 @@ const boot = async () => {
   if (recoveredLazyView && recoveredLazyView !== "chat") {
     setActiveView(recoveredLazyView);
   }
+  // Retour OAuth du dashboard social (Instagram/TikTok) : le fournisseur a
+  // redirigé sur /?switch_social=... — on ouvre l'onglet Réseaux sociaux qui
+  // affiche la confirmation du compte connecté.
+  const switchSocialCallback = takeSwitchSocialCallback();
+  if (switchSocialCallback) {
+    pendingSwitchSocialCallback = switchSocialCallback;
+    setActiveView("social");
+  }
   // La liaison se pilote depuis Mon compte : au retour de Microsoft, on rouvre
   // cette modale, sinon les messages de succes et d'echec ne seraient jamais lus.
   if (takeMicrosoftOAuthResultRedirect()) openUserProfileModal();
@@ -34465,6 +34636,7 @@ window.addEventListener("beforeunload", () => {
   forumModule?.stopForumPolling();
   messagingModule?.stopMessagingPolling();
   tiktokAccountsModule?.deactivateTikTokAccountsPanel();
+  socialViewModule?.deactivateSocialPanel();
   deviceFleetModule?.deactivateDeviceFleetPanel();
   androidControlModule?.deactivateAndroidControlPanel();
   stopChatSync();

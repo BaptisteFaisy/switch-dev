@@ -69,3 +69,61 @@ des terminaux et providers enfants.
 - réponses Duello bornées, redirections HTTP refusées et aucune donnée de compte
   Stripe relayée au navigateur ;
 - réponses financières marquées `Cache-Control: no-store`.
+
+## Paiement de retrait en USDC via Phantom (Solana)
+
+Quand un membre demande un retrait, l'admin Switch peut payer directement depuis
+son wallet **Phantom** en **USDC** (mainnet Solana). La signature se fait
+exclusivement dans l'extension Phantom du navigateur : Switch ne construit que la
+transaction (`@solana/web3.js` + `@solana/spl-token`) et ne manipule jamais de
+clé privée ni de seed.
+
+### Contrat attendu côté Duello
+
+Pour que le bouton « Payer USDC » s'active, l'API Duello doit exposer l'adresse
+Solana de chaque membre dans le wallet :
+
+```json
+{
+  "publicId": "wallet_xyz",
+  "displayName": "Baptiste Faisy",
+  "solanaAddress": "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU"
+}
+```
+
+- Le champ est **optionnel** : un wallet sans `solanaAddress` affiche « — » et le
+  paiement reste désactivé.
+- L'adresse est **validée côté serveur** (base58, 32-44 caractères) avant d'être
+  relayée au navigateur — les adresses invalides sont rejetées et non exposées.
+- Le membre fournit son adresse dans l'app Duello ; Duello la propage dans
+  `/api/admin/affiliate-wallets`.
+
+### Flux côté Switch
+
+1. L'admin connecte son wallet Phantom (bouton « Connecter Phantom ») ; Switch
+   lit le solde USDC du wallet via le RPC public (`VITE_SOLANA_RPC` ou
+   `https://api.mainnet-beta.solana.com`).
+2. L'admin choisit le membre et le montant USDC (jusqu'à 6 décimales), coche la
+   confirmation.
+3. Switch construit la transaction SPL transfer :
+   - crée le compte ATA USDC du membre s'il n'existe pas encore (frais SOL payés
+     par le wallet Phantom expéditeur) ;
+   - signe et diffuse **via Phantom** (`signAndSendTransaction`) ;
+   - confirme la transaction puis affiche le lien Solscan.
+
+### Exigences du wallet admin
+
+- USDC (mint `EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v`) pour le montant
+  envoyé ;
+- un peu de **SOL** pour les frais de transaction (et la création d'ATA le cas
+  échéant).
+
+### Garde-fous supplémentaires
+
+- la mutation reste réservée au jeton `CST_ADMIN_TOKEN` exact et à l'origine
+  navigateur autorisée ;
+- le montant USDC est borné (1 µUSDC à 1 000 000 USDC) et le solde du wallet est
+  vérifié avant l'envoi ;
+- aucune clé privée, seed ou phrase de récupération n'est jamais demandée ni
+  stockée ; si l'extension Phantom est absente, l'interface l'indique sans rien
+  envoyer.

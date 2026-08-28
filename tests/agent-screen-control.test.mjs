@@ -43,6 +43,18 @@ test("les demandes ecran valides sont acceptees pour chaque action", () => {
     { action: "press", key: "Win" },
     { action: "scroll", amount: 3 },
     { action: "scroll", amount: -2, x: 400, y: 300 },
+    { action: "windows" },
+    { action: "open", command: 'chrome "https://www.google.com/search?q=meteo+Paris"' },
+    { action: "screenshot", window: 123456 },
+    { action: "locate", text: "Type a message" },
+    { action: "locate", text: "Reprendre", window: 555 },
+    { action: "locate", text: "x", index: 2 },
+    { action: "click", x: 10, y: 20, window: 987654 },
+    { action: "type", text: "Bonjour", window: 555 },
+    { action: "type", text: "Bonjour", window: 555, mode: "focus" },
+    { action: "type", text: "Bonjour", window: 555, mode: "messages" },
+    { action: "press", key: "Enter", window: 555, mode: "focus" },
+    { action: "scroll", amount: 2, window: 555 },
     { action: "arm" },
     { action: "arm", minutes: 15 },
     { action: "disarm" },
@@ -78,6 +90,25 @@ test("les demandes ecran invalides sont refusees", () => {
     validRequest({ action: "arm", minutes: 61 }),
     validRequest({ action: "arm", minutes: 2.5 }),
     validRequest({ action: "arm", minutes: "10" }),
+    validRequest({ action: "open" }),
+    validRequest({ action: "open", command: "x".repeat(513) }),
+    validRequest({ action: "open", command: "chro\nme" }),
+    validRequest({ action: "click", x: 1, y: 2, window: 0 }),
+    validRequest({ action: "click", x: 1, y: 2, window: -5 }),
+    validRequest({ action: "click", x: 1, y: 2, window: 1.5 }),
+    validRequest({ action: "click", x: 1, y: 2, window: "abc" }),
+    validRequest({ action: "screenshot", window: 99999999999 }),
+    validRequest({ action: "locate" }),
+    validRequest({ action: "locate", text: "" }),
+    validRequest({ action: "locate", text: "   " }),
+    validRequest({ action: "locate", text: "x".repeat(81) }),
+    validRequest({ action: "locate", text: "x", index: -1 }),
+    validRequest({ action: "locate", text: "x", index: 1.5 }),
+    validRequest({ action: "locate", text: "x", index: 51 }),
+    validRequest({ action: "locate", text: "x", index: "deux" }),
+    validRequest({ action: "locate", text: "x", window: 0 }),
+    validRequest({ action: "type", text: "x", window: 555, mode: "autre" }),
+    validRequest({ action: "press", key: "Tab", window: 555, mode: "autre" }),
   ];
   for (const value of invalid) {
     assert.throws(() => validateAgentScreenRequest(value), undefined, JSON.stringify(value));
@@ -97,8 +128,9 @@ test("les touches autorisees ont toutes une sequence de codes virtuels Windows",
   assert.deepEqual(SCREEN_KEY_VK["Shift+Tab"], [0x10, 0x09]);
   assert.deepEqual(SCREEN_KEY_VK["Win"], [0x5b]);
   assert.deepEqual(SCREEN_KEY_VK["F6"], [0x75]);
-  assert.ok(SCREEN_ACTIONS.size >= 11);
+  assert.ok(SCREEN_ACTIONS.size >= 13);
   assert.ok(SCREEN_ACTIONS.has("arm") && SCREEN_ACTIONS.has("disarm"));
+  assert.ok(SCREEN_ACTIONS.has("windows") && SCREEN_ACTIONS.has("open"));
 });
 
 test("le texte sensible n'est jamais saisissable par le chat", () => {
@@ -130,12 +162,13 @@ test("le texte sensible n'est jamais saisissable par le chat", () => {
   }
 });
 
-test("les confirmations Windows locales couvrent les actions mutantes et l'armement", () => {
+test("les confirmations Windows locales couvrent les actions mutantes, pas l'armement", () => {
   assert.equal(requiresScreenApproval("click"), true);
   assert.equal(requiresScreenApproval("double_click"), true);
   assert.equal(requiresScreenApproval("right_click"), true);
   assert.equal(requiresScreenApproval("type"), true);
-  assert.equal(requiresScreenApproval("arm"), true);
+  // L'armement est autorise par la demande explicite dans le chat, sans popup.
+  assert.equal(requiresScreenApproval("arm"), false);
   assert.equal(requiresScreenApproval("disarm"), false);
   assert.equal(requiresScreenApproval("press", "Enter"), true);
   assert.equal(requiresScreenApproval("press", "Space"), true);
@@ -144,6 +177,7 @@ test("les confirmations Windows locales couvrent les actions mutantes et l'armem
   assert.equal(requiresScreenApproval("press", "Ctrl+L"), false);
   assert.equal(requiresScreenApproval("press", "Win"), false);
   assert.equal(requiresScreenApproval("screenshot"), false);
+  assert.equal(requiresScreenApproval("locate"), false);
   assert.equal(requiresScreenApproval("move"), false);
   assert.equal(requiresScreenApproval("scroll"), false);
 });
@@ -174,30 +208,29 @@ test("la session armee passe sans confirmation jusqu'a expiration ou desarmement
   assert.equal(confirms.length, 1);
   assert.equal(confirms[0].action, "type");
 
-  // L'armement est la confirmation unique (duree par defaut 10 min).
+  // L'armement ne demande aucune popup (autorise par la demande dans le chat).
   const armed = await controller.handle({ ...base, action: "arm" });
   assert.equal(armed.ok, true);
   assert.equal(armed.armed, true);
   assert.equal(armed.minutes, 10);
-  assert.equal(confirms.length, 2);
-  assert.equal(confirms[1].action, "arm");
+  assert.equal(confirms.length, 1);
 
   // Pendant la fenetre armee : plus aucune popup pour les actions mutantes.
   await controller.handle({ ...base, action: "click", x: 10, y: 20 });
   await controller.handle({ ...base, action: "press", key: "Enter" });
   await controller.handle({ ...base, action: "type", text: "encore" });
-  assert.equal(confirms.length, 2);
+  assert.equal(confirms.length, 1);
 
   // Expiration : la confirmation redevient obligatoire.
   clock += 10 * 60_000 + 1;
   await controller.handle({ ...base, action: "type", text: "apres expiration" });
-  assert.equal(confirms.length, 3);
+  assert.equal(confirms.length, 2);
 
   // Desarmement explicite : meme avant expiration, plus aucune tolerance.
   const disarm = await controller.handle({ ...base, action: "disarm" });
   assert.equal(disarm.armed, false);
   await controller.handle({ ...base, action: "type", text: "apres desarmement" });
-  assert.equal(confirms.length, 4);
+  assert.equal(confirms.length, 3);
 
   await controller.close();
 });
@@ -210,6 +243,23 @@ test("le script PowerShell compile les actions et le mapping des touches", () =>
   assert.ok(script.includes("ConvertTo-Json"));
   assert.ok(script.includes("PressSequence"));
   assert.ok(script.includes("GetVkSequence"));
+  // Mode arriere-plan : ciblage de fenetre sans focus.
+  assert.ok(script.includes("PostMessage"));
+  assert.ok(script.includes("PrintWindow"));
+  assert.ok(script.includes("LaunchNoFocus"));
+  assert.ok(script.includes("ListWindowsText"));
+  assert.ok(script.includes("ClickWindowClient"));
+  assert.ok(script.includes("TypeToWindow"));
+  assert.ok(script.includes("PressToWindow"));
+  // Saisie universelle : focus clavier temporaire sans changement d'ordre Z.
+  assert.ok(script.includes("AttachThreadInput"));
+  assert.ok(script.includes("TypeFocusSteal"));
+  assert.ok(script.includes("PressFocusSteal"));
+  assert.ok(script.includes("ScrollWindowClient"));
+  // Repérage visuel : OCR natif + dispatch locate.
+  assert.ok(script.includes("Find-OcrCandidates"));
+  assert.ok(script.includes("'locate'"));
+  assert.ok(script.includes("RecognizeAsync"));
   assert.ok(script.includes('if (key == "ArrowDown") return new int[] { 0x28 };'));
   assert.ok(script.includes('if (key == "Shift+Tab") return new int[] { 0x10, 0x9 };'));
   assert.ok(script.includes('if (key == "Ctrl+L") return new int[] { 0x11, 0x4c };'));
@@ -249,10 +299,24 @@ test("le serveur MCP ecran expose ses outils et leur schema", async () => {
   assert.ok(press.inputSchema.properties.key.enum.includes("Ctrl+L"));
   assert.ok(press.inputSchema.properties.key.enum.includes("Win"));
   const arm = tools.result.tools.find((tool) => tool.name === "screen_arm");
-  assert.ok(arm.description.includes("UNE seule confirmation"));
+  assert.ok(arm.description.includes("AUCUNE popup"));
+  assert.ok(arm.description.includes("demande explicite"));
   assert.ok(arm.inputSchema.properties.minutes.maximum === 60);
   const disarm = tools.result.tools.find((tool) => tool.name === "screen_disarm");
   assert.deepEqual(disarm.inputSchema.properties, {});
+  const windows = tools.result.tools.find((tool) => tool.name === "screen_windows");
+  assert.ok(windows);
+  assert.deepEqual(windows.inputSchema.properties, {});
+  const locate = tools.result.tools.find((tool) => tool.name === "screen_locate");
+  assert.ok(locate);
+  assert.deepEqual(locate.inputSchema.required, ["text"]);
+  assert.equal(locate.inputSchema.properties.index.maximum, 50);
+  const open = tools.result.tools.find((tool) => tool.name === "screen_open");
+  assert.deepEqual(open.inputSchema.required, ["command"]);
+  assert.ok(open.description.includes("SANS prendre le focus"));
+  // Le parametre window est accepte sur les actions ciblables.
+  assert.ok(click.inputSchema.properties.window);
+  assert.ok(!tools.result.tools.find((tool) => tool.name === "screen_move").inputSchema.properties.window);
 });
 
 test("le serveur MCP retourne la capture en image avec l'echelle", async () => {
@@ -349,6 +413,143 @@ test("le serveur MCP relaie l'action avec la bonne session et marque les erreurs
   );
   assert.equal(failed.result.isError, true);
   assert.ok(failed.result.content[0].text.includes("Action refusee."));
+});
+
+test("les demandes navigateur valides sont acceptees et propagees", () => {
+  const cases = [
+    { action: "browser", method: "list", window: 123456 },
+    { action: "browser", method: "list", cdpPort: 9222 },
+    { action: "browser", method: "screenshot", cdpPort: 9223 },
+    { action: "browser", method: "eval", window: 123456, cdpPort: 9222, expression: "document.title" },
+    { action: "browser", method: "navigate", window: 123456, url: "https://fr.wikipedia.org" },
+    { action: "browser", method: "eval", window: 123456, expression: "document.title" },
+    { action: "browser", method: "click", window: 123456, selector: "a[href*='wikipedia']" },
+    { action: "browser", method: "type", window: 123456, selector: "input[name=q]", text: "meteo Paris" },
+    { action: "browser", method: "key", window: 123456, key: "Enter" },
+  ];
+  for (const value of cases) {
+    const request = validateAgentScreenRequest(validRequest(value));
+    assert.equal(request.action, "browser");
+    assert.equal(request.method, value.method);
+    assert.equal(request.window, value.window);
+  }
+});
+
+test("les demandes navigateur invalides sont refusees", () => {
+  const invalid = [
+    validRequest({ action: "browser" }),
+    validRequest({ action: "browser", method: "inconnue", window: 123456 }),
+    validRequest({ action: "browser", method: "list" }),
+    validRequest({ action: "browser", method: "list", cdpPort: 80 }),
+    validRequest({ action: "browser", method: "list", cdpPort: 70000 }),
+    validRequest({ action: "browser", method: "list", cdpPort: "http" }),
+    validRequest({ action: "browser", method: "list", window: -1 }),
+    validRequest({ action: "browser", method: "navigate", window: 123456 }),
+    validRequest({ action: "browser", method: "navigate", window: 123456, url: "ftp://x" }),
+    validRequest({ action: "browser", method: "navigate", window: 123456, url: "javascript:alert(1)" }),
+    validRequest({ action: "browser", method: "eval", window: 123456 }),
+    validRequest({ action: "browser", method: "click", window: 123456 }),
+    validRequest({ action: "browser", method: "type", window: 123456, selector: "input" }),
+    validRequest({ action: "browser", method: "type", window: 123456, text: "sans selecteur" }),
+    validRequest({ action: "browser", method: "type", window: 123456, selector: "input", text: "code OTP 482913" }),
+    validRequest({ action: "browser", method: "type", window: 123456, selector: "input", text: "ligne\nretour" }),
+    validRequest({ action: "browser", method: "key", window: 123456, key: "Ctrl+C" }),
+    validRequest({ action: "browser", method: "key", window: 123456, key: "Win" }),
+  ];
+  for (const value of invalid) {
+    assert.throws(() => validateAgentScreenRequest(value), undefined, JSON.stringify(value));
+  }
+});
+
+test("les mutations navigateur exigent la confirmation, pas la lecture", () => {
+  assert.equal(requiresScreenApproval("browser:list"), false);
+  assert.equal(requiresScreenApproval("browser:screenshot"), false);
+  assert.equal(requiresScreenApproval("browser:navigate"), true);
+  assert.equal(requiresScreenApproval("browser:eval"), true);
+  assert.equal(requiresScreenApproval("browser:click"), true);
+  assert.equal(requiresScreenApproval("browser:type"), true);
+  assert.equal(requiresScreenApproval("browser:key"), true);
+});
+
+test("le script PowerShell embarque le pilotage CDP du navigateur", () => {
+  const script = buildAgentScreenPowerShellScriptWithKeys();
+  assert.ok(script.includes("Get-CdpPort"));
+  assert.ok(script.includes("Invoke-Cdp"));
+  assert.ok(script.includes("Invoke-CdpKey"));
+  assert.ok(script.includes("Get-CdpPageTarget"));
+  assert.ok(script.includes("ClientWebSocket"));
+  assert.ok(script.includes("Page.captureScreenshot"));
+  assert.ok(script.includes("Page.navigate"));
+  assert.ok(script.includes("Runtime.evaluate"));
+  assert.ok(script.includes("Input.dispatchKeyEvent"));
+  assert.ok(script.includes("DevToolsActivePort"));
+  assert.ok(script.includes("--remote-debugging-port=0"));
+  // Anti-bot : masquage de navigator.webdriver + consentement Google.
+  assert.ok(script.includes("--disable-blink-features=AutomationControlled"));
+  assert.ok(script.includes("Invoke-CdpStealth"));
+  assert.ok(script.includes("Object.defineProperty(navigator, 'webdriver'"));
+  assert.ok(script.includes("#L2AGLb"));
+});
+
+test("les outils navigateur MCP existent et relaient la methode CDP", async () => {
+  const tools = await handleMcpRequest({ jsonrpc: "2.0", id: 1, method: "tools/list" });
+  const names = tools.result.tools.map((tool) => tool.name);
+  for (const expected of ["browser_list", "browser_screenshot", "browser_navigate", "browser_eval", "browser_click", "browser_type", "browser_key"]) {
+    assert.ok(names.includes(expected), `outil manquant: ${expected}`);
+  }
+  const navigate = tools.result.tools.find((tool) => tool.name === "browser_navigate");
+  assert.deepEqual(navigate.inputSchema.required, ["window", "url"]);
+  assert.equal(navigate.inputSchema.additionalProperties, false);
+  const type = tools.result.tools.find((tool) => tool.name === "browser_type");
+  assert.deepEqual(type.inputSchema.required, ["window", "selector", "text"]);
+
+  let received = null;
+  const result = await handleMcpRequest(
+    {
+      jsonrpc: "2.0",
+      id: 7,
+      method: "tools/call",
+      params: { name: "browser_navigate", arguments: { window: 123456, url: "https://fr.wikipedia.org" } },
+    },
+    {
+      screenSessionId: sessionId,
+      invoke: async (request) => {
+        received = request;
+        return { ok: true, navigated: true, url: "https://fr.wikipedia.org" };
+      },
+    }
+  );
+  assert.equal(received.action, "browser");
+  assert.equal(received.method, "navigate");
+  assert.equal(received.window, 123456);
+  assert.equal(received.url, "https://fr.wikipedia.org");
+  assert.ok(result.result.content[0].text.includes("navigated"));
+
+  // Capture CDP : image renvoyee avec le titre de l'onglet.
+  const shot = await handleMcpRequest(
+    {
+      jsonrpc: "2.0",
+      id: 8,
+      method: "tools/call",
+      params: { name: "browser_screenshot", arguments: { window: 123456 } },
+    },
+    {
+      screenSessionId: sessionId,
+      invoke: async () => ({
+        ok: true,
+        pageCapture: true,
+        window: 123456,
+        screenshot: "aGVsbG8=",
+        title: "Wikipedia",
+        url: "https://fr.wikipedia.org",
+      }),
+    }
+  );
+  const image = shot.result.content.find((part) => part.type === "image");
+  assert.ok(image);
+  const text = shot.result.content.find((part) => part.type === "text").text;
+  assert.ok(text.includes("Wikipedia"));
+  assert.ok(text.includes("sans focus"));
 });
 
 test("l'identifiant de session ecran est stable depuis la graine", () => {

@@ -9368,6 +9368,8 @@ mod tests {
             model: Some(model.to_string()),
             reasoning_effort: Some("medium".to_string()),
             fast_mode: false,
+            base_url: None,
+            reasoning_effort_field: None,
             completed_on: None,
         }
     }

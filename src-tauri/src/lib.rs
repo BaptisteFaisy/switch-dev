@@ -72,6 +72,20 @@ struct PoolState {
 
 #[cfg(feature = "desktop")]
 pub fn run() {
+    // Canal de navigation DOM optionnel : si CST_WEBVIEW_CDP_PORT est defini
+    // (1024-65535), le WebView2 de l'app expose le protocole DevTools sur ce
+    // port loopback. Desactive par defaut : il n'y a aucun port ouvert sans ce
+    // choix explicite de l'utilisateur (usage : navigation/pilotage par les
+    // outils browser_* de l'agent, sans focus ni souris).
+    if let Ok(port) = std::env::var("CST_WEBVIEW_CDP_PORT") {
+        let port = port.trim().to_string();
+        if port.parse::<u16>().map(|value| value >= 1024).unwrap_or(false) {
+            std::env::set_var(
+                "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
+                format!("--remote-debugging-port={port} --remote-allow-origins=*"),
+            );
+        }
+    }
     let chat_manager = chat::ChatTurnManager::default();
     chat::start_orphan_chat_image_sweeper();
     let autonomous_manager = autonomous::AutonomousAgentManager::new(

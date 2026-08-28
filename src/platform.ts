@@ -1254,6 +1254,8 @@ async function remoteInvoke<T>(command: string, args: Record<string, any>): Prom
       return listRemoteActiveChatTurns<T>();
     case "claim_chat_open_requests":
       return api<T>("POST", "/api/chat/open-requests/claim");
+    case "claim_chat_post_requests":
+      return api<T>("POST", "/api/chat/post-requests/claim");
     case "chat_turn_status":
       return remoteChatTurnRequest<T>(args.id, "GET");
     case "stop_chat_turn":

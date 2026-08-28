@@ -63,6 +63,26 @@ Si Microsoft révoque l’autorisation d’une boîte — mot de passe changé, 
 
 Si le serveur est ouvert par `127.0.0.1` derrière un tunnel, le départ de la liaison bascule automatiquement sur l’origine publique déclarée dans Entra : c’est la seule URL que Microsoft acceptera.
 
+## Envoyer un message dans un chat (canal `send_chat_message`)
+
+Le modèle peut poster un message dans un chat **déjà ouvert** de l’interface
+web (y compris le chat courant), sans toucher à l’écran ni au focus : le canal
+passe par l’API interne, pas par la souris ou le clavier. Il est **désactivé par
+défaut** et ne s’expose au modèle que si le serveur est lancé avec
+`CST_AGENT_CHAT_POST=1`. Quand il est actif, le chat cible traite le message
+comme un message normal de l’utilisateur, avec le compte et le modèle de CE
+chat.
+
+- Cible : `chat` absent ou `"current"` pour le chat courant du modèle ;
+  sinon identifiant de session d’un autre chat déjà ouvert.
+- Garde-fous : les mots de passe, codes de vérification et données bancaires
+  sont refusés (saisis par l’utilisateur) ; le modèle ne doit pas s’envoyer de
+  message à lui-même en boucle ; file bornée à 32 demandes avec expiration
+  (2 h).
+- Le message envoyé est un vrai message utilisateur du chat cible : il déclenche
+  le traitement normal (tour du modèle de ce chat), comme si l’utilisateur
+  l’avait tapé.
+
 ## Utilisation depuis un chat
 
 Cinq outils sont exposés au modèle. Chacun accepte un champ `account` facultatif pour viser l’une de vos boîtes ; sans lui, la boîte par défaut est utilisée. Deux lisent immédiatement :

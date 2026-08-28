@@ -46,7 +46,7 @@
     "build:frontend": "npm run clean:web && tsc && vite build && node scripts/precompress-frontend.mjs",
     "test:frontend": "node --test tests/*.test.mjs",
     "test:frontend:baseline": "node --test --test-concurrency=2 tests/*.test.mjs",
-    "test:social": "node --test social-analytics/test/*.test.mjs social-gateway/test/*.test.mjs tests/social-analytics-loader.test.mjs",
+    "test:social": "node --test social-analytics/test/*.test.mjs social-gateway/test/*.test.mjs tests/social-view.test.mjs",
     "verify:resource-regression": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify-server-resource-regression.ps1",
     "test:vps:ssh": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/smoke-vps-ssh-tunnel.ps1",
     "test:smoke": "node scripts/smoke-site.mjs",

@@ -5474,6 +5474,8 @@ mod tests {
             model: None,
             reasoning_effort: None,
             fast_mode: false,
+            base_url: None,
+            reasoning_effort_field: None,
             completed_on: None,
         }
     }
