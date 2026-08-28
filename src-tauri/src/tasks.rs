@@ -64,8 +64,26 @@ fn now_unix() -> i64 {
         .unwrap_or(0)
 }
 
+#[cfg(not(test))]
 fn store_path() -> Result<PathBuf, String> {
     crate::settings::runtime_data_path(STORE_FILE)
+}
+
+#[cfg(test)]
+fn store_path() -> Result<PathBuf, String> {
+    static TEST_STORE_PATH: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    Ok(TEST_STORE_PATH
+        .get_or_init(|| {
+            let unique = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or(0);
+            std::env::temp_dir().join(format!(
+                "cst-tasks-test-{}-{unique}.json",
+                std::process::id()
+            ))
+        })
+        .clone())
 }
 
 fn load_store() -> Result<TaskStore, String> {

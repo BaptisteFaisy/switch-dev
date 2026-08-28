@@ -485,9 +485,13 @@ impl GmailManager {
             .append_pair("code_challenge", &code_challenge)
             .append_pair("code_challenge_method", "S256")
             .append_pair("prompt", "select_account")
-            .append_pair("access_type", "offline")
-            // Google renvoie un refresh token meme si le compte a deja consenti.
-            .append_pair("approval_prompt", "force");
+            // `access_type=offline` suffit pour obtenir un refresh token a la
+            // premiere autorisation de chaque compte. Ne PAS ajouter l'ancien
+            // parametre `approval_prompt` : combine a `prompt` il fait echouer
+            // Google avec 400 invalid_request "Conflict params: approval_prompt
+            // and prompt". Pour un nouveau compte, `prompt=select_account`
+            // permet de choisir la boite a lier.
+            .append_pair("access_type", "offline");
         Ok((url.into(), state_token))
     }
 
