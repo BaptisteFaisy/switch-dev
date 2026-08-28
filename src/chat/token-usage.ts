@@ -19,6 +19,7 @@ export type ChatContextPressure = "safe" | "warning" | "danger" | "unknown";
 
 export const CHAT_CONTEXT_WARNING_PERCENT = 60;
 export const CHAT_CONTEXT_DANGER_PERCENT = 80;
+export const CHAT_AUTO_COMPACT_THRESHOLD_TOKENS = 400_000;
 
 const CHAT_TOKEN_NUMBER_FORMAT = new Intl.NumberFormat("fr-FR", {
   maximumFractionDigits: 0,
@@ -69,6 +70,11 @@ export const chatContextPressure = (
 
 export const isCompactSlashCommand = (value: unknown): boolean =>
   typeof value === "string" && /^\/compact\s*$/i.test(value.trim());
+
+export const shouldAutoCompactChatContext = (value: unknown): boolean => {
+  const usage = normalizeChatContextUsage(value);
+  return !!usage && usage.usedTokens > CHAT_AUTO_COMPACT_THRESHOLD_TOKENS;
+};
 
 export const chatTokenUsagePresentation = (
   totalTokens: unknown,

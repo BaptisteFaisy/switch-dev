@@ -154,9 +154,11 @@ import {
   type ChatTurnStatusDisplayMode,
 } from "./chat/view";
 import {
+  CHAT_AUTO_COMPACT_THRESHOLD_TOKENS,
   chatTokenUsagePresentation,
   isCompactSlashCommand,
   normalizeChatContextUsage,
+  shouldAutoCompactChatContext,
   type ChatContextWindowUsage,
 } from "./chat/token-usage";
 import {
@@ -3542,6 +3544,10 @@ const UNCONNECTED_ACCOUNT_EXPIRY_MS = 10 * 60 * 1_000;
 const UNCONNECTED_ACCOUNT_CLEANUP_RETRY_MS = 30_000;
 const LOCAL_TRANSCRIPT_POLL_INTERVAL_MS = 3_000;
 const CHAT_TURN_POLL_INTERVAL_MS = 800;
+// Une mesure deja tentee n'est pas relancee a chaque poll si la compaction
+// echoue ou si Codex renvoie temporairement le meme compteur. Une nouvelle
+// croissance du contexte autorise une nouvelle tentative automatique.
+const automaticCompactionAttempts = new Map<string, number>();
 // Les tours actifs et le WebSocket portent les changements de statut. La liste
 // des discussions n'a pas besoin de rescanner les historiques toutes les 2 s.
 const DISCUSSIONS_POLL_INTERVAL_MS = 5_000;
@@ -10679,10 +10685,12 @@ const focusMainChatPrompt = () => {
 
 const compactedContextStatus = (
   usage: ChatContextWindowUsage | null,
+  automatic = false,
 ): string => {
-  if (!usage) return "Contexte compacté";
+  const prefix = automatic ? "Contexte compacté automatiquement" : "Contexte compacté";
+  if (!usage) return prefix;
   const presentation = chatTokenUsagePresentation(null, usage);
-  return `Contexte compacté · ${presentation.value} tokens · ${usage.usedPercent} % de la fenêtre exploitable`;
+  return `${prefix} · ${presentation.value} tokens · ${usage.usedPercent} % de la fenêtre exploitable`;
 };
 
 const updateCompactionStatus = (message: string) => {
@@ -10692,6 +10700,7 @@ const updateCompactionStatus = (message: string) => {
 
 const compactCurrentChatContext = async (
   clearCommandDraft = false,
+  automatic = false,
 ): Promise<boolean> => {
   const account = chatSelectedAccount();
   const discussion = chatDiscussion;
@@ -10726,7 +10735,9 @@ const compactCurrentChatContext = async (
     flushChatDraft();
   }
   chatContextCompacting = true;
-  updateCompactionStatus("Compaction du contexte Codex en cours…");
+  updateCompactionStatus(automatic
+    ? "Seuil de 400 000 tokens dépassé · compactage automatique en cours…"
+    : "Compaction du contexte Codex en cours…");
   if (activeView === "chat") render();
   try {
     const result = await invoke<CompactChatSessionResult>("compact_chat_session", {
@@ -10738,17 +10749,59 @@ const compactCurrentChatContext = async (
       if (usage) chatContextUsage = usage;
       await loadChatTranscript();
     }
-    updateCompactionStatus(compactedContextStatus(usage));
+    updateCompactionStatus(compactedContextStatus(usage, automatic));
     void refreshDiscussions();
     return true;
   } catch (error) {
-    updateCompactionStatus(`/compact impossible : ${String(error)}`);
+    updateCompactionStatus(automatic
+      ? `Compactage automatique impossible : ${String(error)}`
+      : `/compact impossible : ${String(error)}`);
     return false;
   } finally {
     chatContextCompacting = false;
     if (activeView === "chat") render();
-    focusMainChatPrompt();
+    if (!automatic) focusMainChatPrompt();
   }
+};
+
+const claimAutomaticCompactionAttempt = (
+  accountId: string,
+  sessionId: string,
+  contextUsage: ChatContextWindowUsage | null,
+): boolean => {
+  const key = `${accountId}:${sessionId}`;
+  if (!shouldAutoCompactChatContext(contextUsage)) {
+    if (contextUsage && contextUsage.usedTokens <= CHAT_AUTO_COMPACT_THRESHOLD_TOKENS) {
+      automaticCompactionAttempts.delete(key);
+    }
+    return false;
+  }
+  const attemptedAt = automaticCompactionAttempts.get(key);
+  if (attemptedAt !== undefined && contextUsage!.usedTokens <= attemptedAt) return false;
+  automaticCompactionAttempts.set(key, contextUsage!.usedTokens);
+  return true;
+};
+
+const maybeAutoCompactCurrentChatContext = (): boolean => {
+  const account = chatSelectedAccount();
+  const discussion = chatDiscussion;
+  const sessionId =
+    discussion?.rolloutId?.trim()
+    || chatTurn?.sessionId?.trim()
+    || discussion?.sessionId?.trim()
+    || null;
+  if (
+    !account
+    || accountProvider(account) !== "codex"
+    || !isPlausibleSessionId(sessionId)
+    || chatContextCompacting
+    || chatTurnIsBusy(chatTurn?.status)
+    || chatQueuedSubmissions.length > 0
+    || (discussion ? discussionHasRunningTurn(discussion) : false)
+    || !claimAutomaticCompactionAttempt(account.id, sessionId, chatContextUsage)
+  ) return false;
+  void compactCurrentChatContext(false, true);
+  return true;
 };
 
 const sendChatMessage = async (
@@ -11196,6 +11249,7 @@ const applyChatTranscript = (
     const panel = document.querySelector<HTMLElement>("#chatPanel");
     if (panel && patchChatRuntimeStatus(panel, chatPanelModel())) renderIcons(panel);
   }
+  void maybeAutoCompactCurrentChatContext();
 };
 
 const loadChatTranscript = async () => {
@@ -12397,6 +12451,7 @@ const applyExpertChatTranscript = (
     const root = expertChatPaneRoot(pane);
     if (root && patchChatRuntimeStatus(root, expertChatPanelModel(pane))) renderIcons(root);
   }
+  void maybeAutoCompactExpertChatContext(pane);
 };
 
 const loadExpertChatTranscript = async (pane: ExpertChatPane) => {
@@ -12837,6 +12892,7 @@ const focusExpertChatPrompt = (pane: ExpertChatPane) => {
 const compactExpertChatContext = async (
   pane: ExpertChatPane,
   clearCommandDraft = false,
+  automatic = false,
 ): Promise<boolean> => {
   const account = expertChatSelectedAccount(pane);
   const discussion = pane.discussion;
@@ -12864,7 +12920,9 @@ const compactExpertChatContext = async (
 
   if (clearCommandDraft) pane.draft = "";
   pane.contextCompacting = true;
-  updateCompactionStatus("Compaction du contexte Codex en cours…");
+  updateCompactionStatus(automatic
+    ? "Seuil de 400 000 tokens dépassé · compactage automatique en cours…"
+    : "Compaction du contexte Codex en cours…");
   refreshExpertChatPane(pane);
   try {
     const result = await invoke<CompactChatSessionResult>("compact_chat_session", {
@@ -12877,19 +12935,40 @@ const compactExpertChatContext = async (
       if (usage) pane.contextUsage = usage;
       await loadExpertChatTranscript(pane);
     }
-    updateCompactionStatus(compactedContextStatus(usage));
+    updateCompactionStatus(compactedContextStatus(usage, automatic));
     void refreshDiscussions();
     return true;
   } catch (error) {
-    updateCompactionStatus(`/compact impossible : ${String(error)}`);
+    updateCompactionStatus(automatic
+      ? `Compactage automatique impossible : ${String(error)}`
+      : `/compact impossible : ${String(error)}`);
     return false;
   } finally {
     pane.contextCompacting = false;
     if (expertChatPanes.includes(pane)) {
       refreshExpertChatPane(pane);
-      focusExpertChatPrompt(pane);
+      if (!automatic) focusExpertChatPrompt(pane);
     }
   }
+};
+
+const maybeAutoCompactExpertChatContext = (pane: ExpertChatPane): boolean => {
+  const account = expertChatSelectedAccount(pane);
+  const discussion = pane.discussion;
+  const sessionId = expertChatResumeSessionId(pane);
+  if (
+    !expertChatPanes.includes(pane)
+    || !account
+    || accountProvider(account) !== "codex"
+    || !isPlausibleSessionId(sessionId)
+    || pane.contextCompacting
+    || chatTurnIsBusy(pane.turn?.status)
+    || pane.queuedSubmissions.length > 0
+    || (discussion ? discussionHasRunningTurn(discussion) : false)
+    || !claimAutomaticCompactionAttempt(account.id, sessionId, pane.contextUsage)
+  ) return false;
+  void compactExpertChatContext(pane, false, true);
+  return true;
 };
 
 const sendExpertChatMessage = async (

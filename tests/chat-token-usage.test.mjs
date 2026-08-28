@@ -3,11 +3,13 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
+  CHAT_AUTO_COMPACT_THRESHOLD_TOKENS,
   chatContextPressure,
   chatTokenUsagePresentation,
   isCompactSlashCommand,
   normalizeChatContextUsage,
   normalizeChatTokenCount,
+  shouldAutoCompactChatContext,
 } from "../src/chat/token-usage.ts";
 
 test("le compteur de tokens normalise et formate l'usage cumule du chat", () => {
@@ -60,6 +62,20 @@ test("/compact est reconnu comme commande exacte", () => {
   assert.equal(isCompactSlashCommand("  /COMPACT  "), true);
   assert.equal(isCompactSlashCommand("/compact maintenant"), false);
   assert.equal(isCompactSlashCommand("bonjour /compact"), false);
+});
+
+test("le compactage automatique demarre seulement au-dela de 400 000 tokens de contexte", () => {
+  const context = (usedTokens) => ({
+    usedTokens,
+    contextWindow: 1_000_000,
+    remainingTokens: 1_000_000 - usedTokens,
+    usedPercent: Math.round(usedTokens / 10_000),
+  });
+
+  assert.equal(CHAT_AUTO_COMPACT_THRESHOLD_TOKENS, 400_000);
+  assert.equal(shouldAutoCompactChatContext(context(400_000)), false);
+  assert.equal(shouldAutoCompactChatContext(context(400_001)), true);
+  assert.equal(shouldAutoCompactChatContext(null), false);
 });
 
 test("l'en-tete du chat expose le compteur accessible et actualisable", () => {

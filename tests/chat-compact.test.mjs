@@ -49,3 +49,15 @@ test("les deux interfaces interceptent /compact et exposent les trois niveaux", 
   assert.match(style, /\.chat-token-usage\.pressure-warning/);
   assert.match(style, /\.chat-token-usage\.pressure-danger/);
 });
+
+test("les deux interfaces compactent automatiquement le contexte au-dela de 400k tokens", () => {
+  const main = source("../src/main.ts");
+  const tokenUsage = source("../src/chat/token-usage.ts");
+
+  assert.match(tokenUsage, /CHAT_AUTO_COMPACT_THRESHOLD_TOKENS = 400_000/);
+  assert.match(tokenUsage, /usedTokens > CHAT_AUTO_COMPACT_THRESHOLD_TOKENS/);
+  assert.match(main, /maybeAutoCompactCurrentChatContext/);
+  assert.match(main, /maybeAutoCompactExpertChatContext/);
+  assert.equal([...main.matchAll(/compact(?:Current|Expert)ChatContext\([^\n]*false, true\)/g)].length, 2);
+  assert.match(main, /automaticCompactionAttempts/);
+});
