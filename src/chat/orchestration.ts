@@ -3,9 +3,11 @@ export type OrchestrationSourceKind = "git_clean" | "git_dirty" | "ephemeral";
 
 export type OrchestrationPhase =
   | "planning"
+  | "designing_tests"
   | "working"
   | "reviewing"
   | "validating"
+  | "testing"
   | "final_review"
   | "final_validation"
   | "publishing"
@@ -71,6 +73,34 @@ export type OrchestrationEvent = {
   message: string;
 };
 
+export type OrchestrationTestDefinition = {
+  name: string;
+  command: string;
+  expected: string;
+};
+
+export type OrchestrationTesterStatus =
+  | "pending"
+  | "designing"
+  | "ready"
+  | "testing"
+  | "passed"
+  | "revision_required";
+
+export type OrchestrationTester = {
+  id: string;
+  position: number;
+  status: OrchestrationTesterStatus;
+  assignedTaskIds: string[];
+  sessionId: string | null;
+  planSummary: string | null;
+  testPlan: OrchestrationTestDefinition[];
+  lastResults: OrchestrationProofTest[];
+  attemptCount: number;
+  protocolFailures: number;
+  lastError: string | null;
+};
+
 export type OrchestrationTeamMessage = {
   id: string;
   sequence: number;
@@ -87,6 +117,8 @@ export type OrchestrationSnapshot = {
   objective: string;
   /** Nombre de travailleurs choisis, sans compter l'orchestrateur. */
   workerCount: number;
+  /** Un orchestrateur testeur par tranche de cinq workers, minimum un. */
+  testerCount: number;
   adaptiveFanout?: boolean;
   maxTaskCount?: number;
   minimumTaskCount?: number;
@@ -116,14 +148,23 @@ export type OrchestrationSnapshot = {
   orchestratorDir: string;
   orchestratorSessionId: string | null;
   currentTurnId: number | null;
-  currentTurnKind: "plan" | "worker" | "review" | "final_review" | null;
+  currentTurnKind:
+    | "plan"
+    | "tester_plan"
+    | "worker"
+    | "review"
+    | "tester_validation"
+    | "final_review"
+    | null;
   currentTaskId: string | null;
+  currentTesterId: string | null;
   currentStartId: string | null;
   currentValidationId: string | null;
   currentValidationKind: "task" | "final" | null;
   nextActionAt: number | null;
   planSummary: string | null;
   tasks: OrchestrationTask[];
+  testers: OrchestrationTester[];
   finalSummary: string | null;
   lastError: string | null;
   consecutiveStartFailures: number;
@@ -144,6 +185,11 @@ export const DEFAULT_ORCHESTRATION_WORKER_COUNT = 5;
 
 /** Plafond visible pendant la phase de test. Le serveur garde une limite configurable plus haute. */
 export const MAX_ORCHESTRATION_WORKER_COUNT = 5;
+
+export const ORCHESTRATION_WORKERS_PER_TESTER = 5;
+
+export const orchestrationTesterCount = (workerCount: number): number =>
+  Math.max(1, Math.ceil(Math.max(1, workerCount) / ORCHESTRATION_WORKERS_PER_TESTER));
 
 export const normalizeOrchestrationWorkerCount = (value: number): number | null => {
   if (!Number.isInteger(value) || value < 1 || value > MAX_ORCHESTRATION_WORKER_COUNT) return null;
@@ -266,12 +312,16 @@ export const orchestrationPhaseLabel = (phase: OrchestrationPhase): string => {
   switch (phase) {
     case "planning":
       return "Planification par l’orchestrateur";
+    case "designing_tests":
+      return "Conception des tests par les orchestrateurs";
     case "working":
       return "Travail des agents";
     case "reviewing":
       return "Revue dans le sandbox orchestrateur";
     case "validating":
       return "Validation réelle de la contribution";
+    case "testing":
+      return "Tests des orchestrateurs dédiés";
     case "final_review":
       return "Audit final";
     case "final_validation":
@@ -280,6 +330,25 @@ export const orchestrationPhaseLabel = (phase: OrchestrationPhase): string => {
       return "Application du rendu";
     case "completed":
       return "Projet rendu";
+  }
+};
+
+export const orchestrationTesterStatusLabel = (
+  status: OrchestrationTesterStatus,
+): string => {
+  switch (status) {
+    case "pending":
+      return "En attente";
+    case "designing":
+      return "Conception des tests";
+    case "ready":
+      return "Plan de tests prêt";
+    case "testing":
+      return "Tests en cours";
+    case "passed":
+      return "Tests validés";
+    case "revision_required":
+      return "Corrections demandées";
   }
 };
 

@@ -250,6 +250,7 @@ import {
 import {
   AUTOMATIC_ORCHESTRATION_MARKER,
   MAX_ORCHESTRATION_WORKER_COUNT,
+  ORCHESTRATION_WORKERS_PER_TESTER,
   automaticOrchestrationNotice,
   automaticOrchestrationEnabledByDefault,
   orchestrationIsRunning,
@@ -259,6 +260,8 @@ import {
   orchestrationRequestedProjectDir,
   orchestrationStatusLabel,
   orchestrationTaskStatusLabel,
+  orchestrationTesterCount,
+  orchestrationTesterStatusLabel,
   orchestrationWorkerAccountId,
   orchestrationWorkerCountFromEnv,
   parseAutomaticOrchestrationDecision,
@@ -267,6 +270,7 @@ import {
   type OrchestrationAccountRole,
   type OrchestrationSnapshot,
   type OrchestrationTask,
+  type OrchestrationTester,
   type OrchestrationTeamMessage,
 } from "./chat/orchestration";
 import {
@@ -2098,6 +2102,7 @@ type ExpertChatPane = {
   orchestrationId: string | null;
   orchestrationRole: "orchestrator" | "worker" | null;
   orchestrationTaskId: string | null;
+  orchestrationTesterId: string | null;
   followLatest: boolean;
   scrollTop: number;
   visibleTurnLimit: number | null;
@@ -2126,6 +2131,7 @@ type PersistedExpertChatPane = {
   orchestrationId?: string | null;
   orchestrationRole?: "orchestrator" | "worker" | null;
   orchestrationTaskId?: string | null;
+  orchestrationTesterId?: string | null;
 };
 
 type OrchestrationConversionState = {
@@ -2554,6 +2560,10 @@ let autonomousLaunchMode: AutonomousLaunchMode = "autonomous";
 const defaultOrchestrationWorkerCount = orchestrationWorkerCountFromEnv(
   typeof import.meta !== "undefined" ? import.meta.env?.VITE_CST_ORCHESTRATION_WORKERS : undefined,
 );
+const orchestrationTesterCountLabel = (workerCount: number): string => {
+  const count = orchestrationTesterCount(workerCount);
+  return `${count} testeur${count > 1 ? "s" : ""}`;
+};
 let autonomousLaunchWorkerCount = defaultOrchestrationWorkerCount;
 let autonomousLaunchWorkerAccountIds: string[] = [];
 let autonomousRequireUserReview = true;
@@ -6453,7 +6463,7 @@ const automaticOrchestrationRoutingSkill = (mode: ChatMode): ChatAgentSkillPromp
 
 Le mode d'orchestration automatique est explicitement actif pour ce tour (mode courant : ${mode}). Avant toute modification ou réponse de fond, évalue si la demande bénéficie réellement d'un orchestrateur et de chats workers isolés.
 
-Choisis l'orchestration pour toute tâche de réalisation dans un dépôt Git qui peut être découpée en plusieurs missions cohérentes. Cherche le nombre maximal de missions réellement utiles, jusqu'à 5, afin d'exploiter l'équipe sans créer de remplissage. Une demande explicite d'équipe multi-agent est un signal fort.
+Choisis l'orchestration pour toute tâche de réalisation dans un dépôt Git qui peut être découpée en plusieurs missions cohérentes. Cherche le nombre maximal de missions réellement utiles, jusqu'à 5, afin d'exploiter l'équipe sans créer de remplissage. L'application ajoutera automatiquement au moins un orchestrateur testeur dédié (un par tranche de cinq workers) et empêchera la fin tant que tous ses tests ne passent pas. Une demande explicite d'équipe multi-agent est un signal fort.
 
 N'oriente pas vers l'orchestration une question, une explication, une demande de statut, une revue seule, une petite correction locale, une tâche essentiellement séquentielle, une demande ambiguë qui exige d'abord une réponse utilisateur, ni un tour en mode Planifier ou Question. Dans ces cas, traite normalement la demande sans parler de ce routage.
 
@@ -11393,6 +11403,7 @@ const createExpertChatPane = (
         ? persisted.orchestrationRole
         : null,
     orchestrationTaskId: persisted.orchestrationTaskId ?? null,
+    orchestrationTesterId: persisted.orchestrationTesterId ?? null,
     followLatest: true,
     scrollTop: 0,
     visibleTurnLimit: initialVisibleChatTurnLimit(),
@@ -11667,6 +11678,14 @@ const orchestrationTaskForPane = (
     ? run.tasks.find((task) => task.id === pane.orchestrationTaskId) ?? null
     : null;
 
+const orchestrationTesterForPane = (
+  pane: ExpertChatPane,
+  run = orchestrationRunForPane(pane),
+): OrchestrationTester | null =>
+  pane.orchestrationRole === "orchestrator" && pane.orchestrationTesterId && run
+    ? run.testers.find((tester) => tester.id === pane.orchestrationTesterId) ?? null
+    : null;
+
 const expertChatResumeSessionId = (pane: ExpertChatPane): string | null =>
   pane.discussion?.rolloutId?.trim()
   || pane.turn?.sessionId?.trim()
@@ -11752,12 +11771,15 @@ const expertChatOrchestrationOption = (
   }
   const run = orchestrationRunForPane(pane);
   if (pane.orchestrationRole === "orchestrator") {
+    const tester = orchestrationTesterForPane(pane, run);
     return {
       role: "orchestrator",
-      label: "Orchestrateur",
-      detail: run
-        ? `${run.name} · ${orchestrationPhaseLabel(run.phase)}. Ouvrir le suivi.`
-        : "Chat orchestrateur · ouvrir le suivi.",
+      label: tester ? `Orchestrateur testeur ${tester.position}` : "Orchestrateur",
+      detail: tester
+        ? `${run?.name ?? "Orchestration"} · ${orchestrationTesterStatusLabel(tester.status)}. Ouvrir le suivi.`
+        : run
+          ? `${run.name} · ${orchestrationPhaseLabel(run.phase)}. Ouvrir le suivi.`
+          : "Chat orchestrateur · ouvrir le suivi.",
     };
   }
   if (pane.orchestrationRole === "worker") {
@@ -11778,6 +11800,7 @@ const expertChatPanelModel = (pane: ExpertChatPane): ChatPanelModel => {
   const discussion = pane.discussion;
   const run = orchestrationRunForPane(pane);
   const task = orchestrationTaskForPane(pane, run);
+  const tester = orchestrationTesterForPane(pane, run);
   const managedByOrchestration = !!pane.orchestrationRole;
   const account = expertChatSelectedAccount(pane);
   const provider = accountProvider(account);
@@ -11790,8 +11813,12 @@ const expertChatPanelModel = (pane: ExpertChatPane): ChatPanelModel => {
     : null;
   const metaParts = managedByOrchestration
     ? [
-        pane.orchestrationRole === "orchestrator" ? "Orchestrateur" : `Worker ${task?.position ?? ""}`.trim(),
-        task ? orchestrationTaskStatusLabel(task.status) : run ? orchestrationPhaseLabel(run.phase) : "Orchestration",
+        pane.orchestrationRole === "orchestrator"
+          ? tester ? `Orchestrateur testeur ${tester.position}` : "Orchestrateur"
+          : `Worker ${task?.position ?? ""}`.trim(),
+        tester
+          ? orchestrationTesterStatusLabel(tester.status)
+          : task ? orchestrationTaskStatusLabel(task.status) : run ? orchestrationPhaseLabel(run.phase) : "Orchestration",
         workspace ? displayProjectDir(workspace) : "",
       ].filter(Boolean)
     : discussion
@@ -11823,7 +11850,9 @@ const expertChatPanelModel = (pane: ExpertChatPane): ChatPanelModel => {
   return {
     title:
       pane.orchestrationRole === "orchestrator"
-        ? run?.name || discussion?.title?.trim() || "Orchestrateur"
+        ? tester
+          ? `Tests · ${tester.assignedTaskIds.map((taskId) => taskId.replace("task-", "W")).join(", ")}`
+          : run?.name || discussion?.title?.trim() || "Orchestrateur"
         : pane.orchestrationRole === "worker"
           ? task?.title || "Worker en préparation"
           : discussion?.title?.trim() || "Nouvelle conversation",
@@ -12008,6 +12037,7 @@ const persistExpertChats = () => {
       orchestrationId: pane.orchestrationId,
       orchestrationRole: pane.orchestrationRole,
       orchestrationTaskId: pane.orchestrationTaskId,
+      orchestrationTesterId: pane.orchestrationTesterId,
     })), ...pendingExpertChatRecords.filter((record) => !openKeys.has(record.key))],
   };
   accountScopedStorage.setItem(EXPERT_OPEN_CHATS_STORAGE_KEY, JSON.stringify(state));
@@ -12570,6 +12600,7 @@ const launchAutomaticOrchestration = async (
     pane.orchestrationId = created.id;
     pane.orchestrationRole = "orchestrator";
     pane.orchestrationTaskId = null;
+    pane.orchestrationTesterId = null;
     pane.pendingWorkspace = orchestrationRequestedProjectDir(created);
     pane.draft = "";
     pane.queuedSubmissions = [];
@@ -13345,9 +13376,13 @@ const openDiscussionInExpert = (
 };
 
 const dismissedOrchestrationWorkerPanes = new Set<string>();
+const dismissedOrchestrationTesterPanes = new Set<string>();
 
 const orchestrationWorkerPaneKey = (runId: string, taskId: string): string =>
   `${runId}:${taskId}`;
+
+const orchestrationTesterPaneKey = (runId: string, testerId: string): string =>
+  `${runId}:${testerId}`;
 
 const attachOrchestrationDiscussion = (
   pane: ExpertChatPane,
@@ -13402,7 +13437,7 @@ const syncOrchestrationChatPanes = (): {
   if (orchestrationsLoaded) {
     expertChatPanes = expertChatPanes.filter((pane) => {
       if (!pane.orchestrationId || runsById.has(pane.orchestrationId)) return true;
-      if (pane.orchestrationRole === "worker") {
+      if (pane.orchestrationRole === "worker" || pane.orchestrationTesterId) {
         stopExpertChatSync(pane);
         stopExpertChatTurnPoll(pane);
         changed = true;
@@ -13411,6 +13446,7 @@ const syncOrchestrationChatPanes = (): {
       pane.orchestrationId = null;
       pane.orchestrationRole = null;
       pane.orchestrationTaskId = null;
+      pane.orchestrationTesterId = null;
       changed = true;
       return true;
     });
@@ -13426,6 +13462,7 @@ const syncOrchestrationChatPanes = (): {
     if (!run) return;
     const groupProjectDir = orchestrationRequestedProjectDir(run);
     const taskIds = new Set(run.tasks.map((task) => task.id));
+    const testerIds = new Set(run.testers.map((tester) => tester.id));
 
     expertChatPanes
       .filter((pane) => pane.orchestrationId === run.id)
@@ -13434,7 +13471,7 @@ const syncOrchestrationChatPanes = (): {
           pane.pendingWorkspace = groupProjectDir;
           changed = true;
         }
-        if (pane.orchestrationRole === "orchestrator") {
+        if (pane.orchestrationRole === "orchestrator" && !pane.orchestrationTesterId) {
           const attached = attachOrchestrationDiscussion(
             pane,
             run.orchestratorSessionId,
@@ -13444,6 +13481,52 @@ const syncOrchestrationChatPanes = (): {
           if (run.orchestratorSessionId && !pane.discussion) missingDiscussions = true;
         }
       });
+
+    expertChatPanes = expertChatPanes.filter((pane) => {
+      if (
+        pane.orchestrationId !== run.id
+        || pane.orchestrationRole !== "orchestrator"
+        || !pane.orchestrationTesterId
+        || testerIds.has(pane.orchestrationTesterId)
+      ) {
+        return true;
+      }
+      stopExpertChatSync(pane);
+      stopExpertChatTurnPoll(pane);
+      changed = true;
+      return false;
+    });
+
+    run.testers.forEach((tester) => {
+      const dismissedKey = orchestrationTesterPaneKey(run.id, tester.id);
+      let pane = expertChatPanes.find(
+        (candidate) =>
+          candidate.orchestrationId === run.id
+          && candidate.orchestrationRole === "orchestrator"
+          && candidate.orchestrationTesterId === tester.id,
+      );
+      if (!pane && !dismissedOrchestrationTesterPanes.has(dismissedKey)) {
+        pane = createExpertChatPane(null, {
+          accountId: orchestrationOrchestratorAccountId(run),
+          pendingWorkspace: groupProjectDir,
+          mode: "build",
+          orchestrationId: run.id,
+          orchestrationRole: "orchestrator",
+          orchestrationTaskId: null,
+          orchestrationTesterId: tester.id,
+        });
+        expertChatPanes.push(pane);
+        changed = true;
+      }
+      if (!pane) return;
+      const attached = attachOrchestrationDiscussion(
+        pane,
+        tester.sessionId,
+        orchestrationOrchestratorAccountId(run),
+      );
+      changed = attached || changed;
+      if (tester.sessionId && !pane.discussion) missingDiscussions = true;
+    });
 
     expertChatPanes = expertChatPanes.filter((pane) => {
       if (
@@ -13502,7 +13585,7 @@ const syncOrchestrationChatPanes = (): {
 const releaseOrchestrationChatPanes = (runId: string) => {
   expertChatPanes = expertChatPanes.filter((pane) => {
     if (pane.orchestrationId !== runId) return true;
-    if (pane.orchestrationRole === "worker") {
+    if (pane.orchestrationRole === "worker" || pane.orchestrationTesterId) {
       stopExpertChatSync(pane);
       stopExpertChatTurnPoll(pane);
       return false;
@@ -13510,11 +13593,15 @@ const releaseOrchestrationChatPanes = (runId: string) => {
     pane.orchestrationId = null;
     pane.orchestrationRole = null;
     pane.orchestrationTaskId = null;
+    pane.orchestrationTesterId = null;
     return true;
   });
   [...dismissedOrchestrationWorkerPanes]
     .filter((key) => key.startsWith(`${runId}:`))
     .forEach((key) => dismissedOrchestrationWorkerPanes.delete(key));
+  [...dismissedOrchestrationTesterPanes]
+    .filter((key) => key.startsWith(`${runId}:`))
+    .forEach((key) => dismissedOrchestrationTesterPanes.delete(key));
   reconcileExpertChatPage();
   persistExpertChats();
 };
@@ -13931,6 +14018,10 @@ const closeExpertChatPane = (pane: ExpertChatPane) => {
   if (pane.orchestrationId && pane.orchestrationRole === "worker" && pane.orchestrationTaskId) {
     dismissedOrchestrationWorkerPanes.add(
       orchestrationWorkerPaneKey(pane.orchestrationId, pane.orchestrationTaskId),
+    );
+  } else if (pane.orchestrationId && pane.orchestrationTesterId) {
+    dismissedOrchestrationTesterPanes.add(
+      orchestrationTesterPaneKey(pane.orchestrationId, pane.orchestrationTesterId),
     );
   }
   stopExpertChatSync(pane);
@@ -20055,7 +20146,7 @@ const renderAutonomousPanel = (): string => {
               <label><span>Compte</span><select id="autonomousAccount" ${accountOptions ? "" : "disabled"}>${accountOptions || `<option value="">Aucun compte</option>`}</select></label>
               <label><span>Lancement</span><select id="autonomousLaunchMode"><option value="autonomous" ${launchOrchestration ? "" : "selected"}>Agent autonome</option><option value="orchestrator" ${launchOrchestration ? "selected" : ""}>Orchestrateur + workers</option></select></label>
               ${launchOrchestration
-                ? `<label><span>Workers</span><span class="orchestration-worker-count"><input id="autonomousLaunchWorkerCount" type="number" min="1" max="${MAX_ORCHESTRATION_WORKER_COUNT}" step="1" required value="${autonomousLaunchWorkerCount}" /><small>${autonomousLaunchWorkerCount + 1} agents au total</small></span></label>`
+                ? `<label><span>Workers</span><span class="orchestration-worker-count"><input id="autonomousLaunchWorkerCount" type="number" min="1" max="${MAX_ORCHESTRATION_WORKER_COUNT}" step="1" required value="${autonomousLaunchWorkerCount}" /><small>${autonomousLaunchWorkerCount + orchestrationTesterCount(autonomousLaunchWorkerCount) + 1} agents au total, dont ${orchestrationTesterCountLabel(autonomousLaunchWorkerCount)}</small></span></label>`
                 : `<label><span>Déclenchement</span><select id="autonomousTriggerKind"><option value="schedule" ${eventTriggered ? "" : "selected"}>Planning récurrent</option><option value="workspace_change" ${eventTriggered ? "selected" : ""}>Modification du projet</option></select></label>`}
               ${eventTriggered ? `<label><span>Stabilisation</span><span class="autonomous-timeout-input"><input id="autonomousDebounceSeconds" type="number" min="2" max="600" step="1" value="${autonomousDebounceSeconds}" /><small>secondes</small></span></label>` : ""}
               <label><span>Mode</span><select id="autonomousMode"><option value="build" ${autonomousMode === "build" ? "selected" : ""}>Construire et modifier</option><option value="plan" ${autonomousMode === "plan" ? "selected" : ""}>Analyser et planifier</option></select></label>
@@ -21547,7 +21638,11 @@ const orchestrationMemberIsCurrent = (
   task: OrchestrationTask | null,
 ): boolean => {
   if (run.status !== "active" || (!run.currentTurnId && !run.currentStartId)) return false;
-  if (role === "orchestrator") return run.currentTurnKind !== "worker";
+  if (role === "orchestrator") {
+    return run.currentTurnKind === "plan"
+      || run.currentTurnKind === "review"
+      || run.currentTurnKind === "final_review";
+  }
   return run.currentTurnKind === "worker" && run.currentTaskId === task?.id;
 };
 
@@ -21600,19 +21695,71 @@ const renderOrchestrationMember = (
   </article>`;
 };
 
+const renderOrchestrationTesterMember = (
+  run: OrchestrationSnapshot,
+  tester: OrchestrationTester,
+): string => {
+  const accountId = orchestrationOrchestratorAccountId(run);
+  const assigned = tester.assignedTaskIds
+    .map((taskId) => run.tasks.find((task) => task.id === taskId))
+    .filter((task): task is OrchestrationTask => !!task)
+    .map((task) => `W${task.position}`)
+    .join(", ") || "missions en préparation";
+  const isCurrent = run.status === "active"
+    && (!!run.currentTurnId || !!run.currentStartId)
+    && run.currentTesterId === tester.id;
+  const chatAction = tester.sessionId
+    ? `<button type="button" class="icon-button" data-orchestration-open-session="${escapeAttr(tester.sessionId)}" data-orchestration-account="${escapeAttr(accountId)}" title="Ouvrir le chat de l’orchestrateur testeur ${tester.position}"><i data-lucide="message-square"></i></button>`
+    : `<span class="orchestration-member-chat-pending" title="Le chat apparaîtra pendant la conception des tests"><i data-lucide="clock-3"></i></span>`;
+  return `<article class="orchestration-member orchestrator tester status-${escapeAttr(tester.status)} ${isCurrent ? "is-current" : ""}">
+    <span class="orchestration-member-avatar"><i data-lucide="flask-conical"></i></span>
+    <div class="orchestration-member-copy"><small>Orchestrateur testeur ${tester.position}</small><strong>Tests de ${escapeHtml(assigned)}</strong><span>${escapeHtml(orchestrationTesterStatusLabel(tester.status))}</span></div>
+    <div class="orchestration-member-state">${isCurrent ? '<b class="orchestration-live-pill"><i></i>En cours</b>' : tester.status === "passed" ? '<b class="orchestration-handoff-pill is-done">Validé</b>' : ""}</div>
+    <div class="orchestration-member-account"><span>Adresse e-mail / compte</span><strong>${escapeHtml(orchestrationAccountLabel(accountId))}</strong><small>Même compte que l’orchestrateur principal pendant le test</small></div>
+    <div class="orchestration-member-chat">${chatAction}</div>
+  </article>`;
+};
+
 const renderOrchestrationTeam = (run: OrchestrationSnapshot): string => {
   const workers = Array.from({ length: run.workerCount }, (_, offset) => {
     const workerIndex = offset + 1;
     const task = run.tasks.find((candidate) => candidate.position === workerIndex) ?? null;
     return renderOrchestrationMember(run, "worker", workerIndex, task);
   }).join("");
+  const testers = run.testers.map((tester) => renderOrchestrationTesterMember(run, tester)).join("");
   return `<section class="orchestration-team-console">
-    <header><span><small>Équipe et comptes</small><strong>Postes de reprise</strong></span><p>Chaque membre garde son historique et peut être repris indépendamment par un autre compte.</p></header>
+    <header><span><small>Équipe et comptes</small><strong>Postes de reprise et de test</strong></span><p>Un orchestrateur testeur contrôle chaque tranche de cinq workers et conserve son propre chat.</p></header>
     <div class="orchestration-team-list">
       ${renderOrchestrationMember(run, "orchestrator", null, null)}
+      ${testers}
       ${workers}
     </div>
   </section>`;
+};
+
+const renderOrchestrationTesters = (run: OrchestrationSnapshot): string => {
+  const passed = run.testers.filter((tester) => tester.status === "passed").length;
+  const expected = Math.max(1, run.testerCount || orchestrationTesterCount(run.workerCount));
+  const cards = run.testers.map((tester) => {
+    const assignments = tester.assignedTaskIds
+      .map((taskId) => run.tasks.find((task) => task.id === taskId))
+      .filter((task): task is OrchestrationTask => !!task)
+      .map((task) => `W${task.position}`)
+      .join(", ") || "En attente du plan";
+    const plan = tester.testPlan.map((test) => `<li><i data-lucide="list-checks"></i><span><strong>${escapeHtml(test.name)}</strong><code>${escapeHtml(test.command)}</code><small>${escapeHtml(test.expected)}</small></span></li>`).join("");
+    const results = tester.lastResults.map((test) => `<li class="${test.passed ? "passed" : "failed"}"><i data-lucide="${test.passed ? "check" : "circle-alert"}"></i><span><code>${escapeHtml(test.command)}</code><small>${escapeHtml(test.result)}</small></span></li>`).join("");
+    const chatAction = tester.sessionId
+      ? `<button type="button" class="tool-button" data-orchestration-open-session="${escapeAttr(tester.sessionId)}" data-orchestration-account="${escapeAttr(orchestrationOrchestratorAccountId(run))}"><i data-lucide="message-square"></i><span>Ouvrir le chat testeur</span></button>`
+      : "";
+    return `<article class="orchestration-tester status-${escapeAttr(tester.status)}">
+      <header><span><i data-lucide="flask-conical"></i><span><strong>Orchestrateur testeur ${tester.position}</strong><small>${escapeHtml(assignments)} · ${escapeHtml(orchestrationTesterStatusLabel(tester.status))}</small></span></span>${chatAction}</header>
+      ${tester.planSummary ? `<p>${escapeHtml(tester.planSummary)}</p>` : ""}
+      ${plan ? `<section><small>Tests obligatoires</small><ul>${plan}</ul></section>` : `<small>Le plan de tests sera conçu avant le démarrage des workers.</small>`}
+      ${results ? `<section><small>Dernier passage</small><ul>${results}</ul></section>` : ""}
+      ${tester.lastError ? `<p class="orchestration-error"><i data-lucide="circle-alert"></i><span>${escapeHtml(tester.lastError)}</span></p>` : ""}
+    </article>`;
+  }).join("");
+  return `<section class="orchestration-testers"><header><span><strong>Orchestrateurs testeurs</strong><small>Validation indépendante obligatoire après chaque correction</small></span><b>${passed}/${expected}</b></header><div>${cards || '<div class="orchestration-planning"><i data-lucide="flask-conical"></i><span><strong>Testeurs en préparation</strong><small>Minimum un testeur, puis un par tranche de cinq workers.</small></span></div>'}</div></section>`;
 };
 
 const orchestrationTeamMessageAuthor = (
@@ -21708,6 +21855,7 @@ const renderOrchestrationCard = (run: OrchestrationSnapshot): string => {
     ? `<span class="orchestration-delete-confirm"><small>Supprimer les sandboxes ?</small><button type="button" class="tool-button danger" data-orchestration-delete-confirm="${escapeAttr(run.id)}" ${busy ? "disabled" : ""}>Supprimer</button><button type="button" class="tool-button" data-orchestration-delete-cancel>Annuler</button></span>`
     : `<button type="button" class="icon-button danger" data-orchestration-delete="${escapeAttr(run.id)}" title="Supprimer ce chat orchestré" ${busy ? "disabled" : ""}><i data-lucide="trash-2"></i></button>`;
   const workerCount = Math.max(1, run.workerCount || run.tasks.length || 1);
+  const testerCount = Math.max(1, run.testerCount || orchestrationTesterCount(workerCount));
   const requestedProjectDir = orchestrationRequestedProjectDir(run);
   return `<article class="orchestration-card orchestration-command-center status-${escapeAttr(run.status)} ${running ? "is-running" : ""}">
     <header class="orchestration-card-head">
@@ -21718,10 +21866,11 @@ const renderOrchestrationCard = (run: OrchestrationSnapshot): string => {
     <div class="orchestration-progress" aria-label="${progress.accepted} tâches acceptées sur ${progress.total}"><span><i style="width:${progress.percent}%"></i></span><small><b>${progress.accepted}/${progress.total || "–"}</b> tâches intégrées · ${progress.percent}%</small></div>
     <div class="orchestration-quick-meta">
       <span title="${escapeAttr(requestedProjectDir)}"><i data-lucide="folder-open"></i>${escapeHtml(workspaceBaseName(requestedProjectDir))}</span>
-      <span><i data-lucide="users"></i>${workerCount + 1} agents</span>
+      <span><i data-lucide="users"></i>${workerCount + testerCount + 1} agents</span>
     </div>
     ${run.lastError ? `<p class="orchestration-error"><i data-lucide="circle-alert"></i><span>${escapeHtml(run.lastError)}</span></p>` : ""}
     ${renderOrchestrationTeamFeed(run)}
+    ${renderOrchestrationTesters(run)}
     <section class="orchestration-missions"><header><span><strong>Missions</strong><small>Ouvre une mission pour voir ses preuves et ses revues.</small></span><b>${progress.accepted}/${progress.total || "–"}</b></header><div class="orchestration-task-list">${run.tasks.map((task) => renderOrchestrationTask(run, task)).join("") || `<div class="orchestration-planning"><i data-lucide="list-checks"></i><span><strong>L’orchestrateur prépare les missions</strong><small>Elles apparaîtront ici automatiquement.</small></span></div>`}</div></section>
     ${run.finalSummary ? `<section class="orchestration-final"><i data-lucide="shield-check"></i><div><small>Rendu final</small><p>${escapeHtml(run.finalSummary)}</p></div></section>` : ""}
     <details class="orchestration-run-details" ${deletePending ? "open" : ""}>
@@ -21733,7 +21882,7 @@ const renderOrchestrationCard = (run: OrchestrationSnapshot): string => {
           <div><dt>Orchestrateur</dt><dd>${escapeHtml(orchestrationAccountLabel(orchestrationOrchestratorAccountId(run)))}</dd></div>
           <div><dt>Projet</dt><dd title="${escapeAttr(requestedProjectDir)}">${escapeHtml(workspaceBaseName(requestedProjectDir))}</dd></div>
           <div><dt>Validation</dt><dd><code>${escapeHtml(run.testCommand)}</code></dd></div>
-          <div><dt>Isolation</dt><dd>${workerCount + 1} environnements</dd></div>
+          <div><dt>Isolation</dt><dd>${workerCount + testerCount + 1} chats isolés</dd></div>
         </dl>
         <details class="orchestration-journal"><summary><span><i data-lucide="history"></i>Journal de contrôle</span><i data-lucide="chevron-down"></i></summary><ul>${events || "<li>Aucun événement</li>"}</ul></details>
         <footer class="orchestration-run-details-footer"><small><i data-lucide="folder-open"></i><span title="${escapeAttr(run.sandboxRoot)}">Sandboxes privés conservés jusqu’à suppression</span></small>${deleteAction}</footer>
@@ -21750,6 +21899,13 @@ const renderOrchestrationPanel = (): string => {
     <span><b>W${index + 1}</b><span><strong>Worker ${index + 1}</strong><small>${escapeHtml(orchestrationAccountLabel(accountId))}</small></span></span>
     <span class="orchestration-create-worker-shared"><i data-lucide="link"></i>Même compte</span>
   </div>`).join("");
+  const testerDrafts = Array.from(
+    { length: orchestrationTesterCount(orchestrationWorkerCount) },
+    (_, index) => `<div class="orchestration-create-worker orchestration-create-tester">
+      <span><b>T${index + 1}</b><span><strong>Orchestrateur testeur ${index + 1}</strong><small>Contrôle W${index * ORCHESTRATION_WORKERS_PER_TESTER + 1} à W${Math.min(orchestrationWorkerCount, (index + 1) * ORCHESTRATION_WORKERS_PER_TESTER)}</small></span></span>
+      <span class="orchestration-create-worker-shared"><i data-lucide="flask-conical"></i>Même compte</span>
+    </div>`,
+  ).join("");
   const createOpen = orchestrationCreateOpen
     || (!orchestrationCreatePreferenceSet && orchestrationsLoaded && orchestrations.length === 0);
   const selectedRun = orchestrations.find((run) => run.id === orchestrationSelectedRunId)
@@ -21782,17 +21938,17 @@ const renderOrchestrationPanel = (): string => {
             <div class="orchestration-form-grid">
               <label><span>Nom <small>optionnel</small></span><input id="orchestrationName" maxlength="120" value="${escapeAttr(orchestrationNameDraft)}" placeholder="Ex. Nouveau système de permissions" /></label>
               <label><span>Compte orchestrateur</span><select id="orchestrationAccount" required ${accountOptions ? "" : "disabled"}>${accountOptions || '<option value="">Aucun compte</option>'}</select></label>
-              <label><span>Workers <small>hors orchestrateur</small></span><span class="orchestration-worker-count"><input id="orchestrationWorkerCount" type="number" min="1" max="${MAX_ORCHESTRATION_WORKER_COUNT}" step="1" required value="${orchestrationWorkerCount}" /><small id="orchestrationTeamTotal">${orchestrationWorkerCount + 1} agents au total</small></span></label>
+              <label><span>Workers <small>hors orchestrateurs</small></span><span class="orchestration-worker-count"><input id="orchestrationWorkerCount" type="number" min="1" max="${MAX_ORCHESTRATION_WORKER_COUNT}" step="1" required value="${orchestrationWorkerCount}" /><small id="orchestrationTeamTotal">${orchestrationWorkerCount + orchestrationTesterCount(orchestrationWorkerCount) + 1} agents · ${orchestrationTesterCountLabel(orchestrationWorkerCount)}</small></span></label>
               <label><span>Délai de validation</span><span class="orchestration-timeout"><input id="orchestrationTestTimeout" type="number" min="5" max="1800" value="${orchestrationTestTimeoutSeconds}" /><small>secondes</small></span></label>
             </div>
             <section class="orchestration-create-team">
-              <header><span><strong>Comptes des workers</strong><small>Phase de test : tous les sous-agents partagent le compte de l’orchestrateur.</small></span></header>
-              <div>${workerDrafts}</div>
+              <header><span><strong>Comptes des sous-agents</strong><small>Phase de test : workers et orchestrateurs testeurs partagent le compte du chat d’origine.</small></span></header>
+              <div>${testerDrafts}${workerDrafts}</div>
             </section>
             <aside><i data-lucide="shield-check"></i><span><strong>Le projet source reste protégé</strong><small>Le rendu est appliqué seulement si le dépôt n’a pas changé pendant le travail.</small></span></aside>
           </div>
         </details>
-        <footer><small>${orchestrationWorkerCount + 1} agents · validation contrôlée</small><button type="submit" class="tool-button primary" ${accountOptions && orchestrationBusyId !== "create" ? "" : "disabled"}><i data-lucide="play"></i><span>${orchestrationBusyId === "create" ? "Création…" : "Lancer l’orchestration"}</span></button></footer>
+        <footer><small>${orchestrationWorkerCount + orchestrationTesterCount(orchestrationWorkerCount) + 1} agents · validation par orchestrateur testeur</small><button type="submit" class="tool-button primary" ${accountOptions && orchestrationBusyId !== "create" ? "" : "disabled"}><i data-lucide="play"></i><span>${orchestrationBusyId === "create" ? "Création…" : "Lancer l’orchestration"}</span></button></footer>
       </form>
     </details>
     <section class="orchestration-runs orchestration-workbench">
@@ -21865,7 +22021,7 @@ const bindOrchestrationPanelUi = () => {
     workerCountInput.setCustomValidity("");
     const total = document.querySelector<HTMLElement>("#orchestrationTeamTotal");
     if (total && Number.isInteger(value) && value >= 1 && value <= MAX_ORCHESTRATION_WORKER_COUNT) {
-      total.textContent = `${value + 1} agents au total`;
+      total.textContent = `${value + orchestrationTesterCount(value) + 1} agents · ${orchestrationTesterCountLabel(value)}`;
     }
   });
   workerCountInput?.addEventListener("change", () => {
@@ -26368,7 +26524,7 @@ const renderAutonomousOrchestrationPromotionModal = (): string => {
               <div class="orchestration-convert-grid">
                 <label><span>Dépôt Git</span><input id="autonomousOrchestrationProject" required value="${escapeAttr(state.projectDir)}" spellcheck="false" ${state.busy ? "disabled" : ""} /></label>
                 <label><span>Commande de validation</span><input id="autonomousOrchestrationTestCommand" required maxlength="8000" value="${escapeAttr(state.testCommand)}" placeholder="npm test && npm run build" spellcheck="false" ${state.busy ? "disabled" : ""} /></label>
-                <label><span>Workers <small>hors orchestrateur</small></span><span class="orchestration-worker-count"><input id="autonomousOrchestrationWorkerCount" type="number" min="1" max="${MAX_ORCHESTRATION_WORKER_COUNT}" step="1" required value="${state.workerCount}" ${state.busy ? "disabled" : ""} /><small id="autonomousOrchestrationTeamTotal">${state.workerCount + 1} agents au total</small></span></label>
+                <label><span>Workers <small>hors orchestrateurs</small></span><span class="orchestration-worker-count"><input id="autonomousOrchestrationWorkerCount" type="number" min="1" max="${MAX_ORCHESTRATION_WORKER_COUNT}" step="1" required value="${state.workerCount}" ${state.busy ? "disabled" : ""} /><small id="autonomousOrchestrationTeamTotal">${state.workerCount + orchestrationTesterCount(state.workerCount) + 1} agents · ${orchestrationTesterCountLabel(state.workerCount)}</small></span></label>
                 <label><span>Timeout des tests</span><span class="orchestration-timeout"><input id="autonomousOrchestrationTimeout" type="number" min="5" max="1800" required value="${state.testTimeoutSeconds}" ${state.busy ? "disabled" : ""} /><small>secondes</small></span></label>
               </div>
               <section class="orchestration-create-team autonomous-orchestration-team">
@@ -26451,7 +26607,7 @@ const bindAutonomousOrchestrationPromotionUi = (): void => {
     workerCountInput.setCustomValidity("");
     const total = document.querySelector<HTMLElement>("#autonomousOrchestrationTeamTotal");
     if (total && Number.isInteger(value) && value >= 1 && value <= MAX_ORCHESTRATION_WORKER_COUNT) {
-      total.textContent = `${value + 1} agents au total`;
+      total.textContent = `${value + orchestrationTesterCount(value) + 1} agents · ${orchestrationTesterCountLabel(value)}`;
     }
   });
   timeoutInput?.addEventListener("input", () => {
@@ -27151,7 +27307,7 @@ const renderOrchestrationConversionModal = () => {
               <div class="orchestration-convert-grid">
                 <label><span>Dépôt Git</span><input id="orchestrationConvertProject" required value="${escapeAttr(state.projectDir)}" spellcheck="false" ${state.busy ? "disabled" : ""} /></label>
                 <label><span>Commande de validation</span><input id="orchestrationConvertTestCommand" required maxlength="8000" value="${escapeAttr(state.testCommand)}" placeholder="npm test && npm run build" spellcheck="false" ${state.busy ? "disabled" : ""} /></label>
-                <label><span>Workers <small>hors orchestrateur</small></span><span class="orchestration-worker-count"><input id="orchestrationConvertWorkerCount" type="number" min="1" max="${MAX_ORCHESTRATION_WORKER_COUNT}" step="1" required value="${state.workerCount}" ${state.busy ? "disabled" : ""} /><small id="orchestrationConvertTeamTotal">${state.workerCount + 1} agents au total</small></span></label>
+                <label><span>Workers <small>hors orchestrateurs</small></span><span class="orchestration-worker-count"><input id="orchestrationConvertWorkerCount" type="number" min="1" max="${MAX_ORCHESTRATION_WORKER_COUNT}" step="1" required value="${state.workerCount}" ${state.busy ? "disabled" : ""} /><small id="orchestrationConvertTeamTotal">${state.workerCount + orchestrationTesterCount(state.workerCount) + 1} agents · ${orchestrationTesterCountLabel(state.workerCount)}</small></span></label>
                 <label><span>Timeout des tests</span><span class="orchestration-timeout"><input id="orchestrationConvertTimeout" type="number" min="5" max="1800" required value="${state.testTimeoutSeconds}" ${state.busy ? "disabled" : ""} /><small>secondes</small></span></label>
               </div>
               <aside class="orchestration-convert-note"><i data-lucide="users"></i><span><strong>${sourceTurnBusy ? "L’équipe peut être lancée sans interrompre la réponse" : "Les fenêtres workers s’ouvriront ici"}</strong><small>${sourceTurnBusy ? "La planification démarrera automatiquement dès que la session actuelle sera libre. Le verrou de session évite deux commandes concurrentes." : "Le chat actuel sera piloté par le moteur d’orchestration pendant le plan, les revues et la validation. Son compositeur sera verrouillé pour éviter deux commandes concurrentes."}</small></span></aside>
@@ -27203,7 +27359,7 @@ const bindOrchestrationConversionUi = (): void => {
     workerCountInput.setCustomValidity("");
     const total = document.querySelector<HTMLElement>("#orchestrationConvertTeamTotal");
     if (total && Number.isInteger(value) && value >= 1 && value <= MAX_ORCHESTRATION_WORKER_COUNT) {
-      total.textContent = `${value + 1} agents au total`;
+      total.textContent = `${value + orchestrationTesterCount(value) + 1} agents · ${orchestrationTesterCountLabel(value)}`;
     }
   });
   timeoutInput?.addEventListener("input", () => {
@@ -27307,6 +27463,7 @@ const bindOrchestrationConversionUi = (): void => {
       pane.orchestrationId = created.id;
       pane.orchestrationRole = "orchestrator";
       pane.orchestrationTaskId = null;
+      pane.orchestrationTesterId = null;
       pane.pendingWorkspace = orchestrationRequestedProjectDir(created);
       pane.draft = "";
       pane.queuedSubmissions = [];

@@ -3,8 +3,10 @@
 //! Chaque execution dispose d'un worktree Git pour l'orchestrateur et d'un
 //! worktree par tache. Un travailleur ne peut etre accepte qu'apres avoir
 //! soumis une preuve structuree, puis apres revue et validation reelle dans le
-//! worktree de l'orchestrateur. Le diff final n'est applique au projet source
-//! que si son HEAD et son etat de travail n'ont pas change depuis le depart.
+//! worktree de l'orchestrateur. Des orchestrateurs testeurs dedies (minimum un,
+//! puis un par tranche de cinq workers) concoivent et executent un plan de tests
+//! obligatoire. Le diff final n'est applique au projet source que si tout le
+//! quorum a valide et si son HEAD et son etat n'ont pas change depuis le depart.
 
 use crate::{
     autonomous::AutonomousAgentManager,
@@ -44,6 +46,9 @@ const MIN_WORKER_COUNT: u32 = 1;
 /// l'infrastructure seront prets ; la limite de securite absolue reste 1000.
 const DEFAULT_WORKER_LIMIT: u32 = 5;
 const MAX_WORKER_COUNT: u32 = 1_000;
+/// Un orchestrateur testeur controle au plus cinq missions. Le minimum reste
+/// toujours un testeur, y compris pour une orchestration a un seul worker.
+const WORKERS_PER_TESTER: u32 = 5;
 const WORKER_COUNT_ENV: &str = "CST_ORCHESTRATION_WORKERS";
 const WORKER_LIMIT_ENV: &str = "CST_ORCHESTRATION_MAX_WORKERS";
 const DEFAULT_MAX_CONCURRENCY: u32 = 8;
@@ -108,9 +113,11 @@ impl Default for OrchestrationSourceKind {
 #[serde(rename_all = "snake_case")]
 pub enum OrchestrationPhase {
     Planning,
+    DesigningTests,
     Working,
     Reviewing,
     Validating,
+    Testing,
     FinalReview,
     FinalValidation,
     Publishing,
@@ -133,9 +140,22 @@ pub enum OrchestrationTaskStatus {
 #[serde(rename_all = "snake_case")]
 pub enum OrchestrationTurnKind {
     Plan,
+    TesterPlan,
     Worker,
     Review,
+    TesterValidation,
     FinalReview,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OrchestrationTesterStatus {
+    Pending,
+    Designing,
+    Ready,
+    Testing,
+    Passed,
+    RevisionRequired,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -206,6 +226,38 @@ pub struct OrchestrationReview {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct OrchestrationTestDefinition {
+    pub name: String,
+    pub command: String,
+    pub expected: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct OrchestrationTester {
+    pub id: String,
+    pub position: u32,
+    pub status: OrchestrationTesterStatus,
+    #[serde(default)]
+    pub assigned_task_ids: Vec<String>,
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub plan_summary: Option<String>,
+    #[serde(default)]
+    pub test_plan: Vec<OrchestrationTestDefinition>,
+    #[serde(default)]
+    pub last_results: Vec<OrchestrationProofTest>,
+    #[serde(default)]
+    pub attempt_count: u32,
+    #[serde(default)]
+    pub protocol_failures: u32,
+    #[serde(default)]
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct OrchestrationTask {
     pub id: String,
     pub position: u32,
@@ -248,6 +300,8 @@ pub struct OrchestrationSnapshot {
     pub objective: String,
     #[serde(default)]
     pub worker_count: u32,
+    #[serde(default)]
+    pub tester_count: u32,
     #[serde(default = "default_adaptive_fanout")]
     pub adaptive_fanout: bool,
     #[serde(default = "default_max_task_count")]
@@ -304,6 +358,8 @@ pub struct OrchestrationSnapshot {
     #[serde(default)]
     pub current_task_id: Option<String>,
     #[serde(default)]
+    pub current_tester_id: Option<String>,
+    #[serde(default)]
     pub current_start_id: Option<String>,
     #[serde(default)]
     pub current_validation_id: Option<String>,
@@ -315,6 +371,8 @@ pub struct OrchestrationSnapshot {
     pub plan_summary: Option<String>,
     #[serde(default)]
     pub tasks: Vec<OrchestrationTask>,
+    #[serde(default)]
+    pub testers: Vec<OrchestrationTester>,
     #[serde(default)]
     pub final_summary: Option<String>,
     #[serde(default)]
@@ -509,6 +567,29 @@ struct PlanTask {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct TesterPlanEnvelope {
+    summary: String,
+    tests: Vec<OrchestrationTestDefinition>,
+    #[serde(default)]
+    messages: Vec<TeamMessageEnvelope>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TesterResultEnvelope {
+    decision: OrchestrationTesterDecision,
+    summary: String,
+    #[serde(default)]
+    task_ids: Vec<String>,
+    #[serde(default)]
+    feedback: String,
+    tests: Vec<OrchestrationProofTest>,
+    #[serde(default)]
+    messages: Vec<TeamMessageEnvelope>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ProofEnvelope {
     summary: String,
     #[serde(default)]
@@ -560,6 +641,13 @@ struct TeamMessageEnvelope {
 #[serde(rename_all = "snake_case")]
 enum FinalDecision {
     Complete,
+    Revise,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum OrchestrationTesterDecision {
+    Pass,
     Revise,
 }
 
@@ -736,6 +824,7 @@ impl OrchestrationManager {
             name,
             objective,
             worker_count,
+            tester_count: required_tester_count(worker_count),
             adaptive_fanout,
             max_task_count,
             minimum_task_count,
@@ -770,12 +859,14 @@ impl OrchestrationManager {
             current_turn_id: None,
             current_turn_kind: None,
             current_task_id: None,
+            current_tester_id: None,
             current_start_id: None,
             current_validation_id: None,
             current_validation_kind: None,
             next_action_at: if start_paused { None } else { Some(now) },
             plan_summary: None,
             tasks: Vec::new(),
+            testers: Vec::new(),
             final_summary: None,
             last_error: None,
             consecutive_start_failures: 0,
@@ -794,13 +885,19 @@ impl OrchestrationManager {
             },
             if orchestrator_session_id.is_some() {
                 format!(
-                    "Chat existant promu orchestrateur ; {worker_count} worker{} seront ouverts",
-                    if worker_count > 1 { "s" } else { "" }
+                    "Chat existant promu orchestrateur ; {worker_count} worker{} et {} orchestrateur{} testeur{} seront ouverts",
+                    if worker_count > 1 { "s" } else { "" },
+                    required_tester_count(worker_count),
+                    if required_tester_count(worker_count) > 1 { "s" } else { "" },
+                    if required_tester_count(worker_count) > 1 { "s" } else { "" }
                 )
             } else {
                 format!(
-                    "Equipe creee : 1 orchestrateur et {worker_count} worker{}",
-                    if worker_count > 1 { "s" } else { "" }
+                    "Equipe creee : 1 orchestrateur principal, {worker_count} worker{} et {} orchestrateur{} testeur{}",
+                    if worker_count > 1 { "s" } else { "" },
+                    required_tester_count(worker_count),
+                    if required_tester_count(worker_count) > 1 { "s" } else { "" },
+                    if required_tester_count(worker_count) > 1 { "s" } else { "" }
                 )
             },
         );
@@ -1050,10 +1147,24 @@ impl OrchestrationManager {
             return Ok(run);
         }
 
+        if request.role == OrchestrationAccountRole::Orchestrator
+            && matches!(
+                run.current_turn_kind,
+                Some(OrchestrationTurnKind::TesterPlan | OrchestrationTurnKind::TesterValidation)
+            )
+        {
+            return Err(
+                "Un orchestrateur testeur utilise encore ce compte. Attends la fin de son tour."
+                    .to_string(),
+            );
+        }
         let targets_current_turn = match (request.role, run.current_turn_kind) {
-            (OrchestrationAccountRole::Orchestrator, Some(kind)) => {
-                kind != OrchestrationTurnKind::Worker
-            }
+            (OrchestrationAccountRole::Orchestrator, Some(kind)) => matches!(
+                kind,
+                OrchestrationTurnKind::Plan
+                    | OrchestrationTurnKind::Review
+                    | OrchestrationTurnKind::FinalReview
+            ),
             (OrchestrationAccountRole::Worker, Some(OrchestrationTurnKind::Worker)) => task
                 .as_ref()
                 .is_some_and(|task| run.current_task_id.as_deref() == Some(task.id.as_str())),
@@ -1156,6 +1267,9 @@ impl OrchestrationManager {
                     current.orchestrator_handoff_pending = prepared.handoff_pending;
                     current.orchestrator_handoff_count =
                         current.orchestrator_handoff_count.saturating_add(1);
+                    for tester in &mut current.testers {
+                        tester.session_id = None;
+                    }
                 }
                 OrchestrationAccountRole::Worker => {
                     let index = worker_index.unwrap_or(1);
@@ -1453,8 +1567,10 @@ fn drive_run(inner: &Arc<OrchestrationInner>, run_id: &str) {
     };
     match run.phase {
         OrchestrationPhase::Planning => start_plan_turn(inner, &run),
+        OrchestrationPhase::DesigningTests => start_tester_plan_turn(inner, &run),
         OrchestrationPhase::Working => start_worker_turn(inner, &run),
         OrchestrationPhase::Reviewing => start_review_turn(inner, &run),
+        OrchestrationPhase::Testing => start_tester_validation_turn(inner, &run),
         OrchestrationPhase::FinalReview => start_final_review_turn(inner, &run),
         OrchestrationPhase::Publishing => publish_run(inner, &run),
         OrchestrationPhase::Validating
@@ -1639,12 +1755,19 @@ fn prompt_with_pending_handoff(
             OrchestrationAccountRole::Worker,
             Some(task.position),
         )
-    } else {
+    } else if matches!(
+        kind,
+        OrchestrationTurnKind::Plan
+            | OrchestrationTurnKind::Review
+            | OrchestrationTurnKind::FinalReview
+    ) {
         (
             run.orchestrator_handoff_pending,
             OrchestrationAccountRole::Orchestrator,
             None,
         )
+    } else {
+        return Ok((prompt, None));
     };
     if !pending {
         return Ok((prompt, None));
@@ -1676,6 +1799,7 @@ fn start_plan_turn(inner: &Arc<OrchestrationInner>, run: &OrchestrationSnapshot)
         run,
         OrchestrationTurnKind::Plan,
         None,
+        None,
         resolved_orchestrator_account(run).to_string(),
         run.orchestrator_session_id.clone(),
         run.orchestrator_dir.clone(),
@@ -1684,20 +1808,118 @@ fn start_plan_turn(inner: &Arc<OrchestrationInner>, run: &OrchestrationSnapshot)
     );
 }
 
+fn start_tester_plan_turn(inner: &Arc<OrchestrationInner>, run: &OrchestrationSnapshot) {
+    let Some(tester) = run
+        .testers
+        .iter()
+        .find(|tester| tester.status == OrchestrationTesterStatus::Pending)
+        .cloned()
+    else {
+        let now = metrics::now_ts();
+        let _ = inner.mutate_store(|store| {
+            let current = find_run_mut(store, &run.id)?;
+            current.phase = OrchestrationPhase::Working;
+            current.current_tester_id = None;
+            current.next_action_at = Some(now);
+            current.updated_at = now;
+            push_event(
+                current,
+                now,
+                "test_plans_ready",
+                format!(
+                    "{} orchestrateur{} testeur{} ont defini les tests obligatoires",
+                    current.testers.len(),
+                    if current.testers.len() > 1 { "s" } else { "" },
+                    if current.testers.len() > 1 { "s" } else { "" }
+                ),
+            );
+            Ok(())
+        });
+        return;
+    };
+    start_chat_turn(
+        inner,
+        run,
+        OrchestrationTurnKind::TesterPlan,
+        None,
+        Some(tester.id.clone()),
+        resolved_orchestrator_account(run).to_string(),
+        tester.session_id.clone(),
+        run.orchestrator_dir.clone(),
+        ChatTurnMode::Plan,
+        tester_plan_prompt(run, &tester),
+    );
+}
+
+fn start_tester_validation_turn(inner: &Arc<OrchestrationInner>, run: &OrchestrationSnapshot) {
+    let Some(tester) = run
+        .testers
+        .iter()
+        .find(|tester| tester.status != OrchestrationTesterStatus::Passed)
+        .cloned()
+    else {
+        let now = metrics::now_ts();
+        let _ = inner.mutate_store(|store| {
+            let current = find_run_mut(store, &run.id)?;
+            if !testers_all_passed(current) {
+                return Err("Tous les orchestrateurs testeurs doivent valider le rendu".to_string());
+            }
+            current.phase = OrchestrationPhase::FinalReview;
+            current.current_tester_id = None;
+            current.next_action_at = Some(now);
+            current.updated_at = now;
+            push_event(
+                current,
+                now,
+                "tester_quorum_passed",
+                "Tous les orchestrateurs testeurs ont valide leurs missions".to_string(),
+            );
+            Ok(())
+        });
+        return;
+    };
+    if tester.test_plan.is_empty() {
+        let now = metrics::now_ts();
+        let _ = inner.mutate_store(|store| {
+            let current = find_run_mut(store, &run.id)?;
+            find_tester_mut(current, &tester.id)?.status = OrchestrationTesterStatus::Pending;
+            current.phase = OrchestrationPhase::DesigningTests;
+            current.next_action_at = Some(now);
+            current.updated_at = now;
+            Ok(())
+        });
+        return;
+    }
+    start_chat_turn(
+        inner,
+        run,
+        OrchestrationTurnKind::TesterValidation,
+        None,
+        Some(tester.id.clone()),
+        resolved_orchestrator_account(run).to_string(),
+        tester.session_id.clone(),
+        run.orchestrator_dir.clone(),
+        ChatTurnMode::Build,
+        tester_validation_prompt(run, &tester),
+    );
+}
+
 fn start_worker_turn(inner: &Arc<OrchestrationInner>, run: &OrchestrationSnapshot) {
     let Some(task) = next_open_task(run).cloned() else {
         let now = metrics::now_ts();
         let _ = inner.mutate_store(|store| {
             let current = find_run_mut(store, &run.id)?;
-            current.phase = OrchestrationPhase::FinalReview;
+            current.phase = OrchestrationPhase::Testing;
             current.current_task_id = None;
+            current.current_tester_id = None;
             current.next_action_at = Some(now);
             current.updated_at = now;
             push_event(
                 current,
                 now,
                 "all_tasks_accepted",
-                "Toutes les taches sont acceptees ; audit final demarre".to_string(),
+                "Toutes les taches sont acceptees ; validation par les orchestrateurs testeurs"
+                    .to_string(),
             );
             Ok(())
         });
@@ -1718,6 +1940,7 @@ fn start_worker_turn(inner: &Arc<OrchestrationInner>, run: &OrchestrationSnapsho
         run,
         OrchestrationTurnKind::Worker,
         Some(task.id.clone()),
+        None,
         account_id,
         task.session_id.clone(),
         workspace,
@@ -1771,6 +1994,7 @@ fn start_review_turn(inner: &Arc<OrchestrationInner>, run: &OrchestrationSnapsho
         &refreshed,
         OrchestrationTurnKind::Review,
         Some(task.id),
+        None,
         resolved_orchestrator_account(&refreshed).to_string(),
         refreshed.orchestrator_session_id.clone(),
         refreshed.orchestrator_dir.clone(),
@@ -1780,6 +2004,17 @@ fn start_review_turn(inner: &Arc<OrchestrationInner>, run: &OrchestrationSnapsho
 }
 
 fn start_final_review_turn(inner: &Arc<OrchestrationInner>, run: &OrchestrationSnapshot) {
+    if !testers_all_passed(run) {
+        let now = metrics::now_ts();
+        let _ = inner.mutate_store(|store| {
+            let current = find_run_mut(store, &run.id)?;
+            current.phase = OrchestrationPhase::Testing;
+            current.next_action_at = Some(now);
+            current.updated_at = now;
+            Ok(())
+        });
+        return;
+    }
     if let Err(error) =
         reset_owned_worktree(Path::new(&run.orchestrator_dir), &run.integrated_commit)
     {
@@ -1790,6 +2025,7 @@ fn start_final_review_turn(inner: &Arc<OrchestrationInner>, run: &OrchestrationS
         inner,
         run,
         OrchestrationTurnKind::FinalReview,
+        None,
         None,
         resolved_orchestrator_account(run).to_string(),
         run.orchestrator_session_id.clone(),
@@ -1805,6 +2041,7 @@ fn start_chat_turn(
     run: &OrchestrationSnapshot,
     kind: OrchestrationTurnKind,
     task_id: Option<String>,
+    tester_id: Option<String>,
     account_id: String,
     session_id: Option<String>,
     project_dir: String,
@@ -1852,6 +2089,7 @@ fn start_chat_turn(
         current.current_start_id = Some(start_id.clone());
         current.current_turn_kind = Some(kind);
         current.current_task_id = task_id.clone();
+        current.current_tester_id = tester_id.clone();
         current.next_action_at = None;
         current.updated_at = now;
         if kind == OrchestrationTurnKind::Worker {
@@ -1859,6 +2097,19 @@ fn start_chat_turn(
                 let task = find_task_mut(current, task_id)?;
                 task.status = OrchestrationTaskStatus::Working;
                 task.attempt_count = task.attempt_count.saturating_add(1);
+            }
+        } else if matches!(
+            kind,
+            OrchestrationTurnKind::TesterPlan | OrchestrationTurnKind::TesterValidation
+        ) {
+            if let Some(tester_id) = tester_id.as_deref() {
+                let tester = find_tester_mut(current, tester_id)?;
+                tester.status = if kind == OrchestrationTurnKind::TesterPlan {
+                    OrchestrationTesterStatus::Designing
+                } else {
+                    OrchestrationTesterStatus::Testing
+                };
+                tester.attempt_count = tester.attempt_count.saturating_add(1);
             }
         }
         Ok(true)
@@ -1888,7 +2139,10 @@ fn start_chat_turn(
         proof_tool: kind == OrchestrationTurnKind::Worker,
         source_chat_key: Some(match task_id.as_deref() {
             Some(task_id) => format!("orchestration:{}:{task_id}", run.id),
-            None => format!("orchestration:{}:orchestrator", run.id),
+            None => tester_id
+                .as_deref()
+                .map(|tester_id| format!("orchestration:{}:{tester_id}", run.id))
+                .unwrap_or_else(|| format!("orchestration:{}:orchestrator", run.id)),
         }),
     };
     match inner.chat.start_orchestration(request) {
@@ -1921,7 +2175,13 @@ fn start_chat_turn(
                 current.current_turn_id = Some(snapshot.id);
                 current.consecutive_start_failures = 0;
                 if let Some(found_session) = snapshot.session_id.clone() {
-                    assign_session(current, kind, task_id.as_deref(), found_session)?;
+                    assign_session(
+                        current,
+                        kind,
+                        task_id.as_deref(),
+                        tester_id.as_deref(),
+                        found_session,
+                    )?;
                 }
                 if handoff_file_to_clear.is_some() && snapshot.session_id.is_some() {
                     if kind == OrchestrationTurnKind::Worker {
@@ -1979,10 +2239,12 @@ fn poll_turn(
                 return Ok(());
             }
             let task_id = run.current_task_id.clone();
+            let tester_id = run.current_tester_id.clone();
             assign_session(
                 run,
                 kind,
                 task_id.as_deref(),
+                tester_id.as_deref(),
                 snapshot.session_id.clone().unwrap_or_default(),
             )?;
             let worker_index = if kind == OrchestrationTurnKind::Worker {
@@ -1996,7 +2258,13 @@ fn poll_turn(
                 } else {
                     None
                 }
-            } else if run.orchestrator_handoff_pending {
+            } else if matches!(
+                kind,
+                OrchestrationTurnKind::Plan
+                    | OrchestrationTurnKind::Review
+                    | OrchestrationTurnKind::FinalReview
+            ) && run.orchestrator_handoff_pending
+            {
                 run.orchestrator_handoff_pending = false;
                 Some(0)
             } else {
@@ -2053,8 +2321,12 @@ fn complete_turn(
     };
     match kind {
         OrchestrationTurnKind::Plan => complete_plan(inner, &current, snapshot),
+        OrchestrationTurnKind::TesterPlan => complete_tester_plan(inner, &current, snapshot),
         OrchestrationTurnKind::Worker => complete_worker(inner, &current, snapshot),
         OrchestrationTurnKind::Review => complete_review(inner, &current, snapshot),
+        OrchestrationTurnKind::TesterValidation => {
+            complete_tester_validation(inner, &current, snapshot)
+        }
         OrchestrationTurnKind::FinalReview => complete_final_review(inner, &current, snapshot),
     }
 }
@@ -2077,7 +2349,7 @@ fn complete_plan(
     let now = metrics::now_ts();
     let result = inner.mutate_store(|store| {
         let current = find_run_mut(store, &run.id)?;
-        clear_current_turn(current, snapshot);
+        clear_current_turn(current, OrchestrationTurnKind::Plan, snapshot)?;
         current.plan_summary = Some(plan.summary.clone());
         current.protocol_failures = 0;
         current.worker_count = plan.tasks.len() as u32;
@@ -2113,7 +2385,10 @@ fn complete_plan(
                 last_error: None,
             })
             .collect();
-        current.phase = OrchestrationPhase::Working;
+        current.tester_count = required_tester_count(current.worker_count);
+        current.testers = build_testers(&current.tasks);
+        current.phase = OrchestrationPhase::DesigningTests;
+        current.current_tester_id = None;
         current.next_action_at = Some(now);
         current.last_error = None;
         current.updated_at = now;
@@ -2125,6 +2400,79 @@ fn complete_plan(
                 "Plan accepte : {} chats travailleurs crees",
                 current.tasks.len()
             ),
+        );
+        Ok(())
+    });
+    if let Err(error) = result {
+        mark_needs_attention(inner, &run.id, error);
+    }
+}
+
+fn complete_tester_plan(
+    inner: &Arc<OrchestrationInner>,
+    run: &OrchestrationSnapshot,
+    snapshot: &ChatTurnSnapshot,
+) {
+    let Some(tester_id) = run.current_tester_id.as_deref() else {
+        mark_needs_attention(
+            inner,
+            &run.id,
+            "Orchestrateur testeur absent pendant la conception des tests".to_string(),
+        );
+        return;
+    };
+    let text = snapshot_text(snapshot);
+    let mut envelope =
+        match parse_marked_json::<TesterPlanEnvelope>(&text, "ORCHESTRATION_TEST_PLAN:")
+            .and_then(validate_tester_plan)
+        {
+            Ok(plan) => plan,
+            Err(error) => {
+                protocol_failure(
+                    inner,
+                    &run.id,
+                    None,
+                    format!("Plan de tests invalide : {error}"),
+                );
+                return;
+            }
+        };
+    if let Err(error) = validate_team_messages(&mut envelope.messages, run) {
+        protocol_failure(
+            inner,
+            &run.id,
+            None,
+            format!("Messages du testeur invalides : {error}"),
+        );
+        return;
+    }
+    let now = metrics::now_ts();
+    let result = inner.mutate_store(|store| {
+        let current = find_run_mut(store, &run.id)?;
+        clear_current_turn(current, OrchestrationTurnKind::TesterPlan, snapshot)?;
+        let tester = find_tester_mut(current, tester_id)?;
+        tester.status = OrchestrationTesterStatus::Ready;
+        tester.plan_summary = Some(envelope.summary);
+        tester.test_plan = envelope.tests;
+        tester.protocol_failures = 0;
+        tester.last_error = None;
+        append_team_messages(
+            current,
+            OrchestrationAccountRole::Orchestrator,
+            None,
+            envelope.messages,
+            now,
+        );
+        current.phase = OrchestrationPhase::DesigningTests;
+        current.current_tester_id = None;
+        current.next_action_at = Some(now);
+        current.last_error = None;
+        current.updated_at = now;
+        push_event(
+            current,
+            now,
+            "tester_plan_ready",
+            format!("Orchestrateur testeur {} : plan de tests pret", tester_id),
         );
         Ok(())
     });
@@ -2191,7 +2539,7 @@ fn complete_worker(
     let now = metrics::now_ts();
     let result = inner.mutate_store(|store| {
         let current = find_run_mut(store, &run.id)?;
-        clear_current_turn(current, snapshot);
+        clear_current_turn(current, OrchestrationTurnKind::Worker, snapshot)?;
         let task_title = {
             let current_task = find_task_mut(current, task_id)?;
             current_task.status = OrchestrationTaskStatus::Submitted;
@@ -2282,7 +2630,7 @@ fn complete_review(
     let feedback = envelope.feedback.clone();
     let result = inner.mutate_store(|store| {
         let current = find_run_mut(store, &run.id)?;
-        clear_current_turn(current, snapshot);
+        clear_current_turn(current, OrchestrationTurnKind::Review, snapshot)?;
         {
             let current_task = find_task_mut(current, task_id)?;
             current_task.reviews.push(OrchestrationReview {
@@ -2336,6 +2684,112 @@ fn complete_review(
     }
 }
 
+fn complete_tester_validation(
+    inner: &Arc<OrchestrationInner>,
+    run: &OrchestrationSnapshot,
+    snapshot: &ChatTurnSnapshot,
+) {
+    let Some(tester_id) = run.current_tester_id.as_deref() else {
+        mark_needs_attention(
+            inner,
+            &run.id,
+            "Orchestrateur testeur absent pendant la validation".to_string(),
+        );
+        return;
+    };
+    let text = snapshot_text(snapshot);
+    let mut envelope =
+        match parse_marked_json::<TesterResultEnvelope>(&text, "ORCHESTRATION_TEST_RESULT:")
+            .and_then(|result| validate_tester_result(result, run))
+        {
+            Ok(result) => result,
+            Err(error) => {
+                protocol_failure(
+                    inner,
+                    &run.id,
+                    None,
+                    format!("Resultat du testeur invalide : {error}"),
+                );
+                return;
+            }
+        };
+    if let Err(error) = validate_team_messages(&mut envelope.messages, run) {
+        protocol_failure(
+            inner,
+            &run.id,
+            None,
+            format!("Messages du testeur invalides : {error}"),
+        );
+        return;
+    }
+    let now = metrics::now_ts();
+    let decision = envelope.decision;
+    let feedback = envelope.feedback.clone();
+    let task_ids = envelope.task_ids.clone();
+    let result = inner.mutate_store(|store| {
+        let current = find_run_mut(store, &run.id)?;
+        clear_current_turn(current, OrchestrationTurnKind::TesterValidation, snapshot)?;
+        let tester = find_tester_mut(current, tester_id)?;
+        tester.status = if decision == OrchestrationTesterDecision::Pass {
+            OrchestrationTesterStatus::Passed
+        } else {
+            OrchestrationTesterStatus::RevisionRequired
+        };
+        tester.last_results = envelope.tests;
+        tester.protocol_failures = 0;
+        tester.last_error = if decision == OrchestrationTesterDecision::Pass {
+            None
+        } else {
+            Some(feedback.clone())
+        };
+        append_team_messages(
+            current,
+            OrchestrationAccountRole::Orchestrator,
+            None,
+            envelope.messages,
+            now,
+        );
+        current.current_tester_id = None;
+        current.next_action_at = if decision == OrchestrationTesterDecision::Pass {
+            Some(now)
+        } else {
+            None
+        };
+        current.last_error = if decision == OrchestrationTesterDecision::Pass {
+            None
+        } else {
+            Some(feedback.clone())
+        };
+        current.updated_at = now;
+        push_event(
+            current,
+            now,
+            if decision == OrchestrationTesterDecision::Pass {
+                "tester_passed"
+            } else {
+                "tester_revision_requested"
+            },
+            if decision == OrchestrationTesterDecision::Pass {
+                format!("Orchestrateur testeur {tester_id} : tous les tests passent")
+            } else {
+                format!(
+                    "Orchestrateur testeur {tester_id} : correction demandee a {} worker{}",
+                    task_ids.len(),
+                    if task_ids.len() > 1 { "s" } else { "" }
+                )
+            },
+        );
+        Ok(())
+    });
+    if let Err(error) = result {
+        mark_needs_attention(inner, &run.id, error);
+        return;
+    }
+    if decision == OrchestrationTesterDecision::Revise {
+        reopen_tasks(inner, &run.id, &task_ids, feedback);
+    }
+}
+
 fn complete_final_review(
     inner: &Arc<OrchestrationInner>,
     run: &OrchestrationSnapshot,
@@ -2368,7 +2822,7 @@ fn complete_final_review(
     let now = metrics::now_ts();
     if let Err(error) = inner.mutate_store(|store| {
         let current = find_run_mut(store, &run.id)?;
-        clear_current_turn(current, snapshot);
+        clear_current_turn(current, OrchestrationTurnKind::FinalReview, snapshot)?;
         current.protocol_failures = 0;
         current.final_summary = Some(envelope.summary.clone());
         append_team_messages(
@@ -2547,7 +3001,9 @@ fn finish_validation(
                 }
                 current.current_validation_id = None;
                 current.current_validation_kind = None;
-                current.phase = OrchestrationPhase::FinalReview;
+                reset_testers_for_validation(current, Some(&message));
+                current.phase = OrchestrationPhase::Testing;
+                current.current_tester_id = None;
                 current.next_action_at = Some(now);
                 current.last_error = Some(truncate(&message, MAX_TEXT_CHARS));
                 current.updated_at = now;
@@ -2555,7 +3011,7 @@ fn finish_validation(
                     current,
                     now,
                     "final_validation_failed",
-                    "L'audit final doit attribuer la correction a un travailleur".to_string(),
+                    "La commande finale a echoue ; les orchestrateurs testeurs doivent attribuer les corrections aux workers".to_string(),
                 );
                 Ok(())
             });
@@ -2678,6 +3134,15 @@ fn request_revision(
 }
 
 fn reopen_task(inner: &Arc<OrchestrationInner>, run_id: &str, task_id: &str, feedback: String) {
+    reopen_tasks(inner, run_id, &[task_id.to_string()], feedback);
+}
+
+fn reopen_tasks(
+    inner: &Arc<OrchestrationInner>,
+    run_id: &str,
+    task_ids: &[String],
+    feedback: String,
+) {
     let run = match snapshot_run(inner, run_id) {
         Ok(run) => run,
         Err(_) => return,
@@ -2689,33 +3154,53 @@ fn reopen_task(inner: &Arc<OrchestrationInner>, run_id: &str, task_id: &str, fee
         return;
     }
     let now = metrics::now_ts();
+    let feedback = truncate(&feedback, MAX_TEXT_CHARS);
     let update = inner.mutate_store(|store| {
         let current = find_run_mut(store, run_id)?;
-        let task_title = {
-            let task = find_task_mut(current, task_id)?;
-            task.status = OrchestrationTaskStatus::RevisionRequested;
-            task.workspace_dir = None;
-            task.base_commit = None;
-            task.evidence = None;
-            task.last_error = Some(truncate(&feedback, MAX_TEXT_CHARS));
-            task.title.clone()
-        };
-        current.phase = OrchestrationPhase::Working;
-        current.current_task_id = Some(task_id.to_string());
-        current.next_action_at = Some(now);
-        current.last_error = Some(truncate(&feedback, MAX_TEXT_CHARS));
-        current.updated_at = now;
+        let task_titles = apply_tester_revision_state(current, task_ids, &feedback, now)?;
         push_event(
             current,
             now,
             "task_reopened",
-            format!("{task_title} rouverte apres l'audit final"),
+            format!(
+                "{} mission{} rouverte{} apres les tests : {}",
+                task_titles.len(),
+                if task_titles.len() > 1 { "s" } else { "" },
+                if task_titles.len() > 1 { "s" } else { "" },
+                task_titles.join(", ")
+            ),
         );
         Ok(())
     });
     if let Err(error) = update {
         mark_needs_attention(inner, run_id, error);
     }
+}
+
+fn apply_tester_revision_state(
+    run: &mut OrchestrationSnapshot,
+    task_ids: &[String],
+    feedback: &str,
+    now: i64,
+) -> Result<Vec<String>, String> {
+    let mut task_titles = Vec::with_capacity(task_ids.len());
+    for task_id in task_ids {
+        let task = find_task_mut(run, task_id)?;
+        task.status = OrchestrationTaskStatus::RevisionRequested;
+        task.workspace_dir = None;
+        task.base_commit = None;
+        task.evidence = None;
+        task.last_error = Some(feedback.to_string());
+        task_titles.push(task.title.clone());
+    }
+    reset_testers_for_validation(run, Some(feedback));
+    run.phase = OrchestrationPhase::Working;
+    run.current_task_id = None;
+    run.current_tester_id = None;
+    run.next_action_at = Some(now);
+    run.last_error = Some(feedback.to_string());
+    run.updated_at = now;
+    Ok(task_titles)
 }
 
 fn protocol_failure(
@@ -2728,6 +3213,15 @@ fn protocol_failure(
     let error = truncate(&error, MAX_TEXT_CHARS);
     let update = inner.mutate_store(|store| {
         let run = find_run_mut(store, run_id)?;
+        if run.current_turn_kind == Some(OrchestrationTurnKind::TesterPlan) {
+            if let Some(tester_id) = run.current_tester_id.clone() {
+                find_tester_mut(run, &tester_id)?.status = OrchestrationTesterStatus::Pending;
+            }
+        } else if run.current_turn_kind == Some(OrchestrationTurnKind::TesterValidation) {
+            if let Some(tester_id) = run.current_tester_id.clone() {
+                find_tester_mut(run, &tester_id)?.status = OrchestrationTesterStatus::Ready;
+            }
+        }
         run.current_turn_id = None;
         run.current_turn_kind = None;
         run.current_start_id = None;
@@ -2783,6 +3277,15 @@ fn record_start_failure(
         let run = find_run_mut(store, run_id)?;
         if run.current_start_id.as_deref() != Some(start_id) {
             return Ok(());
+        }
+        if run.current_turn_kind == Some(OrchestrationTurnKind::TesterPlan) {
+            if let Some(tester_id) = run.current_tester_id.clone() {
+                find_tester_mut(run, &tester_id)?.status = OrchestrationTesterStatus::Pending;
+            }
+        } else if run.current_turn_kind == Some(OrchestrationTurnKind::TesterValidation) {
+            if let Some(tester_id) = run.current_tester_id.clone() {
+                find_tester_mut(run, &tester_id)?.status = OrchestrationTesterStatus::Ready;
+            }
         }
         run.current_start_id = None;
         run.current_turn_id = None;
@@ -2894,6 +3397,25 @@ fn apply_worker_candidate(
 }
 
 fn publish_run(inner: &Arc<OrchestrationInner>, run: &OrchestrationSnapshot) {
+    if !testers_all_passed(run) {
+        let now = metrics::now_ts();
+        let update = inner.mutate_store(|store| {
+            let current = find_run_mut(store, &run.id)?;
+            current.phase = OrchestrationPhase::Testing;
+            current.current_tester_id = None;
+            current.next_action_at = Some(now);
+            current.last_error = Some(
+                "Publication bloquee : tous les orchestrateurs testeurs doivent valider"
+                    .to_string(),
+            );
+            current.updated_at = now;
+            Ok(())
+        });
+        if let Err(error) = update {
+            mark_needs_attention(inner, &run.id, error);
+        }
+        return;
+    }
     if run.source_kind != OrchestrationSourceKind::GitClean {
         let now = metrics::now_ts();
         let update = inner.mutate_store(|store| {
@@ -3296,6 +3818,58 @@ fn plan_prompt(run: &OrchestrationSnapshot) -> String {
     )
 }
 
+fn tester_plan_prompt(run: &OrchestrationSnapshot, tester: &OrchestrationTester) -> String {
+    let assigned_tasks = tester
+        .assigned_task_ids
+        .iter()
+        .filter_map(|task_id| run.tasks.iter().find(|task| task.id == *task_id))
+        .map(|task| {
+            format!(
+                "- {} ({}): {}\n  Criteres: {}",
+                task.id,
+                task.title,
+                task.description,
+                task.acceptance_criteria.join(" | ")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "Tu es l'orchestrateur testeur {} du chat orchestre \"{}\". Tu es independant des workers et tu controles au plus {} missions. Pendant cette phase, ne modifie aucun fichier : inspecte le depot et concois une strategie de tests reproductible qui prouve chaque critere et recherche les regressions.\n\nObjectif global :\n{}\n\nMissions sous ta responsabilite :\n{}\n\nCommande de validation globale imposee : `{}`. Complete-la par des tests cibles pertinents. Chaque test doit avoir un nom, une commande executable dans le depot et un resultat attendu observable. Diffuse via `messages` toute contrainte utile aux workers.\n\nTermine par exactement une ligne, sans bloc Markdown :\nORCHESTRATION_TEST_PLAN: {{\"summary\":\"strategie de validation\",\"tests\":[{{\"name\":\"comportement controle\",\"command\":\"commande reproductible\",\"expected\":\"resultat observable\"}}],\"messages\":[{{\"toTaskIds\":[\"task-01\"],\"body\":\"contrainte de test utile\"}}]}}",
+        tester.position,
+        run.name,
+        WORKERS_PER_TESTER,
+        run.objective,
+        assigned_tasks,
+        run.test_command
+    )
+}
+
+fn tester_validation_prompt(run: &OrchestrationSnapshot, tester: &OrchestrationTester) -> String {
+    let assigned_tasks = tester
+        .assigned_task_ids
+        .iter()
+        .filter_map(|task_id| run.tasks.iter().find(|task| task.id == *task_id))
+        .map(|task| format!("- {}: {}", task.id, task.title))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let test_plan = serde_json::to_string(&tester.test_plan).unwrap_or_default();
+    let previous_failure = run
+        .last_error
+        .as_deref()
+        .map(|error| format!("\nEchec precedent a diagnostiquer :\n{error}\n"))
+        .unwrap_or_default();
+    format!(
+        "Tu es l'orchestrateur testeur {} du chat orchestre \"{}\". Toutes les contributions actuellement acceptees sont integrees dans ce worktree prive. Tu ne dois modifier aucun fichier : inspecte le diff, execute reellement tout ton plan de tests et cherche les bugs, regressions et criteres non remplis.{}\n\nObjectif :\n{}\n\nMissions que tu controles :\n{}\n\nPlan obligatoire :\n{}\n\nTu peux ajouter des commandes de diagnostic, mais chaque test planifie doit apparaitre dans `tests`. Decision `pass` uniquement si tous les tests sont executes et reussis et si tous les criteres sont remplis. Sinon decision `revise`, avec au moins un `taskIds` parmi tes missions et un feedback actionnable : les workers correspondants continueront a corriger, puis tous les testeurs repasseront. N'accepte jamais un resultat partiel.\n\nTermine par exactement une ligne, sans bloc Markdown :\nORCHESTRATION_TEST_RESULT: {{\"decision\":\"pass\",\"summary\":\"resultat de validation\",\"taskIds\":[],\"feedback\":\"\",\"tests\":[{{\"command\":\"commande executee\",\"result\":\"resultat observe\",\"passed\":true}}],\"messages\":[]}}",
+        tester.position,
+        run.name,
+        previous_failure,
+        run.objective,
+        assigned_tasks,
+        test_plan
+    )
+}
+
 fn worker_prompt(run: &OrchestrationSnapshot, task: &OrchestrationTask) -> String {
     let criteria = task
         .acceptance_criteria
@@ -3544,6 +4118,94 @@ fn validate_proof(mut proof: ProofEnvelope) -> Result<ProofEnvelope, String> {
     Ok(proof)
 }
 
+fn validate_tester_plan(mut plan: TesterPlanEnvelope) -> Result<TesterPlanEnvelope, String> {
+    plan.summary = validate_short_text(&plan.summary, "Le resume du plan de tests")?;
+    if plan.tests.is_empty() {
+        return Err("le testeur doit definir au moins un test".to_string());
+    }
+    for test in &mut plan.tests {
+        test.name = validate_short_text(&test.name, "Le nom du test")?;
+        test.command = validate_short_text(&test.command, "La commande du test")?;
+        test.expected = validate_short_text(&test.expected, "Le resultat attendu")?;
+    }
+    Ok(plan)
+}
+
+fn validate_tester_result(
+    mut result: TesterResultEnvelope,
+    run: &OrchestrationSnapshot,
+) -> Result<TesterResultEnvelope, String> {
+    result.summary = validate_short_text(&result.summary, "Le resume du testeur")?;
+    result.feedback = truncate(result.feedback.trim(), MAX_TEXT_CHARS);
+    if result.tests.is_empty() {
+        return Err("le testeur doit fournir les resultats des tests".to_string());
+    }
+    for test in &mut result.tests {
+        test.command = validate_short_text(&test.command, "La commande de test")?;
+        test.result = validate_short_text(&test.result, "Le resultat de test")?;
+    }
+    let tester_id = run
+        .current_tester_id
+        .as_deref()
+        .ok_or_else(|| "orchestrateur testeur courant absent".to_string())?;
+    let tester = run
+        .testers
+        .iter()
+        .find(|tester| tester.id == tester_id)
+        .ok_or_else(|| format!("orchestrateur testeur inconnu : {tester_id}"))?;
+    if let Some(missing) = tester.test_plan.iter().find(|planned| {
+        !result
+            .tests
+            .iter()
+            .any(|executed| executed.command.trim() == planned.command.trim())
+    }) {
+        return Err(format!(
+            "le test planifie '{}' n'a pas ete execute",
+            missing.name
+        ));
+    }
+    let assigned = tester
+        .assigned_task_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    let mut seen = HashSet::new();
+    result.task_ids = result
+        .task_ids
+        .drain(..)
+        .map(|task_id| task_id.trim().to_string())
+        .filter(|task_id| !task_id.is_empty() && seen.insert(task_id.clone()))
+        .collect();
+    if let Some(unknown) = result
+        .task_ids
+        .iter()
+        .find(|task_id| !assigned.contains(task_id.as_str()))
+    {
+        return Err(format!(
+            "le testeur ne peut rouvrir que ses missions ; taskId interdit : {unknown}"
+        ));
+    }
+    match result.decision {
+        OrchestrationTesterDecision::Pass => {
+            if result.tests.iter().any(|test| !test.passed) {
+                return Err("un testeur ne peut pas valider avec un test en echec".to_string());
+            }
+            if !result.task_ids.is_empty() || !result.feedback.is_empty() {
+                return Err("une validation reussie ne doit pas demander de correction".to_string());
+            }
+        }
+        OrchestrationTesterDecision::Revise => {
+            if result.task_ids.is_empty() {
+                return Err("une correction doit cibler au moins un worker".to_string());
+            }
+            if result.feedback.is_empty() {
+                return Err("une correction doit fournir un feedback actionnable".to_string());
+            }
+        }
+    }
+    Ok(result)
+}
+
 fn validate_review(mut review: ReviewEnvelope) -> Result<ReviewEnvelope, String> {
     review.summary = validate_short_text(&review.summary, "Le resume de la revue")?;
     review.feedback = truncate(review.feedback.trim(), MAX_TEXT_CHARS);
@@ -3608,6 +4270,7 @@ fn assign_session(
     run: &mut OrchestrationSnapshot,
     kind: OrchestrationTurnKind,
     task_id: Option<&str>,
+    tester_id: Option<&str>,
     session_id: String,
 ) -> Result<(), String> {
     if session_id.trim().is_empty() {
@@ -3616,27 +4279,39 @@ fn assign_session(
     if kind == OrchestrationTurnKind::Worker {
         let id = task_id.ok_or_else(|| "Tache absente pour la session".to_string())?;
         find_task_mut(run, id)?.session_id = Some(session_id);
+    } else if matches!(
+        kind,
+        OrchestrationTurnKind::TesterPlan | OrchestrationTurnKind::TesterValidation
+    ) {
+        let id =
+            tester_id.ok_or_else(|| "Orchestrateur testeur absent pour la session".to_string())?;
+        find_tester_mut(run, id)?.session_id = Some(session_id);
     } else {
         run.orchestrator_session_id = Some(session_id);
     }
     Ok(())
 }
 
-fn clear_current_turn(run: &mut OrchestrationSnapshot, snapshot: &ChatTurnSnapshot) {
+fn clear_current_turn(
+    run: &mut OrchestrationSnapshot,
+    kind: OrchestrationTurnKind,
+    snapshot: &ChatTurnSnapshot,
+) -> Result<(), String> {
     run.current_turn_id = None;
     run.current_turn_kind = None;
     run.current_start_id = None;
     if let Some(session_id) = snapshot.session_id.clone() {
-        if let Some(task_id) = run.current_task_id.clone() {
-            if let Ok(task) = find_task_mut(run, &task_id) {
-                if task.status == OrchestrationTaskStatus::Working {
-                    task.session_id = Some(session_id);
-                    return;
-                }
-            }
-        }
-        run.orchestrator_session_id = Some(session_id);
+        let task_id = run.current_task_id.clone();
+        let tester_id = run.current_tester_id.clone();
+        assign_session(
+            run,
+            kind,
+            task_id.as_deref(),
+            tester_id.as_deref(),
+            session_id,
+        )?;
     }
+    Ok(())
 }
 
 fn recover_phase_for_resume(run: &mut OrchestrationSnapshot, now: i64) {
@@ -3646,6 +4321,13 @@ fn recover_phase_for_resume(run: &mut OrchestrationSnapshot, now: i64) {
     run.current_validation_id = None;
     run.current_validation_kind = None;
     match run.phase {
+        OrchestrationPhase::DesigningTests => {
+            if let Some(tester_id) = run.current_tester_id.clone() {
+                if let Ok(tester) = find_tester_mut(run, &tester_id) {
+                    tester.status = OrchestrationTesterStatus::Pending;
+                }
+            }
+        }
         OrchestrationPhase::Reviewing | OrchestrationPhase::Validating => {
             if let Some(task_id) = run.current_task_id.clone() {
                 if let Ok(task) = find_task_mut(run, &task_id) {
@@ -3658,10 +4340,24 @@ fn recover_phase_for_resume(run: &mut OrchestrationSnapshot, now: i64) {
             }
             run.phase = OrchestrationPhase::Working;
         }
-        OrchestrationPhase::FinalValidation => run.phase = OrchestrationPhase::FinalReview,
+        OrchestrationPhase::Testing => {
+            if let Some(tester_id) = run.current_tester_id.clone() {
+                if let Ok(tester) = find_tester_mut(run, &tester_id) {
+                    tester.status = OrchestrationTesterStatus::Ready;
+                }
+            }
+        }
+        OrchestrationPhase::FinalValidation => {
+            reset_testers_for_validation(
+                run,
+                Some("Validation finale interrompue ; nouveau passage obligatoire"),
+            );
+            run.phase = OrchestrationPhase::Testing;
+        }
         OrchestrationPhase::Completed => {}
         _ => {}
     }
+    run.current_tester_id = None;
     run.next_action_at = Some(now);
 }
 
@@ -4193,6 +4889,16 @@ fn find_task_mut<'a>(
         .ok_or_else(|| "Tache orchestree introuvable".to_string())
 }
 
+fn find_tester_mut<'a>(
+    run: &'a mut OrchestrationSnapshot,
+    id: &str,
+) -> Result<&'a mut OrchestrationTester, String> {
+    run.testers
+        .iter_mut()
+        .find(|tester| tester.id == id)
+        .ok_or_else(|| "Orchestrateur testeur introuvable".to_string())
+}
+
 fn push_event(run: &mut OrchestrationSnapshot, timestamp: i64, kind: &str, message: String) {
     run.events.push(OrchestrationEvent {
         timestamp,
@@ -4261,6 +4967,52 @@ fn validate_worker_count(value: u32) -> Result<u32, String> {
         ));
     }
     Ok(value)
+}
+
+fn required_tester_count(worker_count: u32) -> u32 {
+    worker_count.max(1).div_ceil(WORKERS_PER_TESTER)
+}
+
+fn build_testers(tasks: &[OrchestrationTask]) -> Vec<OrchestrationTester> {
+    let tester_count = required_tester_count(tasks.len() as u32);
+    (0..tester_count)
+        .map(|index| {
+            let start = (index * WORKERS_PER_TESTER) as usize;
+            let end = ((index + 1) * WORKERS_PER_TESTER) as usize;
+            OrchestrationTester {
+                id: format!("tester-{:02}", index + 1),
+                position: index + 1,
+                status: OrchestrationTesterStatus::Pending,
+                assigned_task_ids: tasks[start.min(tasks.len())..end.min(tasks.len())]
+                    .iter()
+                    .map(|task| task.id.clone())
+                    .collect(),
+                session_id: None,
+                plan_summary: None,
+                test_plan: Vec::new(),
+                last_results: Vec::new(),
+                attempt_count: 0,
+                protocol_failures: 0,
+                last_error: None,
+            }
+        })
+        .collect()
+}
+
+fn testers_all_passed(run: &OrchestrationSnapshot) -> bool {
+    run.tester_count > 0
+        && run.testers.len() == run.tester_count as usize
+        && run
+            .testers
+            .iter()
+            .all(|tester| tester.status == OrchestrationTesterStatus::Passed)
+}
+
+fn reset_testers_for_validation(run: &mut OrchestrationSnapshot, feedback: Option<&str>) {
+    for tester in &mut run.testers {
+        tester.status = OrchestrationTesterStatus::Ready;
+        tester.last_error = feedback.map(|value| truncate(value, MAX_TEXT_CHARS));
+    }
 }
 
 fn default_adaptive_fanout() -> bool {
@@ -4509,6 +5261,50 @@ fn normalize_loaded_store(store: &mut OrchestrationStore, now: i64) -> bool {
                 changed = true;
             }
         }
+        let expected_tester_count = required_tester_count(run.worker_count);
+        if run.tester_count != expected_tester_count {
+            run.tester_count = expected_tester_count;
+            changed = true;
+        }
+        if !run.tasks.is_empty() && run.testers.len() != expected_tester_count as usize {
+            let previous = std::mem::take(&mut run.testers);
+            let completed = run.status == OrchestrationStatus::Completed;
+            run.testers = build_testers(&run.tasks)
+                .into_iter()
+                .map(|mut tester| {
+                    if let Some(existing) = previous.iter().find(|item| item.id == tester.id) {
+                        tester.session_id = existing.session_id.clone();
+                        tester.plan_summary = existing.plan_summary.clone();
+                        tester.test_plan = existing.test_plan.clone();
+                        tester.last_results = existing.last_results.clone();
+                        tester.attempt_count = existing.attempt_count;
+                        tester.protocol_failures = existing.protocol_failures;
+                        tester.last_error = existing.last_error.clone();
+                        tester.status = existing.status;
+                    } else if completed {
+                        tester.status = OrchestrationTesterStatus::Passed;
+                    }
+                    tester
+                })
+                .collect();
+            changed = true;
+        }
+        if run.status != OrchestrationStatus::Completed
+            && matches!(
+                run.phase,
+                OrchestrationPhase::FinalReview
+                    | OrchestrationPhase::FinalValidation
+                    | OrchestrationPhase::Publishing
+            )
+            && !testers_all_passed(run)
+        {
+            run.phase = if run.testers.iter().any(|tester| tester.test_plan.is_empty()) {
+                OrchestrationPhase::DesigningTests
+            } else {
+                OrchestrationPhase::Testing
+            };
+            changed = true;
+        }
         if run.team_messages.len() > MAX_TEAM_MESSAGES {
             run.team_messages
                 .drain(0..run.team_messages.len() - MAX_TEAM_MESSAGES);
@@ -4694,6 +5490,141 @@ mod tests {
         assert_eq!(configured_default_worker_count_from(Some("0")), 5);
         assert_eq!(configured_default_worker_count_from(Some("8")), 5);
         assert_eq!(configured_default_worker_count_from(Some("abc")), 5);
+    }
+
+    #[test]
+    fn tester_ratio_is_one_per_five_workers_with_a_minimum_of_one() {
+        assert_eq!(required_tester_count(0), 1);
+        assert_eq!(required_tester_count(1), 1);
+        assert_eq!(required_tester_count(5), 1);
+        assert_eq!(required_tester_count(6), 2);
+        assert_eq!(required_tester_count(10), 2);
+        assert_eq!(required_tester_count(11), 3);
+        assert_eq!(required_tester_count(1_000), 200);
+    }
+
+    #[test]
+    fn testers_receive_disjoint_batches_of_at_most_five_tasks() {
+        let mut sample = sample_run();
+        let template = sample.tasks.remove(0);
+        let tasks = (1..=11)
+            .map(|position| {
+                let mut task = template.clone();
+                task.id = format!("task-{position:02}");
+                task.position = position;
+                task
+            })
+            .collect::<Vec<_>>();
+        let testers = build_testers(&tasks);
+        assert_eq!(testers.len(), 3);
+        assert_eq!(testers[0].assigned_task_ids.len(), 5);
+        assert_eq!(testers[1].assigned_task_ids.len(), 5);
+        assert_eq!(testers[2].assigned_task_ids, vec!["task-11"]);
+        let assigned = testers
+            .iter()
+            .flat_map(|tester| tester.assigned_task_ids.iter())
+            .collect::<HashSet<_>>();
+        assert_eq!(assigned.len(), tasks.len());
+    }
+
+    #[test]
+    fn tester_cannot_pass_until_every_planned_test_succeeds() {
+        let mut run = sample_run();
+        run.current_tester_id = Some("tester-01".to_string());
+        let missing = TesterResultEnvelope {
+            decision: OrchestrationTesterDecision::Pass,
+            summary: "Validation".to_string(),
+            task_ids: Vec::new(),
+            feedback: String::new(),
+            tests: vec![OrchestrationProofTest {
+                command: "cargo check".to_string(),
+                result: "ok".to_string(),
+                passed: true,
+            }],
+            messages: Vec::new(),
+        };
+        assert!(validate_tester_result(missing, &run).is_err());
+
+        let failed = TesterResultEnvelope {
+            decision: OrchestrationTesterDecision::Pass,
+            summary: "Validation".to_string(),
+            task_ids: Vec::new(),
+            feedback: String::new(),
+            tests: vec![OrchestrationProofTest {
+                command: "cargo test".to_string(),
+                result: "failed".to_string(),
+                passed: false,
+            }],
+            messages: Vec::new(),
+        };
+        assert!(validate_tester_result(failed, &run).is_err());
+
+        let passed = TesterResultEnvelope {
+            decision: OrchestrationTesterDecision::Pass,
+            summary: "Validation".to_string(),
+            task_ids: Vec::new(),
+            feedback: String::new(),
+            tests: vec![OrchestrationProofTest {
+                command: "cargo test".to_string(),
+                result: "ok".to_string(),
+                passed: true,
+            }],
+            messages: Vec::new(),
+        };
+        assert!(validate_tester_result(passed, &run).is_ok());
+    }
+
+    #[test]
+    fn failed_tester_reopens_workers_and_invalidates_the_whole_quorum() {
+        let mut run = sample_run();
+        let mut second = run.tasks[0].clone();
+        second.id = "task-02".to_string();
+        second.position = 2;
+        second.title = "Interface".to_string();
+        run.tasks.push(second);
+        run.worker_count = 2;
+        run.testers[0].assigned_task_ids = vec!["task-01".to_string(), "task-02".to_string()];
+        run.testers[0].status = OrchestrationTesterStatus::Passed;
+        run.phase = OrchestrationPhase::Testing;
+
+        let reopened = vec!["task-01".to_string(), "task-02".to_string()];
+        let titles = apply_tester_revision_state(
+            &mut run,
+            &reopened,
+            "Les tests de regression echouent",
+            123,
+        )
+        .unwrap();
+
+        assert_eq!(titles, vec!["API", "Interface"]);
+        assert!(run.tasks.iter().all(|task| {
+            task.status == OrchestrationTaskStatus::RevisionRequested
+                && task.last_error.as_deref() == Some("Les tests de regression echouent")
+        }));
+        assert_eq!(run.testers[0].status, OrchestrationTesterStatus::Ready);
+        assert_eq!(run.phase, OrchestrationPhase::Working);
+        assert_eq!(
+            next_open_task(&run).map(|task| task.id.as_str()),
+            Some("task-01")
+        );
+        assert_eq!(run.next_action_at, Some(123));
+    }
+
+    #[test]
+    fn old_final_review_is_returned_to_mandatory_tester_design() {
+        let mut run = sample_run();
+        run.tester_count = 0;
+        run.testers.clear();
+        run.phase = OrchestrationPhase::FinalReview;
+        let mut store = OrchestrationStore {
+            version: STORE_VERSION - 1,
+            runs: vec![run],
+        };
+        assert!(normalize_loaded_store(&mut store, 100));
+        assert_eq!(store.runs[0].tester_count, 1);
+        assert_eq!(store.runs[0].testers.len(), 1);
+        assert_eq!(store.runs[0].phase, OrchestrationPhase::DesigningTests);
+        assert!(!testers_all_passed(&store.runs[0]));
     }
 
     #[test]
@@ -5057,6 +5988,7 @@ mod tests {
             name: "Feature".to_string(),
             objective: "Construire".to_string(),
             worker_count: 1,
+            tester_count: 1,
             adaptive_fanout: true,
             max_task_count: DEFAULT_MAX_TASK_COUNT,
             minimum_task_count: 1,
@@ -5087,6 +6019,7 @@ mod tests {
             current_turn_id: None,
             current_turn_kind: None,
             current_task_id: None,
+            current_tester_id: None,
             current_start_id: None,
             current_validation_id: None,
             current_validation_kind: None,
@@ -5110,6 +6043,27 @@ mod tests {
                 protocol_failures: 0,
                 evidence: None,
                 reviews: Vec::new(),
+                last_error: None,
+            }],
+            testers: vec![OrchestrationTester {
+                id: "tester-01".to_string(),
+                position: 1,
+                status: OrchestrationTesterStatus::Passed,
+                assigned_task_ids: vec!["task-01".to_string()],
+                session_id: None,
+                plan_summary: Some("Valider l'API".to_string()),
+                test_plan: vec![OrchestrationTestDefinition {
+                    name: "Suite Rust".to_string(),
+                    command: "cargo test".to_string(),
+                    expected: "Tous les tests passent".to_string(),
+                }],
+                last_results: vec![OrchestrationProofTest {
+                    command: "cargo test".to_string(),
+                    result: "ok".to_string(),
+                    passed: true,
+                }],
+                attempt_count: 1,
+                protocol_failures: 0,
                 last_error: None,
             }],
             final_summary: None,

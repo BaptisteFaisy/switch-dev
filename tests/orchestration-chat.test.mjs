@@ -5,6 +5,7 @@ import test from "node:test";
 import {
   AUTOMATIC_ORCHESTRATION_MARKER,
   MAX_ORCHESTRATION_WORKER_COUNT,
+  ORCHESTRATION_WORKERS_PER_TESTER,
   automaticOrchestrationEnabledByDefault,
   automaticOrchestrationNotice,
   normalizeOrchestrationWorkerCount,
@@ -16,6 +17,8 @@ import {
   orchestrationProgress,
   orchestrationStatusLabel,
   orchestrationTaskStatusLabel,
+  orchestrationTesterCount,
+  orchestrationTesterStatusLabel,
   orchestrationWorkerAccountId,
   orchestrationWorkerCountFromEnv,
   parseAutomaticOrchestrationDecision,
@@ -46,7 +49,10 @@ const run = (overrides = {}) => ({
 test("les statuts et la progression du chat orchestré sont explicites", () => {
   assert.equal(orchestrationStatusLabel("needs_attention"), "Attention requise");
   assert.equal(orchestrationPhaseLabel("final_validation"), "Validation finale");
+  assert.equal(orchestrationPhaseLabel("designing_tests"), "Conception des tests par les orchestrateurs");
+  assert.equal(orchestrationPhaseLabel("testing"), "Tests des orchestrateurs dédiés");
   assert.equal(orchestrationTaskStatusLabel("revision_requested"), "Correction demandée");
+  assert.equal(orchestrationTesterStatusLabel("revision_required"), "Corrections demandées");
   assert.deepEqual(orchestrationProgress(run()), { accepted: 1, total: 2, percent: 50 });
   assert.equal(orchestrationIsRunning(run({ currentValidationId: "validation-1" })), true);
   assert.equal(orchestrationIsRunning(run({ status: "paused", currentTurnId: 42 })), false);
@@ -88,6 +94,11 @@ test("le nombre de workers UI est borné à cinq et retombe sur cinq", () => {
     [1, 2, 3, 4, 5, null, null],
   );
   assert.equal(MAX_ORCHESTRATION_WORKER_COUNT, 5);
+  assert.equal(ORCHESTRATION_WORKERS_PER_TESTER, 5);
+  assert.deepEqual(
+    [1, 5, 6, 10, 11, 1_000].map(orchestrationTesterCount),
+    [1, 1, 2, 2, 3, 200],
+  );
   assert.match(main, /VITE_CST_ORCHESTRATION_WORKERS/);
   assert.match(main, /autonomousLaunchWorkerCount = defaultOrchestrationWorkerCount/);
   assert.match(main, /orchestrationWorkerCount = defaultOrchestrationWorkerCount/);
@@ -176,7 +187,10 @@ test("la vue dédiée crée et expose chaque chat de l'équipe", () => {
   assert.match(main, /data-orchestration-account-role/);
   assert.match(main, /Adresse e-mail \/ compte/);
   assert.match(main, /reassign_orchestration_account/);
-  assert.match(main, /\$\{workerCount \+ 1\} agents/);
+  assert.match(main, /workerCount \+ testerCount \+ 1/);
+  assert.match(main, /renderOrchestrationTesters\(run\)/);
+  assert.match(main, /Orchestrateur testeur/);
+  assert.match(main, /orchestrationTesterId/);
   assert.match(main, /id="orchestrationToggle"/);
   assert.match(main, /data-view="orchestration"/);
   assert.match(main, /create_orchestration/);
@@ -267,6 +281,16 @@ test("le moteur impose isolation, preuve, revue, test réel et publication prude
   assert.match(backend, /worktree", "add", "--detach"/);
   assert.match(backend, /ORCHESTRATION_PLAN:/);
   assert.match(backend, /pub worker_count: u32/);
+  assert.match(backend, /const WORKERS_PER_TESTER: u32 = 5/);
+  assert.match(backend, /fn required_tester_count/);
+  assert.match(backend, /pub tester_count: u32/);
+  assert.match(backend, /pub testers: Vec<OrchestrationTester>/);
+  assert.match(backend, /OrchestrationTurnKind::TesterPlan/);
+  assert.match(backend, /OrchestrationTurnKind::TesterValidation/);
+  assert.match(backend, /ORCHESTRATION_TEST_PLAN:/);
+  assert.match(backend, /ORCHESTRATION_TEST_RESULT:/);
+  assert.match(backend, /testers_all_passed/);
+  assert.match(backend, /reset_testers_for_validation/);
   assert.match(backend, /validate_worker_count/);
   assert.match(backend, /exactement cette cardinalite de taches/);
   assert.match(backend, /validate_plan\(plan, run\)/);
