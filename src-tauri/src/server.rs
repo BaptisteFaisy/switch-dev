@@ -49,6 +49,7 @@ use crate::{
     image_generation::{self, ImageGenerationRequest, ImageGenerationStatusRequest},
     kombai::{KombaiManager, KombaiStatus},
     metrics,
+    gmail::{self, GmailManager},
     microsoft::{
         self, CreateEventArguments, ListEventsArguments, ListMessagesArguments, MicrosoftManager,
         SendEmailArguments, UpdateEventArguments,
@@ -255,6 +256,7 @@ struct ServerState {
     chat_open_requests: ChatOpenRequestRegistry,
     chat_post_requests: ChatPostRequestRegistry,
     microsoft: MicrosoftManager,
+    gmail: GmailManager,
     autonomous: AutonomousAgentManager,
     terminal_goals: TerminalGoalManager,
     orchestration: OrchestrationManager,
@@ -1864,6 +1866,13 @@ pub async fn run(config: ServerConfig) -> Result<(), String> {
         &config.public_base_url,
         user_auth.clone(),
     )?;
+    // Meme principe : les jetons Gmail vivent dans `config.data_dir`, rattaches
+    // aux identifiants utilisateurs locaux du noeud.
+    let gmail = GmailManager::load(
+        config.data_dir.clone(),
+        &config.public_base_url,
+        user_auth.clone(),
+    )?;
     let terminal_goals = TerminalGoalManager::new(config.data_dir.join("terminal-goals.json"))?;
     let terminals = RemoteTerminalManager::with_max_active(config.terminal_capacity)
         .with_device_fleet(device_fleet.clone())
@@ -1878,6 +1887,7 @@ pub async fn run(config: ServerConfig) -> Result<(), String> {
         chat_open_requests: ChatOpenRequestRegistry::default(),
         chat_post_requests: ChatPostRequestRegistry::default(),
         microsoft: microsoft.clone(),
+        gmail: gmail.clone(),
         autonomous,
         terminal_goals,
         orchestration,
@@ -2406,6 +2416,7 @@ pub async fn run(config: ServerConfig) -> Result<(), String> {
         .merge(mcp)
         .nest("/api/auth", auth::router(user_auth))
         .nest("/api/microsoft", microsoft::router(microsoft))
+        .nest("/api/gmail", gmail::router(gmail))
         .nest("/api", api)
         .nest("/ws", ws)
         .merge(pool::router(pool_manager, Some(config.admin_token.clone())))

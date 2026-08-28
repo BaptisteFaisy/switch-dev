@@ -2350,6 +2350,7 @@ pub(crate) fn router(manager: MicrosoftManager) -> Router {
         .route("/connection/:oid/default", post(api_set_default))
         .route("/start", get(api_start))
         .route("/callback", get(api_callback))
+        .route("/messages", get(api_messages))
         .route("/pending-actions", get(api_pending_actions))
         .route("/pending-actions/:id/confirm", post(api_confirm))
         .route("/pending-actions/:id/cancel", post(api_cancel))
@@ -2414,6 +2415,33 @@ async fn api_clear_provider(
     manager.clear_provider()?;
     let view = manager.connection_view(&identity.id)?;
     Ok(no_store(Json(view).into_response()))
+}
+
+/// Liste des messages de la boite par defaut, pour l'onglet Mail. Meme forme
+/// que l'outil de chat, sans aucune confirmation : la lecture seule suffit.
+#[derive(Deserialize)]
+struct MailMessagesQuery {
+    #[serde(default)]
+    max: Option<u32>,
+}
+
+async fn api_messages(
+    State(manager): State<MicrosoftManager>,
+    headers: HeaderMap,
+    Query(query): Query<MailMessagesQuery>,
+) -> Result<Response, MicrosoftError> {
+    let identity = manager.identity(&headers)?;
+    let args = ListMessagesArguments {
+        query: None,
+        folder: None,
+        limit: Some(query.max.unwrap_or(25)),
+        account: None,
+    };
+    let value = manager
+        .list_messages(&identity.id, &args)
+        .await
+        .map_err(|error| MicrosoftError::new(StatusCode::BAD_GATEWAY, error))?;
+    Ok(no_store(Json(value).into_response()))
 }
 
 async fn api_disconnect(

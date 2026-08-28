@@ -804,6 +804,30 @@ const loadMessagingModule = (): Promise<MessagingModule> => {
   return messagingModulePromise;
 };
 
+type GmailModule = typeof import("./gmail");
+
+let gmailModule: GmailModule | null = null;
+let gmailModulePromise: Promise<GmailModule> | null = null;
+
+const loadGmailModule = (): Promise<GmailModule> => {
+  if (gmailModule) return Promise.resolve(gmailModule);
+  if (!gmailModulePromise) {
+    gmailModulePromise = import("./gmail")
+      .then((module) => {
+        gmailModule = module;
+        return module;
+      })
+      .catch((error) => {
+        gmailModulePromise = null;
+        scheduleStaleChunkRecovery(error);
+        throw error;
+      });
+  }
+  return gmailModulePromise;
+};
+
+const gmailUnreadCount = (): number => gmailModule?.gmailUnreadCount() ?? 0;
+
 type TikTokAccountsModule = typeof import("./tiktok-accounts");
 
 let tiktokAccountsModule: TikTokAccountsModule | null = null;
@@ -1720,6 +1744,7 @@ type AppView =
   | "tasks"
   | "prompts"
   | "scheduled-chat"
+  | "mail"
   | "pool"
   | "limits"
   | "dashboard"
@@ -1764,6 +1789,7 @@ const lazyModuleViews = new Set<AppView>([
   "prompts",
   "history",
   "scheduled-chat",
+  "mail",
   "skills",
   "forum",
   "messaging",
@@ -7117,6 +7143,18 @@ const setActiveView = (view: AppView) => {
       });
     return;
   }
+  if (view === "mail" && !gmailModule) {
+    void loadGmailModule()
+      .then((module) => {
+        module.startGmailPolling(render);
+        setActiveView(view);
+      })
+      .catch((error) => {
+        statusText = `Boîte Gmail indisponible : ${String(error)}`;
+        render();
+      });
+    return;
+  }
   if (view === "tiktok" && !tiktokAccountsModule) {
     void loadTikTokAccountsModule()
       .then(() => setActiveView(view))
@@ -7266,6 +7304,7 @@ const setActiveView = (view: AppView) => {
     tracking: "Liens de tracking Duello",
     "duello-bank": "Banque Duello",
     "freebuff-cloud": "Freebuff Cloud",
+    mail: "Boîte Gmail",
     video: "Studio IA génératif",
     transcription: "Transcription audio sur le VPS",
     vps: "Déploiement VPS",
@@ -7367,6 +7406,8 @@ const setActiveView = (view: AppView) => {
 
   messagingModule?.setMessagingVisible(activeView === "messaging");
   messagingModule?.startMessagingPolling(render);
+  gmailModule?.setGmailVisible(activeView === "mail");
+  gmailModule?.startGmailPolling(render);
   if (activeView !== "tiktok") tiktokAccountsModule?.deactivateTikTokAccountsPanel();
   if (activeView !== "social") socialViewModule?.deactivateSocialPanel();
   if (activeView !== "devices") deviceFleetModule?.deactivateDeviceFleetPanel();
@@ -16101,6 +16142,8 @@ function mobileViewLabel(view: AppView): string {
       return "Banque Duello";
     case "freebuff-cloud":
       return "Freebuff Cloud";
+    case "mail":
+      return "Mail";
     case "video":
       return "Vidéo";
     case "transcription":
@@ -16332,6 +16375,7 @@ function ensureMobileChrome(): void {
         <div class="m-sheet-grid">
           <button type="button" class="m-proxy-entry" role="menuitem" data-act="proxies"><i data-lucide="network"></i><span>Proxy</span></button>
           <button type="button" role="menuitem" data-view="pool"><i data-lucide="users"></i><span>Comptes</span></button>
+          <button type="button" role="menuitem" data-view="mail"><i data-lucide="inbox"></i><span>Mail</span></button>
           <button type="button" role="menuitem" data-view="tasks"><i data-lucide="list-checks"></i><span>Tâches</span></button>
           <button type="button" role="menuitem" data-view="scheduled-chat"><i data-lucide="calendar-clock"></i><span>Chat planifié</span></button>
           <button type="button" role="menuitem" data-view="prompts"><i data-lucide="message-square-text"></i><span>Prompts</span></button>
@@ -22333,6 +22377,8 @@ const appViewTitle = (view: AppView): string => {
       return "Banque Duello";
     case "freebuff-cloud":
       return "Freebuff Cloud";
+    case "mail":
+      return "Boîte Gmail";
     case "video":
       return "Studio IA";
     case "transcription":
@@ -23682,6 +23728,8 @@ const renderActiveAppPanel = (): string => {
       return promptLibraryModule?.renderPromptLibraryPanel(accountScopedStorage) ?? "";
     case "scheduled-chat":
       return scheduledChatsViewModule?.renderScheduledChatsPanel(scheduledChatsPanelOptions()) ?? "";
+    case "mail":
+      return gmailModule?.renderGmailPanel() ?? "";
     case "limits":
       return renderLimitsPanel();
     case "dashboard":
@@ -24548,6 +24596,9 @@ const renderChatFirstShell = () => {
           <span class="chat-context-section-label">Activité</span>
           <button type="button" id="messagingToggle" class="${activeView === "messaging" ? "active" : ""}" title="Messages privés entre utilisateurs" ${activeView === "messaging" ? 'aria-current="page"' : ""}>
             <span class="chat-context-icon"><i data-lucide="mail"></i></span><span class="chat-context-copy"><strong>Messages</strong><small><span>Messagerie</span> privée</small></span><b class="chat-side-task-count messaging-nav-count" ${privateMessageUnreadCount ? "" : "hidden"} aria-label="${privateMessageUnreadCount} message${privateMessageUnreadCount === 1 ? "" : "s"} non lu${privateMessageUnreadCount === 1 ? "" : "s"}">${privateMessageUnreadCount > 99 ? "99+" : privateMessageUnreadCount}</b>
+          </button>
+          <button type="button" id="mailToggle" class="${activeView === "mail" ? "active" : ""}" title="Boîte Gmail du compte connecté" ${activeView === "mail" ? 'aria-current="page"' : ""}>
+            <span class="chat-context-icon"><i data-lucide="inbox"></i></span><span class="chat-context-copy"><strong>Mail</strong><small>Boîte Gmail</small></span><b class="chat-side-task-count gmail-nav-count" data-gmail-nav-count ${gmailUnreadCount() ? "" : "hidden"} aria-label="${gmailUnreadCount()} non lu">${gmailUnreadCount() > 99 ? "99+" : gmailUnreadCount()}</b>
           </button>
           <button type="button" id="tiktokToggle" class="${activeView === "tiktok" ? "active" : ""}" title="Connecter et sélectionner les comptes émetteurs TikTok" ${activeView === "tiktok" ? 'aria-current="page"' : ""}>
             <span class="chat-context-icon"><i data-lucide="music-2"></i></span><span class="chat-context-copy"><strong>TikTok</strong><small>Comptes émetteurs</small></span>
@@ -30508,6 +30559,12 @@ const bindUi = () => {
       statusText = message;
     },
   });
+  gmailModule?.bindGmailUi({
+    rerender: render,
+    setStatus: (message) => {
+      statusText = message;
+    },
+  });
   tiktokAccountsModule?.bindTikTokAccountsUi({
     rerender: render,
     setStatus: (message) => {
@@ -31679,6 +31736,9 @@ const bindUi = () => {
 
   document.querySelector<HTMLButtonElement>("#messagingToggle")?.addEventListener("click", () => {
     setActiveView("messaging");
+  });
+  document.querySelector<HTMLButtonElement>("#mailToggle")?.addEventListener("click", () => {
+    setActiveView("mail");
   });
   document.querySelector<HTMLButtonElement>("#tiktokToggle")?.addEventListener("click", () => {
     setActiveView("tiktok");
@@ -34682,6 +34742,7 @@ window.addEventListener("beforeunload", () => {
   stopRuntimeSync();
   forumModule?.stopForumPolling();
   messagingModule?.stopMessagingPolling();
+  gmailModule?.stopGmailPolling();
   tiktokAccountsModule?.deactivateTikTokAccountsPanel();
   socialViewModule?.deactivateSocialPanel();
   deviceFleetModule?.deactivateDeviceFleetPanel();

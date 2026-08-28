@@ -17,6 +17,7 @@ mod duello_bank;
 mod forum;
 mod freebuff_cloud;
 mod fs_util;
+mod gmail;
 mod git_docker_environment;
 mod image_generation;
 pub mod ios_wda;
