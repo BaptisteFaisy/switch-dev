@@ -7085,6 +7085,11 @@ button.chat-workspace-select:hover,
 .chat-side-item:hover,
 .chat-side-item.active { background: rgba(255, 255, 255, 0.05); }
 .chat-side-item.active { background: rgba(255, 255, 255, 0.075); }
+.chat-side-item.current {
+  background: color-mix(in srgb, var(--chat-accent) 13%, transparent);
+  box-shadow: inset 3px 0 0 var(--chat-accent);
+}
+.chat-side-item.current .chat-side-open { color: var(--text); }
 .chat-side-item.dragging {
   opacity: 0.28;
   cursor: grabbing;

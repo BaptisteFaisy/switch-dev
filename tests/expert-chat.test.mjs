@@ -18,6 +18,7 @@ import {
   expertChatResponsiveGridDimensions,
   expertChatRowCount,
   expertChatsForDisplay,
+  expertChatsOpenedByUser,
   expertChatsOnPage,
   normalizeExpertChatDisplayMode,
   normalizeExpertChatPageSize,
@@ -89,6 +90,57 @@ test("le mode d'affichage peut ne garder que les chats disponibles", () => {
   assert.deepEqual(
     expertChatsForDisplay(chats, "available", isAvailable).map((chat) => chat.id),
     ["new", "done"],
+  );
+});
+
+test("le premier plan ne contient que les chats ouverts par l'utilisateur", () => {
+  const chats = [
+    { id: "manual", userOpened: true },
+    { id: "mobile", userOpened: false },
+    { id: "worker", userOpened: false },
+    { id: "resumed", userOpened: true },
+  ];
+
+  assert.deepEqual(
+    expertChatsOpenedByUser(chats, (chat) => chat.userOpened).map((chat) => chat.id),
+    ["manual", "resumed"],
+  );
+  assert.deepEqual(chats.map((chat) => chat.id), ["manual", "mobile", "worker", "resumed"]);
+});
+
+test("les chats synchronises et les workers restent en arriere-plan jusqu'a un clic", () => {
+  assert.match(
+    main,
+    /const userOpenedExpertChatPanesForCurrentEnvironment = \(\): ExpertChatPane\[\] =>[\s\S]*?expertChatsOpenedByUser/,
+  );
+  assert.match(
+    main,
+    /orchestrationRole: "worker",[\s\S]*?userOpened: false|userOpened: false,[\s\S]*?orchestrationRole: "worker"/,
+  );
+  assert.match(
+    main,
+    /key: syncedChatPaneKey\(turn\),[\s\S]*?userOpened: false/,
+  );
+  assert.match(
+    main,
+    /const activateExpertChatPane = [\s\S]*?pane\.userOpened = true;[\s\S]*?pendingActiveExpertChatKey = null;/,
+  );
+  const adoption = main.slice(
+    main.indexOf("const adoptMissingActiveChatTurns ="),
+    main.indexOf("const refreshActiveChatTurns = async"),
+  );
+  assert.doesNotMatch(adoption, /\brender\(\)/);
+});
+
+test("la restauration migre les anciennes discussions hors du premier plan", () => {
+  assert.match(main, /v: 2,/);
+  assert.match(
+    main,
+    /persistedVersion === 2 \? record\.userOpened !== false : !record\.sessionId/,
+  );
+  assert.match(
+    main,
+    /pendingActiveExpertChatKey[\s\S]*?activeExpertChatKey = pendingActiveExpertChatKey;[\s\S]*?reconcileExpertChatPage\(\)/,
   );
 });
 
@@ -188,7 +240,7 @@ test("le reglage Disponibles pilote le mur principal et reste persistant", () =>
   assert.match(main, /expertChatDisplayMode = loadExpertChatDisplayMode\(\)/);
   assert.match(
     main,
-    /expertChatsForDisplay\(\s*expertChatPanesForCurrentEnvironment\(\),\s*expertChatDisplayMode,\s*expertChatPaneIsAvailable,?\s*\)/,
+    /expertChatsForDisplay\(\s*userOpenedExpertChatPanesForCurrentEnvironment\(\),\s*expertChatDisplayMode,\s*expertChatPaneIsAvailable,?\s*\)/,
   );
 });
 

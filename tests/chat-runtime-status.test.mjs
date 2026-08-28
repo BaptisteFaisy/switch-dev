@@ -69,7 +69,7 @@ test("une synchronisation initiale en panne ne supprime pas les chats locaux", (
   assert.match(main, /let pendingExpertChatRecords: PersistedExpertChatPane\[\] = \[\]/);
   assert.match(
     main,
-    /pendingExpertChatRecords\.push\(record\);[\s\S]*?return \[\];/,
+    /pendingExpertChatRecords\.push\(normalizedRecord\);[\s\S]*?return \[\];/,
   );
   assert.match(
     main,
@@ -82,6 +82,24 @@ test("une synchronisation initiale en panne ne supprime pas les chats locaux", (
   assert.match(
     main,
     /nextRenderSignature === discussionsRenderSignature && newlyAttachedPanes\.length === 0/,
+  );
+});
+
+test("un chat restaure tardivement reconstruit le mur et conserve sa selection", () => {
+  const applyStart = main.indexOf("const applyDiscussionsSnapshot =");
+  const applyEnd = main.indexOf("\nconst refreshDiscussions", applyStart);
+  const applySource = main.slice(applyStart, applyEnd);
+  assert.match(
+    applySource,
+    /if \(newlyAttachedPanes\.length > 0\)[\s\S]*?render\(\);[\s\S]*?startAllExpertChatWork\(\);/,
+  );
+
+  const attachStart = main.indexOf("const attachPendingExpertChatRecords =");
+  const attachEnd = main.indexOf("\nconst restoreExpertChats", attachStart);
+  const attachSource = main.slice(attachStart, attachEnd);
+  assert.match(
+    attachSource,
+    /activeExpertChatKey = pendingActiveExpertChatKey;[\s\S]*?pendingActiveExpertChatKey = null;[\s\S]*?reconcileExpertChatPage\(\);/,
   );
 });
 

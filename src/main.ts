@@ -331,6 +331,7 @@ import {
   expertChatResponsiveCapacity,
   expertChatResponsiveGridDimensions,
   expertChatsForDisplay,
+  expertChatsOpenedByUser,
   expertChatsOnPage,
   normalizeExpertChatDisplayMode,
   normalizeExpertChatPageSizeMode,
@@ -1990,6 +1991,8 @@ type QueuedChatSubmission = {
 
 type ExpertChatPane = {
   key: string;
+  /** Le panneau a ete cree ou ouvert explicitement par l'utilisateur. */
+  userOpened: boolean;
   discussion: DiscussionSummary | null;
   /** Session connue avant meme que l'index des discussions soit actualise. */
   resumeSessionId: string | null;
@@ -2035,6 +2038,8 @@ type ExpertChatPane = {
 
 type PersistedExpertChatPane = {
   key: string;
+  /** Absent dans le format v1 ; les anciennes sessions sont alors migrees en arriere-plan. */
+  userOpened?: boolean;
   sessionId: string | null;
   /** La session existe cote serveur mais son resume n'est pas encore indexe. */
   awaitingDiscussion?: boolean;
@@ -2102,7 +2107,7 @@ type AutonomousOrchestrationPromotionState = {
 };
 
 type PersistedExpertChats = {
-  v: 1;
+  v: 1 | 2;
   activeKey: string | null;
   panes: PersistedExpertChatPane[];
 };
@@ -8118,11 +8123,14 @@ const applyDiscussionsSnapshot = (snapshot: DiscussionsView) => {
   }
   if (newlyAttachedPanes.length > 0) {
     persistExpertChats();
-    newlyAttachedPanes.forEach((pane) => {
-      void loadChatModelCatalog(pane.accountId);
-      if (activeView === "chat") refreshExpertChatPane(pane);
-    });
-    if (activeView === "chat") startAllExpertChatWork();
+    newlyAttachedPanes.forEach((pane) => void loadChatModelCatalog(pane.accountId));
+    if (activeView === "chat") {
+      // Un panneau place en attente n'existait pas encore dans le DOM. Le
+      // rafraichissement cible ne pouvait donc rien afficher ; reconstruire le
+      // mur restaure aussi la selection active qui attendait ce rattachement.
+      render();
+      startAllExpertChatWork();
+    }
   }
 };
 
@@ -11117,6 +11125,7 @@ const createExpertChatPane = (
 
   return {
     key: persisted.key || uid("chat-pane"),
+    userOpened: persisted.userOpened !== false,
     discussion,
     resumeSessionId:
       discussion?.rolloutId?.trim()
@@ -11201,6 +11210,12 @@ const expertChatPanesForCurrentEnvironment = (): ExpertChatPane[] => {
   });
 };
 
+const userOpenedExpertChatPanesForCurrentEnvironment = (): ExpertChatPane[] =>
+  expertChatsOpenedByUser(
+    expertChatPanesForCurrentEnvironment(),
+    (pane) => pane.userOpened,
+  );
+
 const expertChatPaneHasBusyTurn = (pane: ExpertChatPane): boolean =>
   chatTurnIsBusy(pane.turn?.status)
   || activeChatTurnForDiscussion(activeChatTurns, pane.discussion) !== null;
@@ -11212,7 +11227,8 @@ const expertChatPaneIsAvailable = (pane: ExpertChatPane): boolean =>
 
 const pinExplicitlyOpenedBusyExpertChat = (pane: ExpertChatPane): void => {
   if (
-    expertChatDisplayMode === "available"
+    pane.userOpened
+    && expertChatDisplayMode === "available"
     && expertChatPaneHasBusyTurn(pane)
   ) {
     explicitlyOpenedBusyChatVisibilityPins.add(pane.key);
@@ -11247,15 +11263,15 @@ const minimizeActiveBusyExpertChat = (pane: ExpertChatPane): boolean => {
 
 const displayedExpertChatPanesForCurrentEnvironment = (): ExpertChatPane[] =>
   expertChatsForDisplay(
-    expertChatPanesForCurrentEnvironment(),
+    userOpenedExpertChatPanesForCurrentEnvironment(),
     expertChatDisplayMode,
     expertChatPaneIsAvailable,
   );
 
 const activeExpertChatPane = (): ExpertChatPane | null =>
-  expertChatPanesForCurrentEnvironment().find((pane) => pane.key === activeExpertChatKey) ??
+  userOpenedExpertChatPanesForCurrentEnvironment().find((pane) => pane.key === activeExpertChatKey) ??
   displayedExpertChatPanesForCurrentEnvironment()[0] ??
-  expertChatPanesForCurrentEnvironment()[0] ??
+  userOpenedExpertChatPanesForCurrentEnvironment()[0] ??
   null;
 
 const EXPERT_CHAT_DESKTOP_TOOLBAR_HEIGHT = 70;
@@ -11348,7 +11364,7 @@ const visibleExpertChatPanes = (): ExpertChatPane[] =>
   );
 
 const expertChatStatusText = (): string => {
-  const totalCount = expertChatPanesForCurrentEnvironment().length;
+  const totalCount = userOpenedExpertChatPanesForCurrentEnvironment().length;
   const displayedPanes = displayedExpertChatPanesForCurrentEnvironment();
   const count = displayedPanes.length;
   const totalPages = expertChatPageTotal();
@@ -11373,6 +11389,17 @@ const moveExpertChatPageToPane = (pane: ExpertChatPane | null) => {
 
 const reconcileExpertChatPage = () => {
   const panes = displayedExpertChatPanesForCurrentEnvironment();
+  if (
+    pendingActiveExpertChatKey
+    && !panes.some((pane) => pane.key === pendingActiveExpertChatKey)
+  ) {
+    expertChatPage = clampExpertChatPage(
+      expertChatPage,
+      panes.length,
+      effectiveExpertChatPageSizeMode(),
+    );
+    return;
+  }
   const active = panes.find((pane) => pane.key === activeExpertChatKey) ?? panes[0] ?? null;
   if (active) {
     activeExpertChatKey = active.key;
@@ -11393,6 +11420,7 @@ const refreshExpertChatDisplayAfterAvailabilityChange = (
 ): boolean => {
   if (
     activeView !== "chat"
+    || !pane.userOpened
     || expertChatDisplayMode !== "available"
     || wasAvailable === expertChatPaneIsAvailable(pane)
   ) {
@@ -11731,10 +11759,11 @@ const persistExpertChats = () => {
   if (!expertChatsRestored && expertChatPanes.length === 0) return;
   const openKeys = new Set(expertChatPanes.map((pane) => pane.key));
   const state: PersistedExpertChats = {
-    v: 1,
+    v: 2,
     activeKey: activeExpertChatKey ?? pendingActiveExpertChatKey,
     panes: [...expertChatPanes.map((pane) => ({
       key: pane.key,
+      userOpened: pane.userOpened,
       sessionId:
         pane.turn?.sessionId?.trim()
         || pane.resumeSessionId?.trim()
@@ -11791,9 +11820,10 @@ const attachPendingExpertChatRecords = (
     pendingActiveExpertChatKey
     && attached.some((pane) => pane.key === pendingActiveExpertChatKey)
   ) {
-    if (!activeExpertChatKey) activeExpertChatKey = pendingActiveExpertChatKey;
+    activeExpertChatKey = pendingActiveExpertChatKey;
     pendingActiveExpertChatKey = null;
   }
+  if (attached.length > 0) reconcileExpertChatPage();
   return attached;
 };
 
@@ -11803,7 +11833,7 @@ const restoreExpertChats = () => {
   let persisted: PersistedExpertChats | null = null;
   try {
     const parsed = JSON.parse(accountScopedStorage.getItem(EXPERT_OPEN_CHATS_STORAGE_KEY) ?? "null") as Partial<PersistedExpertChats> | null;
-    if (parsed?.v === 1 && Array.isArray(parsed.panes)) {
+    if ((parsed?.v === 1 || parsed?.v === 2) && Array.isArray(parsed.panes)) {
       persisted = parsed as PersistedExpertChats;
     }
   } catch {
@@ -11812,9 +11842,17 @@ const restoreExpertChats = () => {
 
   pendingExpertChatRecords = [];
   pendingActiveExpertChatKey = null;
+  const persistedVersion = persisted?.v ?? 2;
   expertChatPanes = (persisted?.panes ?? [])
     .flatMap((record) => {
       if (!record || typeof record.key !== "string") return [];
+      const normalizedRecord: PersistedExpertChatPane = {
+        ...record,
+        // La v1 ne permet pas de distinguer un chat ouvert volontairement
+        // d'un panneau adopte automatiquement. Ses discussions restent dans
+        // la barre laterale et repassent au premier plan au premier clic.
+        userOpened: persistedVersion === 2 ? record.userOpened !== false : !record.sessionId,
+      };
       const discussion = record.sessionId
         ? (
           record.accountId
@@ -11829,19 +11867,25 @@ const restoreExpertChats = () => {
         && !record.orchestrationId
         && !record.autonomousAgentId
       ) {
-        pendingExpertChatRecords.push(record);
+        pendingExpertChatRecords.push(normalizedRecord);
         return [];
       }
-      return [createExpertChatPane(discussion, record)];
+      return [createExpertChatPane(discussion, normalizedRecord)];
     });
   pendingActiveExpertChatKey = persisted?.activeKey
-    && pendingExpertChatRecords.some((record) => record.key === persisted.activeKey)
+    && pendingExpertChatRecords.some(
+      (record) => record.key === persisted.activeKey && record.userOpened !== false,
+    )
     ? persisted.activeKey
     : null;
   activeExpertChatKey =
-    (persisted?.activeKey && expertChatPanes.some((pane) => pane.key === persisted.activeKey)
+    (persisted?.activeKey && expertChatPanes.some(
+      (pane) => pane.key === persisted.activeKey && pane.userOpened,
+    )
       ? persisted.activeKey
-      : expertChatPanes[0]?.key) ?? null;
+      : pendingActiveExpertChatKey
+        ? null
+        : userOpenedExpertChatPanesForCurrentEnvironment()[0]?.key) ?? null;
   reconcileExpertChatPage();
   persistExpertChats();
 };
@@ -12974,6 +13018,8 @@ const startAllExpertChatWork = () => {
 
 const activateExpertChatPane = (pane: ExpertChatPane, focusPrompt = false) => {
   if (!expertChatPanes.includes(pane)) return;
+  pane.userOpened = true;
+  pendingActiveExpertChatKey = null;
   activeExpertChatKey = pane.key;
   moveExpertChatPageToPane(pane);
   document.querySelectorAll<HTMLElement>("[data-chat-panel]").forEach((panel) => {
@@ -13019,6 +13065,7 @@ const addExpertChatPane = (
     return null;
   }
   const pane = createExpertChatPane(null, {
+    userOpened: true,
     accountId: accountId ?? selectedAccountId ?? settings?.defaultAccountId ?? null,
     pendingWorkspace: environmentPath,
     mode: options.mode,
@@ -13048,6 +13095,7 @@ const openDiscussionInExpert = (
       && pane.discussion.sessionId === discussion.sessionId,
   );
   if (existing) {
+    existing.userOpened = true;
     if (revealBusyChat) pinExplicitlyOpenedBusyExpertChat(existing);
     activeView = "chat";
     activateExpertChatPane(existing);
@@ -13056,7 +13104,7 @@ const openDiscussionInExpert = (
     startAllExpertChatWork();
     return existing;
   }
-  const pane = createExpertChatPane(discussion);
+  const pane = createExpertChatPane(discussion, { userOpened: true });
   expertChatPanes.push(pane);
   if (revealBusyChat) pinExplicitlyOpenedBusyExpertChat(pane);
   activeExpertChatKey = pane.key;
@@ -13195,6 +13243,7 @@ const syncOrchestrationChatPanes = (): {
       );
       if (!pane && !dismissedOrchestrationWorkerPanes.has(dismissedKey)) {
         pane = createExpertChatPane(null, {
+          userOpened: false,
           accountId: orchestrationWorkerAccountId(run, task),
           pendingWorkspace: run.projectDir,
           mode: "build",
@@ -13666,7 +13715,7 @@ const closeExpertChatPane = (pane: ExpertChatPane) => {
   automaticQuotaResumeVisibilityPins.delete(pane.key);
   explicitlyOpenedBusyChatVisibilityPins.delete(pane.key);
   expertChatPanes.splice(index, 1);
-  const environmentPanes = expertChatPanesForCurrentEnvironment();
+  const environmentPanes = userOpenedExpertChatPanesForCurrentEnvironment();
   if (activeExpertChatKey === pane.key) {
     activeExpertChatKey = environmentPanes[0]?.key ?? null;
   }
@@ -14433,10 +14482,11 @@ const bindDiscussionRowUi = () => {
       closeMobileOverlays();
       if (minimizeActiveBusyExpertChat(pane)) return;
       activeView = "chat";
+      activateExpertChatPane(pane);
       pinExplicitlyOpenedBusyExpertChat(pane);
-      activateExpertChatPane(pane, true);
       statusText = expertChatStatusText();
       render();
+      window.setTimeout(() => activateExpertChatPane(pane, true), 0);
     });
   });
   document.querySelectorAll<HTMLButtonElement>("[data-close-pane]").forEach((button) => {
@@ -16680,6 +16730,8 @@ const renderChatSidebarConversations = (): string => {
     .map((discussion) => {
       const openedPane = expertChatPanes.find(
         (pane) =>
+          pane.userOpened
+          &&
           pane.discussion?.accountId === discussion.accountId
           && pane.discussion.sessionId === discussion.sessionId,
       );
@@ -16692,7 +16744,7 @@ const renderChatSidebarConversations = (): string => {
       return {
         status,
         html: `<div class="chat-side-item ${openedPane ? "active" : ""} ${current ? "current" : ""} ${busy ? "moving" : ""}" aria-busy="${busy}">
-        <button type="button" class="chat-side-open" data-open-chat="${escapeAttr(discussion.sessionId)}" data-open-account="${escapeAttr(discussion.accountId)}" title="${escapeAttr(title)}">
+        <button type="button" class="chat-side-open" data-open-chat="${escapeAttr(discussion.sessionId)}" data-open-account="${escapeAttr(discussion.accountId)}" title="${escapeAttr(title)}" ${current ? 'aria-current="true"' : ""}>
           ${renderChatSidebarStatus(openedPane ?? null, discussion)}
           <i class="chat-side-terminal-icon" data-lucide="message-square"></i>
           <span class="chat-side-copy">
@@ -16734,8 +16786,8 @@ const renderChatSidebarConversations = (): string => {
       const status = expertChatSidebarStatus(pane);
       return {
         status,
-        html: `<div class="chat-side-item active ${current ? "current" : ""}">
-        <button type="button" class="chat-side-open" data-open-pane="${escapeAttr(pane.key)}" title="${escapeAttr(title)}">
+        html: `<div class="chat-side-item ${pane.userOpened ? "active" : ""} ${current ? "current" : ""}">
+        <button type="button" class="chat-side-open" data-open-pane="${escapeAttr(pane.key)}" title="${escapeAttr(title)}" ${current ? 'aria-current="true"' : ""}>
           ${renderChatSidebarStatus(pane)}
           <i class="chat-side-terminal-icon" data-lucide="message-square-plus"></i>
           <span class="chat-side-copy">
@@ -17051,6 +17103,7 @@ const adoptMissingActiveChatTurns = async (
       : null;
     const pane = createExpertChatPane(discussion, {
       key: syncedChatPaneKey(turn),
+      userOpened: false,
       sessionId,
       awaitingDiscussion: !!sessionId && !discussion,
       accountId: turn.accountId,
@@ -17060,20 +17113,13 @@ const adoptMissingActiveChatTurns = async (
     });
     pane.resumeSessionId = sessionId;
     expertChatPanes.push(pane);
-    if (expertChatDisplayMode === "available" && chatTurnIsBusy(snapshot.status)) {
-      explicitlyOpenedBusyChatVisibilityPins.add(pane.key);
-    }
     await applyExpertChatTurnSnapshot(pane, snapshot);
     changed = true;
   }
 
   if (changed) {
-    reconcileExpertChatPage();
     persistExpertChats();
-    if (activeView === "chat") {
-      render();
-      startAllExpertChatWork();
-    }
+    if (activeView === "chat") startAllExpertChatWork();
   }
   return changed;
 };
@@ -17107,7 +17153,8 @@ const refreshActiveChatTurns = async (): Promise<boolean> => {
         ?? activeChatTurnForPaneIdentity(next, pane);
       if (candidate && shouldAdoptActiveChatTurn(pane.turn, candidate)) {
         if (
-          shouldPinRestoredBusyExpertChat(
+          pane.userOpened
+          && shouldPinRestoredBusyExpertChat(
             expertChatDisplayMode,
             chatTurnIsBusy(pane.turn?.status),
             chatTurnIsBusy(candidate.status),
@@ -23379,12 +23426,12 @@ const renderSettingsPanel = (): string => {
           <span class="settings-card-icon"><i data-lucide="layout-grid"></i></span>
           <span>
             <strong id="chatDisplaySettingsTitle">Affichage de la fenêtre principale</strong>
-            <small>En mode Disponibles, les chats en cours sont masqués, mais un clic dans la liste permet de les afficher temporairement.</small>
+            <small>Seuls les chats créés ou ouverts volontairement apparaissent ici. Les chats suivis en arrière-plan restent dans la liste de gauche.</small>
           </span>
         </div>
         <div class="theme-choice-group chat-display-choice-group" role="group" aria-label="Chats affichés dans la fenêtre principale">
           <button type="button" data-chat-display-mode="all" class="${expertChatDisplayMode === "all" ? "active" : ""}" aria-pressed="${expertChatDisplayMode === "all"}">
-            <i data-lucide="layout-grid"></i><span>Tous</span>
+            <i data-lucide="layout-grid"></i><span>Ouverts</span>
           </button>
           <button type="button" data-chat-display-mode="available" class="${expertChatDisplayMode === "available" ? "active" : ""}" aria-pressed="${expertChatDisplayMode === "available"}">
             <i data-lucide="badge-check"></i><span>Disponibles</span>
@@ -24190,7 +24237,7 @@ const renderExpertChatGrid = () => {
       </button>
     </section>`;
   }
-  const allEnvironmentPanes = expertChatPanesForCurrentEnvironment();
+  const allEnvironmentPanes = userOpenedExpertChatPanesForCurrentEnvironment();
   const environmentPanes = displayedExpertChatPanesForCurrentEnvironment();
   const totalCount = allEnvironmentPanes.length;
   const count = environmentPanes.length;

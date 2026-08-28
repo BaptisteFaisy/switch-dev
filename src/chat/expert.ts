@@ -103,6 +103,16 @@ export const expertChatsForDisplay = <T>(
 ): T[] => mode === "available" ? chats.filter(isAvailable) : [...chats];
 
 /**
+ * Le mur principal est une selection explicite de l'utilisateur. Les chats
+ * suivis automatiquement (mobile, orchestration, synchronisation serveur)
+ * restent accessibles dans la barre laterale sans envahir la mosaique.
+ */
+export const expertChatsOpenedByUser = <T>(
+  chats: readonly T[],
+  wasOpenedByUser: (chat: T) => boolean,
+): T[] => chats.filter(wasOpenedByUser);
+
+/**
  * Le mode automatique conserve tous les chats visibles jusqu'a la capacite
  * maximale de la grille. Au-dela, la pagination existante prend le relais.
  */
