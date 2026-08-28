@@ -16,7 +16,7 @@ test("le bouton Goal est rendu par le composant partage desktop et web", () => {
   assert.match(view, /model\.supportsGoals/);
   assert.match(
     main,
-    /const providerSupportsGoals = \(provider: Provider\): boolean =>[\s\S]{0,100}provider === "codex" \|\| provider === "claude" \|\| provider === "opencode"/,
+    /const providerSupportsGoals = \(provider: Provider\): boolean =>[\s\S]{0,180}provider === "codex"[\s\S]{0,80}provider === "claude"[\s\S]{0,80}provider === "opencode"[\s\S]{0,80}provider === "openai-compatible"/,
   );
   assert.equal((main.match(/supportsGoals: providerSupportsGoals\(provider\)/g) ?? []).length, 2);
   assert.equal(
