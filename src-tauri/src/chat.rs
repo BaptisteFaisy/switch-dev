@@ -6118,7 +6118,7 @@ mod tests {
         // compte est appliquee ; les autres fournisseurs OpenCode ne gerent pas
         // l'intensite.
         assert_eq!(
-            selected_reasoning_effort(Provider::OpenCode, Some("deepseek"), Some("high"), None)
+            selected_reasoning_effort(Provider::OpenCode, Some("ollama"), Some("high"), None)
                 .unwrap(),
             Some("high".to_string())
         );
