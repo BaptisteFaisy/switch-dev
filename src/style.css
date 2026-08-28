@@ -14096,6 +14096,34 @@ div.chat-tool-part {
 }
 .new-chat-task-context strong { color: #f0e7d2; font-size: 12px; overflow-wrap: anywhere; }
 
+.new-chat-group-objective {
+  display: grid;
+  gap: 7px;
+}
+
+.new-chat-group-objective textarea {
+  width: 100%;
+  min-height: 108px;
+  resize: vertical;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 11px;
+  background: var(--panel);
+  color: var(--text);
+  font: 12px/1.5 var(--font-ui);
+}
+
+.new-chat-group-objective textarea:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+
+.new-chat-group-objective small {
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.45;
+}
+
 .new-chat-modal .modal-actions {
   flex-wrap: wrap;
 }

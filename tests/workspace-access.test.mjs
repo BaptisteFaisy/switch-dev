@@ -75,7 +75,10 @@ test("un membre retrouve tout l'ecosysteme rattache a l'environnement partage", 
 
   assert.match(discussionFilter, /authorize_existing_environment\(identity, cwd\)/);
   assert.match(autonomousList, /authorize_existing_environment\(identity, project_dir\)/);
-  assert.match(orchestrationList, /authorize_existing_environment\(identity, &run\.project_dir\)/);
+  assert.match(
+    orchestrationList,
+    /authorize_existing_environment\(identity, orchestration_access_project_dir\(run\)\)/,
+  );
   assert.match(main, /fichiers, mémoire, historique des chats, agents autonomes et orchestrations sont communs/);
 });
 

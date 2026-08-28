@@ -7493,7 +7493,7 @@ const setActiveView = (view: AppView) => {
 
   if (
     activeView === "orchestration"
-    || (activeView === "chat" && expertChatPanes.some((pane) => !!pane.orchestrationId))
+    || activeView === "chat"
   ) {
     if (!orchestrationAccountId) {
       orchestrationAccountId = selectedAccountId ?? settings?.defaultAccountId ?? null;
@@ -7576,7 +7576,7 @@ const setActiveView = (view: AppView) => {
   }
   if (
     activeView === "orchestration"
-    || (activeView === "chat" && expertChatPanes.some((pane) => !!pane.orchestrationId))
+    || activeView === "chat"
   ) {
     void refreshOrchestrations(!orchestrationsLoaded);
   }
@@ -13492,6 +13492,7 @@ const addExpertChatPane = (
     mode?: ChatMode;
     pendingWorkspace?: string | null;
     executionTargetId?: string | null;
+    automaticOrchestrationEnabled?: boolean;
   } = {},
 ) => {
   const environmentPath = userEnvironmentPath(options.pendingWorkspace ?? currentWorkspace());
@@ -13504,6 +13505,7 @@ const addExpertChatPane = (
     accountId: accountId ?? selectedAccountId ?? settings?.defaultAccountId ?? null,
     pendingWorkspace: environmentPath,
     mode: options.mode,
+    automaticOrchestrationEnabled: options.automaticOrchestrationEnabled,
     executionTargetId: options.executionTargetId === undefined
       ? workspaceExecutionTargetIdForPath(environmentPath)
       : normalizeWorkspaceExecutionTargetId(options.executionTargetId),
@@ -13616,6 +13618,10 @@ const syncOrchestrationChatPanes = (): {
   let changed = false;
   let missingDiscussions = false;
   const runsById = new Map(orchestrations.map((run) => [run.id, run]));
+  const activeEnvironment = userEnvironmentPath(currentWorkspace());
+  const activeEnvironmentId = activeEnvironment
+    ? workspaceIdForPath(activeEnvironment)
+    : null;
 
   if (orchestrationsLoaded) {
     expertChatPanes = expertChatPanes.filter((pane) => {
@@ -13635,17 +13641,45 @@ const syncOrchestrationChatPanes = (): {
     });
   }
 
-  const boundRunIds = new Set(
-    expertChatPanes
-      .map((pane) => pane.orchestrationId)
-      .filter((id): id is string => !!id),
-  );
-  boundRunIds.forEach((runId) => {
-    const run = runsById.get(runId);
-    if (!run) return;
+  orchestrations.forEach((run) => {
     const groupProjectDir = orchestrationRequestedProjectDir(run);
+    const groupEnvironment = userEnvironmentPath(groupProjectDir);
+    const alreadyLinked = expertChatPanes.some((pane) => pane.orchestrationId === run.id);
+    // Une orchestration peut avoir ete lancee dans un autre onglet ou avant un
+    // rechargement. La liste serveur est alors la seule source de verite : on
+    // adopte les equipes de l'environnement ouvert sans materialiser les chats
+    // de tous les environnements quand leur nombre devient important.
+    if (!groupEnvironment) return;
+    if (
+      !alreadyLinked
+      && run.status === "completed"
+      && (
+        !activeEnvironmentId
+        || workspaceIdForPath(groupEnvironment) !== activeEnvironmentId
+      )
+    ) return;
     const taskIds = new Set(run.tasks.map((task) => task.id));
     const testerIds = new Set(run.testers.map((tester) => tester.id));
+
+    let orchestratorPane = expertChatPanes.find(
+      (pane) =>
+        pane.orchestrationId === run.id
+        && pane.orchestrationRole === "orchestrator"
+        && !pane.orchestrationTesterId,
+    );
+    if (!orchestratorPane) {
+      orchestratorPane = createExpertChatPane(null, {
+        accountId: orchestrationOrchestratorAccountId(run),
+        pendingWorkspace: groupProjectDir,
+        mode: "build",
+        orchestrationId: run.id,
+        orchestrationRole: "orchestrator",
+        orchestrationTaskId: null,
+        orchestrationTesterId: null,
+      });
+      expertChatPanes.push(orchestratorPane);
+      changed = true;
+    }
 
     expertChatPanes
       .filter((pane) => pane.orchestrationId === run.id)
@@ -26609,6 +26643,11 @@ const renderNewChatModal = () => {
             <div><small>Tâche à exécuter</small><strong>${escapeHtml(pendingTaskTitle)}</strong></div>
           </aside>` : ""}
           <section class="modal-section">
+            ${newChatGroupIntent ? `<label class="new-chat-group-objective">
+              <span>Tâche à répartir</span>
+              <textarea id="newChatGroupObjective" rows="4" maxlength="12000" required placeholder="Décrivez le résultat attendu ; l’orchestrateur le divisera en sous-tâches indépendantes.">${escapeHtml(newChatPendingPrompt ?? "")}</textarea>
+              <small>Le groupe démarre immédiatement avec un orchestrateur, jusqu’à ${MAX_ORCHESTRATION_WORKER_COUNT} workers utiles et un testeur.</small>
+            </label>` : ""}
             <span id="newChatAccountStatus" class="visually-hidden" role="status" aria-live="polite"></span>
             <aside class="new-chat-routing-summary ${automaticRouting ? "is-automatic" : "is-manual"}">
               <span class="new-chat-routing-icon" aria-hidden="true"><i data-lucide="sparkles"></i></span>
@@ -26689,11 +26728,11 @@ const renderNewChatModal = () => {
         <footer class="modal-actions">
           <button class="tool-button" id="cancelNewChat">Annuler</button>
           <button class="tool-button primary new-chat-confirm" id="confirmNewChat" aria-describedby="newChatAutoStatus" ${account && environmentPath && !newChatBestQuotaInFlight ? "" : "disabled"}>
-            <i data-lucide="${newChatBestQuotaInFlight ? "loader-circle" : pendingTaskTitle ? "play" : "plus"}"></i>
+            <i data-lucide="${newChatBestQuotaInFlight ? "loader-circle" : pendingTaskTitle || newChatGroupIntent ? "play" : "plus"}"></i>
             <span>${newChatBestQuotaInFlight
               ? "Préparation…"
               : pendingTaskTitle ? "Lancer l’exécution"
-                : newChatGroupIntent ? "Ouvrir l’orchestrateur" : "Ouvrir le chat"}</span>
+                : newChatGroupIntent ? "Lancer le groupe" : "Ouvrir le chat"}</span>
           </button>
         </footer>
       </section>
@@ -30660,8 +30699,8 @@ const setNewChatBestQuotaButtonBusy = (busy: boolean) => {
   button.setAttribute("aria-busy", String(busy));
   button.querySelector("svg")?.classList.toggle("is-spinning", busy);
   document
-    .querySelectorAll<HTMLInputElement | HTMLSelectElement>(
-      "#newChatModel, #newChatMode, #newChatProxy, #newChatExecutionTarget",
+    .querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>(
+      "#newChatGroupObjective, #newChatModel, #newChatMode, #newChatProxy, #newChatExecutionTarget",
     )
     .forEach((control) => {
       control.disabled = busy || !newChatAccountId;
@@ -30675,7 +30714,9 @@ const setNewChatBestQuotaButtonBusy = (busy: boolean) => {
   if (label) {
     label.textContent = busy
       ? "Préparation…"
-      : newChatPendingTaskTitle ? "Lancer l’exécution" : "Ouvrir le chat";
+      : newChatPendingTaskTitle
+        ? "Lancer l’exécution"
+        : newChatGroupIntent ? "Lancer le groupe" : "Ouvrir le chat";
   }
   const title = document.querySelector<HTMLElement>("#newChatRoutingTitle");
   if (title) {
@@ -30794,7 +30835,11 @@ const openNewChatModal = (
   void refreshLimitStatus(true);
   if (!window.matchMedia("(max-width: 860px)").matches) {
     window.setTimeout(() => {
-      document.querySelector<HTMLInputElement>("#newChatModel")?.focus();
+      if (newChatGroupIntent) {
+        document.querySelector<HTMLTextAreaElement>("#newChatGroupObjective")?.focus();
+      } else {
+        document.querySelector<HTMLInputElement>("#newChatModel")?.focus();
+      }
     }, 0);
   }
 };
@@ -30822,6 +30867,17 @@ const confirmNewChatModal = async () => {
   if (!account) {
     statusText = "Ajoute d'abord un compte agent";
     render();
+    return;
+  }
+  const groupIntent = newChatGroupIntent;
+  const groupObjectiveInput = document.querySelector<HTMLTextAreaElement>("#newChatGroupObjective");
+  const groupObjective = groupIntent
+    ? (groupObjectiveInput?.value ?? newChatPendingPrompt ?? "").trim()
+    : null;
+  if (groupIntent && !groupObjective) {
+    groupObjectiveInput?.setCustomValidity("Décrivez la tâche que l’orchestrateur doit répartir");
+    groupObjectiveInput?.reportValidity();
+    statusText = "Décrivez la tâche du groupe";
     return;
   }
   const modelInput = document.querySelector<HTMLInputElement>("#newChatModel");
@@ -30871,8 +30927,8 @@ const confirmNewChatModal = async () => {
   }
   selectedAccountId = account.id;
   const pendingWorkspace = newChatPendingWorkspace;
-  const pendingPrompt = newChatPendingPrompt;
-  const pendingPromptAutoSend = newChatPendingPromptAutoSend;
+  const pendingPrompt = groupObjective ?? newChatPendingPrompt;
+  const pendingPromptAutoSend = groupIntent || newChatPendingPromptAutoSend;
   forgetDialogTrigger("new-chat");
   newChatModalOpen = false;
   newChatGroupIntent = false;
@@ -30947,6 +31003,7 @@ const confirmNewChatModal = async () => {
     mode,
     pendingWorkspace,
     executionTargetId,
+    automaticOrchestrationEnabled: groupIntent ? true : undefined,
   });
   if (pane && pendingPrompt) {
     if (pendingPromptAutoSend) {
@@ -32722,6 +32779,11 @@ const bindUi = () => {
     newChatModelInput.setCustomValidity("");
     newChatModel = newChatModelInput.value;
     if (newChatAccountId) newChatModelDrafts.set(newChatAccountId, newChatModel);
+  });
+  const newChatGroupObjective = document.querySelector<HTMLTextAreaElement>("#newChatGroupObjective");
+  newChatGroupObjective?.addEventListener("input", () => {
+    newChatGroupObjective.setCustomValidity("");
+    newChatPendingPrompt = newChatGroupObjective.value;
   });
   document.querySelector<HTMLSelectElement>("#newChatMode")?.addEventListener("change", (event) => {
     newChatMode = (event.currentTarget as HTMLSelectElement).value as ChatMode;

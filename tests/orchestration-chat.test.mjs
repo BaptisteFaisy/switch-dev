@@ -272,11 +272,30 @@ test("un chat normal force immédiatement l'équipe quand le bouton orchestrateu
   assert.match(main, /run\.tasks\.forEach\(\(task\) =>/);
   assert.match(main, /orchestrationRole: "worker"/);
   assert.match(main, /syncOrchestrationChatPanes/);
-  assert.match(main, /activeView === "chat" && expertChatPanes\.some\(\(pane\) => !!pane\.orchestrationId\)/);
+  assert.match(main, /activeView === "orchestration"\s*\|\| activeView === "chat"/);
   assert.match(backend, /pub orchestrator_session_id: Option<String>/);
   assert.match(backend, /orchestrator_session_id: orchestrator_session_id\.clone\(\)/);
   assert.match(backend, /session_is_busy\(&account_id, session_id\)/);
   assert.match(backend, /Ok\(true\) => return/);
+});
+
+test("les equipes actives sont retrouvees apres reload et dans un autre onglet", () => {
+  const syncStart = main.indexOf("const syncOrchestrationChatPanes =");
+  const syncEnd = main.indexOf("const releaseOrchestrationChatPanes =", syncStart);
+  const sync = main.slice(syncStart, syncEnd);
+
+  assert.match(sync, /orchestrations\.forEach\(\(run\) =>/);
+  assert.match(sync, /const activeEnvironment = userEnvironmentPath\(currentWorkspace\(\)\)/);
+  assert.match(sync, /const alreadyLinked = expertChatPanes\.some/);
+  assert.match(sync, /if \(!groupEnvironment\) return/);
+  assert.match(sync, /!alreadyLinked\s*&& run\.status === "completed"/);
+  assert.match(sync, /workspaceIdForPath\(groupEnvironment\) !== activeEnvironmentId/);
+  assert.match(sync, /if \(!orchestratorPane\) \{[\s\S]*?orchestrationRole: "orchestrator"/);
+  assert.doesNotMatch(sync, /boundRunIds\.forEach/);
+  assert.match(
+    main,
+    /activeView === "orchestration"\s*\|\| activeView === "chat"[\s\S]*?startOrchestrationsPoll\(\)/,
+  );
 });
 
 test("desktop et serveur partagent le contrat API orchestré", () => {
@@ -294,6 +313,11 @@ test("desktop et serveur partagent le contrat API orchestré", () => {
   assert.match(server, /"\/orchestrations\/:id\/control"/);
   assert.match(server, /"\/orchestrations\/:id\/account"/);
   assert.match(server, /check_admin_header\(&state, &headers\)/);
+  assert.match(server, /fn orchestration_access_project_dir\(run: &OrchestrationSnapshot\)/);
+  assert.match(server, /run\.access_project_dir[\s\S]*?\.or\(run\.requested_project_dir\.as_deref\(\)\)/);
+  assert.match(server, /request\.access_project_dir = Some\(authorized_project_dir/);
+  assert.match(server, /request\.owner_id = actor\.user\(\)\.map/);
+  assert.match(server, /authorize_existing_environment\(identity, orchestration_access_project_dir\(run\)\)/);
 });
 
 test("le pilotage est asynchrone et concurrent pour les grandes équipes", () => {

@@ -238,6 +238,16 @@ test("la colonne de gauche rend des blocs d'equipe et distingue l'orchestrateur"
   assert.match(style, /\.chat-side-status--orchestrator\s*\{[^}]*transform:\s*rotate\(45deg\)/s);
 });
 
+test("Nouveau groupe exige une tache et lance directement l'orchestrateur", () => {
+  assert.match(main, /id="newChatGroupObjective"[^>]*required/);
+  assert.match(main, /newChatGroupObjective[\s\S]*newChatPendingPrompt = newChatGroupObjective\.value/);
+  assert.match(main, /const groupIntent = newChatGroupIntent/);
+  assert.match(main, /const pendingPromptAutoSend = groupIntent \|\| newChatPendingPromptAutoSend/);
+  assert.match(main, /automaticOrchestrationEnabled: groupIntent \? true : undefined/);
+  assert.match(main, /newChatGroupIntent \? "Lancer le groupe" : "Ouvrir le chat"/);
+  assert.match(style, /\.new-chat-group-objective textarea\s*\{/);
+});
+
 test("l'activite d'un chat ne change jamais sa place dans l'environnement", () => {
   const discussions = [
     { sessionId: "ancien", startedAt: 100, lastActivity: 900 },

@@ -128,7 +128,7 @@ test("un nouveau chat attribue l'agent automatiquement avec un reglage facultati
   // La fenetre cree le pane avec le routage, le modele et le mode retenus.
   assert.match(
     main,
-    /addExpertChatPane\(account\.id, \{\s*mode,\s*pendingWorkspace,\s*executionTargetId,\s*\}\)/,
+    /addExpertChatPane\(account\.id, \{\s*mode,\s*pendingWorkspace,\s*executionTargetId,\s*automaticOrchestrationEnabled: groupIntent \? true : undefined,\s*\}\)/,
   );
   assert.match(main, /accountId: accountId \?\?/);
   assert.match(style, /\.new-chat-account-option/);

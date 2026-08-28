@@ -57,7 +57,7 @@ use crate::{
     mobile_push::{self, ConfigureMobilePushRequest, RegisterMobilePushDeviceRequest},
     orchestration::{
         ControlOrchestrationRequest, CreateOrchestrationRequest, OrchestrationManager,
-        PromoteAutonomousAgentRequest, ReassignOrchestrationAccountRequest,
+        OrchestrationSnapshot, PromoteAutonomousAgentRequest, ReassignOrchestrationAccountRequest,
     },
     pool::{self, AccountStatus, PoolManager},
     private_messages::{
@@ -8653,7 +8653,7 @@ fn authorize_orchestration_resource(
     })?;
     state
         .workspace_access
-        .authorize_existing_environment(identity, &run.project_dir)
+        .authorize_existing_environment(identity, orchestration_access_project_dir(run))
         .map(|_| ())
         .map_err(|_| {
             api_error(
@@ -8662,6 +8662,13 @@ fn authorize_orchestration_resource(
                 &state.config,
             )
         })
+}
+
+fn orchestration_access_project_dir(run: &OrchestrationSnapshot) -> &str {
+    run.access_project_dir
+        .as_deref()
+        .or(run.requested_project_dir.as_deref())
+        .unwrap_or(&run.project_dir)
 }
 
 async fn api_list_autonomous_agents(
@@ -9149,7 +9156,10 @@ async fn api_promote_autonomous_agent_to_orchestration(
         Ok(path) => path,
         Err(response) => return response,
     };
-    request.project_dir = display_path(&resolved);
+    let authorized_project_dir = display_path(&resolved);
+    request.project_dir = authorized_project_dir.clone();
+    request.access_project_dir = Some(authorized_project_dir.clone());
+    request.owner_id = actor.user().map(|identity| identity.id.clone());
     let orchestration = state.orchestration.clone();
     let autonomous = state.autonomous.clone();
     match tokio::task::spawn_blocking(move || {
@@ -9183,7 +9193,7 @@ async fn api_list_orchestrations(
         runs.retain(|run| {
             state
                 .workspace_access
-                .authorize_existing_environment(identity, &run.project_dir)
+                .authorize_existing_environment(identity, orchestration_access_project_dir(run))
                 .is_ok()
         });
     }
@@ -9211,7 +9221,11 @@ async fn api_create_orchestration(
         Ok(path) => path,
         Err(response) => return response,
     };
-    request.project_dir = display_path(&resolved);
+    let authorized_project_dir = display_path(&resolved);
+    request.project_dir = authorized_project_dir.clone();
+    request.context_project_dir = Some(authorized_project_dir.clone());
+    request.access_project_dir = Some(authorized_project_dir);
+    request.owner_id = actor.user().map(|identity| identity.id.clone());
     let manager = state.orchestration.clone();
     match tokio::task::spawn_blocking(move || manager.create(request)).await {
         Ok(Ok(value)) => json_response(value),
