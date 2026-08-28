@@ -80,6 +80,25 @@ New-Item -ItemType Directory -Path @(
   $deploymentRunPath
 ) -Force | Out-Null
 
+# Verrou partage de deploiement : couvre la fenetre ou ce launcher lit le
+# paquet (binaire + dist) depuis app\ et le copie dans le cache interne. Un
+# autre agent est alors susceptible de remplacer son paquet dans app\ ; ce
+# verrou empeche de demarrer un ensemble executable/frontend incoherent.
+# Le redemarrage (restart-switch-development.ps1) tient ce meme mutex pendant
+# tout son cycle, et l'arret du serveur se fait sous la protection du port 18082
+# deja verifiee plus haut, donc il n'y a ni interblocage ni course sur app\.
+$deployMutex = [Threading.Mutex]::new($false, "Local\SwitchDevelopmentDeploy-18082")
+$deployLockHeld = $false
+try {
+  try {
+    $deployLockHeld = $deployMutex.WaitOne([TimeSpan]::FromSeconds(60))
+  } catch [Threading.AbandonedMutexException] {
+    $deployLockHeld = $true
+  }
+  if (-not $deployLockHeld) {
+    throw "Un autre deploiement Switch developpement est en cours ; demarrage annule, aucun paquet incoherent servi."
+  }
+
 $sourceServerHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $sourceServerPath).Hash
 $sourceIndexPath = Join-Path $sourceStaticPath "index.html"
 $sourceIndexHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $sourceIndexPath).Hash
@@ -190,6 +209,12 @@ for ($attempt = 0; $attempt -lt 40; $attempt += 1) {
 }
 
 throw "Switch developpement n'a pas repondu a /healthz dans le delai prevu."
+} finally {
+  if ($deployLockHeld) {
+    $deployMutex.ReleaseMutex()
+  }
+  $deployMutex.Dispose()
+}
 } finally {
   if ($launchLockHeld) {
     $launchMutex.ReleaseMutex()

@@ -47,3 +47,35 @@ Exemple de tâche enregistrée (en attente) :
 - Pour appliquer un nouveau binaire au serveur de développement, utiliser `scripts/restart-switch-development.ps1`. Ce script attend que `activeChatTurns + activeTerminals` soit nul, arme une courte lease de drain, puis redémarre.
 - Ne jamais arrêter directement `cst-server.exe`, utiliser `Stop-Process`, `taskkill` ou redémarrer la tâche planifiée tant qu’un chat ou un terminal est actif. L’option `-Force` du script de redémarrage n’est autorisée que sur demande explicite de l’utilisateur.
 - Un build peut être préparé pendant un chat, mais sa bascule vers le runtime ne doit avoir lieu qu’après l’inactivité constatée par le script protégé.
+
+# Coordination multi-agents du déploiement
+
+Le nœud de développement est partagé : plusieurs agents construisent et déploient en parallèle sur le même paquet `E:\AppsData\SwitchDevelopment\app`. Sans coordination, un agent peut écraser le binaire d'un autre entre sa construction et son redémarrage.
+
+- Un **verrou de déploiement partagé** (`Local\SwitchDevelopmentDeploy-18082`) est tenu par `start-switch-development-runtime.ps1` pendant la mise en cache du paquet et par `restart-switch-development.ps1` pendant la bascule (arrêt du serveur). Il garantit qu'on ne sert jamais un paquet incomplet ni un mélange (binaire d'un agent + `dist` d'un autre).
+- Tout agent qui doit déposer un nouveau `cst-server.exe` / `dist` dans `app\` doit d'abord acquérir le verrou `Local\SwitchDevelopmentDeploy-18082` (ou réutiliser un wrapper qui le fait), le temps de la copie, puis le relâcher avant d'invoquer `restart-switch-development.ps1`. Cela évite d'écraser le paquet pendant qu'un autre agent le lit ou le déploie. Exemple PowerShell :
+  ```powershell
+  $m = [Threading.Mutex]::new($false, 'Local\SwitchDevelopmentDeploy-18082')
+  $held = $false
+  try {
+    $held = $m.WaitOne(300)
+    if (-not $held) { throw 'Un autre déploiement de développement est en cours ; attendre.' }
+    # copie de cst-server.exe et dist\ dans app\ ici
+  } finally { if ($held) { $m.ReleaseMutex() }; $m.Dispose() }
+  ```
+- Ne jamais écraser `app\cst-server.exe` ou `app\dist\` pendant qu'un redémarrage est en cours (les scripts tiennent le verrou à ce moment ; respecter leur étiquette).
+- Avant de redéployer, vérifier que l'on ne repart pas d'un état qui retirerait des changements déjà en production : `git log --oneline -3` (clone `app`) et comparer avec le paquet déployé (`SwitchDevelopmentRuntime\releases`).
+
+# Obligation : inclure le travail des autres chats avant de déployer
+
+Le nœud accueille plusieurs chats en parallèle (des agents `codex.exe` et le bureau tournent simultanément). **Avant toute bascule vers le runtime** (créer un build, le déposer dans `app\`, puis `restart-switch-development.ps1`), l'agent a l'obligation de **prendre connaissance de l'activité des autres chats et d'inclure leurs changements**, afin de ne jamais écraser ou retirer leur travail.
+
+- Lancer systématiquement `scripts\check-other-agents.ps1 -Strict`. Ce script affiche, de façon objective :
+  1. les **commits git récents** du clone `app` (activité des autres chats),
+  2. les **changements non commités** (quelqu'un est en train de travailler),
+  3. les **builds déployés récents** (qui peuvent être d'autres chats),
+  4. les **fichiers cibles que l'agent s'apprête à remplacer** (`-OverlapPaths src/main.ts,src-tauri/src/gmail.rs`).
+  En présence de changements non commités ou d'un chevauchement de fichiers, il renvoie le code de sortie **2** et interdit le déploiement. Les commits déjà dans `HEAD` et les builds récents sont signalés à titre informatif, puisqu'ils doivent être vérifiés mais sont déjà observables.
+- `restart-switch-development.ps1 -EnforceCollaboration` appelle ce check au moment de la bascule et **refuse de redémarrer le serveur** si une concurrence active est détectée (commits récents, working tree sale, builds concurrents). Sans `-EnforceCollaboration`, le check est affiché à titre informatif.
+- Si une concurrence est signalée : **intégrer** les changements des autres chats avant de déployer — récupérer leurs commits (`git log` / dernière release) et ne pas les retirer ; vérifier qu'aucun fichier qu'on remplace ne leur appartient (`-OverlapPaths`). Le déploiement doit « s'empiler au-dessus » de leur travail, pas le remplacer, sauf demande explicite de l'utilisateur.
+- Le watchdog (relais automatique du serveur) n'est jamais bloqué par cette obligation : elle ne s'applique qu'aux bascules déclenchées par un agent ou l'utilisateur, pas au redémarrage d'entretien.

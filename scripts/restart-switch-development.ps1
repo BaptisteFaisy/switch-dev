@@ -4,7 +4,12 @@ param(
   [int]$WaitTimeoutSeconds = 1800,
   [ValidateRange(5, 300)]
   [int]$DrainLeaseSeconds = 30,
-  [switch]$Force
+  [switch]$Force,
+  # Obligation collaborative : avant la bascule, lancer check-other-agents.ps1
+  # pour prendre connaissance de l'activite des autres chats et refuser de
+  # deployer si des changements concurrents sont detectes, sauf demande de
+  # l'utilisateur. Sans ce switch, le check n'est affiche qu'a titre informatif.
+  [switch]$EnforceCollaboration
 )
 
 Set-StrictMode -Version Latest
@@ -118,7 +123,49 @@ try {
   if ($listener) {
     $serverProcess = Get-CimInstance Win32_Process -Filter "ProcessId=$([int]$listener.OwningProcess)"
     Assert-ExpectedServerProcess -Process $serverProcess
-    Stop-Process -Id ([int]$serverProcess.ProcessId) -Force -ErrorAction Stop
+
+    # Verrou partage de deploiement : maintient la bascule (arret + relance)
+    # exclusive avec tout autre deploiement en cours sur le meme paquet app\.
+    # Comme le launcher tient ce meme mutex pendant sa mise en cache, un launch
+    # concurrent (watchdog) attendra la fin de la bascule avant de relire app\.
+    $deployMutex = [Threading.Mutex]::new($false, "Local\SwitchDevelopmentDeploy-18082")
+    $deployLockHeld = $false
+    try {
+      try {
+        $deployLockHeld = $deployMutex.WaitOne([TimeSpan]::FromSeconds(90))
+      } catch [Threading.AbandonedMutexException] {
+        $deployLockHeld = $true
+      }
+      if (-not $deployLockHeld) {
+        throw "Un autre deploiement Switch developpement est en cours ; bascule differee."
+      }
+
+      # Obligation collaborative : rendre visible l'activite des autres chats
+      # avant de basculer. Sans -EnforceCollaboration, c'est informatif ; avec,
+      # une concurrence active refusera la bascule (sauf confirmation utilisateur).
+      $checkScript = Join-Path $scriptRoot "check-other-agents.ps1"
+      if (Test-Path -LiteralPath $checkScript) {
+        # Processus enfant separe : le exit du check ne doit pas tuer le restart.
+        $checkArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $checkScript)
+        if ($EnforceCollaboration) { $checkArgs += '-Strict' }
+        & powershell @checkArgs 2>&1 | ForEach-Object { Write-Host $_ }
+        $collaborationExit = $LASTEXITCODE
+        if ($EnforceCollaboration -and $collaborationExit -ne 0) {
+          throw "Concurrence detectee avec d'autres chats ; bascule annulee. Integre leurs changements, ou relance sans -EnforceCollaboration."
+        }
+      }
+      else {
+        Write-Host "[restart] check-other-agents.ps1 absent ; l'agent doit verifier manuellement l'activite des autres chats."
+      }
+
+      Stop-Process -Id ([int]$serverProcess.ProcessId) -Force -ErrorAction Stop
+    }
+    finally {
+      if ($deployLockHeld) {
+        $deployMutex.ReleaseMutex()
+      }
+      $deployMutex.Dispose()
+    }
   }
 
   $stopDeadline = (Get-Date).AddSeconds(15)
