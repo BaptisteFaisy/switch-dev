@@ -18,6 +18,12 @@ test("le serveur de developpement tourne depuis le disque interne", () => {
 
 test("le launcher rend la main au watchdog sans quitter son processus", () => {
   assert.doesNotMatch(start, /\bexit\s+0\b/i);
+  const launchMutex = start.indexOf("SwitchDevelopmentLaunch-18082");
+  const listenerCheck = start.indexOf("Get-NetTCPConnection -State Listen -LocalPort 18082");
+  const processStart = start.indexOf("Start-Process -FilePath $runtimeServerPath");
+  assert.ok(launchMutex >= 0 && listenerCheck > launchMutex && processStart > listenerCheck);
+  assert.match(start, /WaitOne\(\[TimeSpan\]::FromSeconds\(30\)\)/);
+  assert.match(start, /ReleaseMutex\(\)/);
   assert.match(start, /Switch developpement est deja disponible[\s\S]*?return/);
   assert.match(watch, /while \(\$true\)/);
   assert.match(watch, /Wait-Process -Id \$serverPid/);

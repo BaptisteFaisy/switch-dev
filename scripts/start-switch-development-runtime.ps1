@@ -13,6 +13,18 @@ $sourceServerPath = Join-Path $deploymentRoot "app\cst-server.exe"
 $sourceStaticPath = Join-Path $deploymentRoot "app\dist"
 $dataPath = Join-Path $deploymentRoot "data"
 $deploymentRunPath = Join-Path $deploymentRoot "run"
+$launchMutex = [Threading.Mutex]::new($false, "Local\SwitchDevelopmentLaunch-18082")
+$launchLockHeld = $false
+
+try {
+  try {
+    $launchLockHeld = $launchMutex.WaitOne([TimeSpan]::FromSeconds(30))
+  } catch [Threading.AbandonedMutexException] {
+    $launchLockHeld = $true
+  }
+  if (-not $launchLockHeld) {
+    throw "Un autre lancement Switch developpement est deja en cours."
+  }
 
 # Une reconstruction de developpement peut remplacer momentanement le paquet
 # principal. Utiliser le dernier backup complet evite de demarrer un ensemble
@@ -178,3 +190,9 @@ for ($attempt = 0; $attempt -lt 40; $attempt += 1) {
 }
 
 throw "Switch developpement n'a pas repondu a /healthz dans le delai prevu."
+} finally {
+  if ($launchLockHeld) {
+    $launchMutex.ReleaseMutex()
+  }
+  $launchMutex.Dispose()
+}
