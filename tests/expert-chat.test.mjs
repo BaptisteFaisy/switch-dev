@@ -244,6 +244,11 @@ test("le reglage du mur principal propose Mes chats par defaut et reste persista
   assert.match(main, /data-chat-display-mode="available"/);
   assert.match(
     main,
+    /codex-switch-terminal\.expert-chat-display-mode\.v2/,
+    "la nouvelle preference doit ignorer l'ancien defaut Tous deja memorise",
+  );
+  assert.match(
+    main,
     /localStorage\.setItem\(EXPERT_CHAT_DISPLAY_MODE_STORAGE_KEY, nextMode\)/,
   );
   assert.match(main, /expertChatDisplayMode = loadExpertChatDisplayMode\(\)/);

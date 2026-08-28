@@ -3515,8 +3515,10 @@ const LEGACY_OPEN_TERMINALS_STORAGE_KEYS = [
 ] as const;
 const EXPERT_GRID_LAYOUT_STORAGE_KEY = "codex-switch-terminal.expert-grid-layout.v1";
 const EXPERT_CHATS_PER_PAGE_STORAGE_KEY = "codex-switch-terminal.expert-chats-per-page.v1";
+// v2 oublie l'ancien choix implicite « Tous » afin que les installations
+// existantes adoptent elles aussi le nouveau défaut « Mes chats » une fois.
 const EXPERT_CHAT_DISPLAY_MODE_STORAGE_KEY =
-  "codex-switch-terminal.expert-chat-display-mode.v1";
+  "codex-switch-terminal.expert-chat-display-mode.v2";
 const CHAT_COMPOSER_SELECTORS_STORAGE_KEY =
   "codex-switch-terminal.chat-composer-selectors-enabled.v1";
 const EXPERT_CHAT_TOOLBAR_HIDDEN_STORAGE_KEY =
