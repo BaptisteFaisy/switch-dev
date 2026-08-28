@@ -197,6 +197,17 @@ test("la vue dédiée crée et expose chaque chat de l'équipe", () => {
   assert.match(main, /control_orchestration/);
   assert.match(main, /delete_orchestration/);
   assert.match(main, /data-orchestration-open-session/);
+  assert.match(main, /class="orchestration-member-copy orchestration-member-open"/);
+  assert.match(style, /\.orchestration-member-open:focus-visible/);
+  assert.match(main, /openOrchestrationSession\(accountId, sessionId\)/);
+  assert.match(main, /const orchestrationSessionTarget/);
+  assert.match(main, /dismissedOrchestrationWorkerPanes\.delete/);
+  assert.match(main, /dismissedOrchestrationTesterPanes\.delete/);
+  assert.match(main, /sessionId,[\s\S]*?orchestrationId: target\.run\.id/);
+  assert.match(main, /activateExpertChatPane\(pane\)/);
+  assert.match(main, /transcript en cours d’initialisation/);
+  assert.match(main, /if \(existing\?\.orchestrationId\) \{[\s\S]*?openDiscussionInExpert\(discussion, true\)/);
+  assert.match(main, /pane\.resumeSessionId = normalizedSessionId/);
   assert.match(main, /Preuve du travailleur/);
   assert.match(main, /Dernière revue orchestrateur/);
   assert.match(main, /Conversation du groupe/);

@@ -19409,6 +19409,9 @@ body.autonomous-monitor-dragging { cursor: grabbing; user-select: none; }
 .orchestration-member.orchestrator .orchestration-member-avatar { border-color: rgba(91, 231, 208, .17); color: #79d9c9; background: rgba(54, 202, 178, .07); }
 .orchestration-member-avatar svg { width: 15px; height: 15px; }
 .orchestration-member-copy { display: grid; min-width: 0; gap: 1px; }
+.orchestration-member-open { width: 100%; padding: 0; border: 0; outline: none; background: transparent; text-align: left; cursor: pointer; }
+.orchestration-member-open:hover strong { color: #edf5f3; }
+.orchestration-member-open:focus-visible { border-radius: 4px; box-shadow: 0 0 0 2px rgba(91, 231, 208, .42); }
 .orchestration-member-copy small { color: #66cbb9; font-size: 6px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
 .orchestration-member-copy strong,
 .orchestration-member-copy span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

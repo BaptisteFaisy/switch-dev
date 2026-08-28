@@ -11357,7 +11357,15 @@ const openDiscussionChat = async (discussion: DiscussionSummary) => {
       pane.discussion?.accountId === discussion.accountId
       && pane.discussion.sessionId === discussion.sessionId,
   );
+  // Les workers et testeurs utilisent un sandbox prive qui ne doit jamais
+  // remplacer l'environnement principal au simple clic. Leur panneau est deja
+  // rattache au bon contexte : l'afficher directement rend le transcript
+  // consultable sans passer par la restauration d'un chat utilisateur.
   if (existing && minimizeActiveBusyExpertChat(existing)) return;
+  if (existing?.orchestrationId) {
+    openDiscussionInExpert(discussion, true);
+    return;
+  }
   try {
     await restoreDiscussionFolder(discussion);
     openDiscussionInExpert(discussion, true);
@@ -13536,14 +13544,19 @@ const attachOrchestrationDiscussion = (
   accountId: string,
 ): boolean => {
   let changed = false;
+  const normalizedSessionId = sessionId?.trim() || null;
+  if (normalizedSessionId && pane.resumeSessionId !== normalizedSessionId) {
+    pane.resumeSessionId = normalizedSessionId;
+    changed = true;
+  }
   if (pane.accountId !== accountId) {
     pane.accountId = accountId;
     void loadChatModelCatalog(accountId);
     changed = true;
   }
   const attachedDiscussionMatches = !!pane.discussion
-    && !!sessionId
-    && discussionForSession([pane.discussion], accountId, sessionId) !== null;
+    && !!normalizedSessionId
+    && discussionForSession([pane.discussion], accountId, normalizedSessionId) !== null;
   if (
     pane.discussion
     && !attachedDiscussionMatches
@@ -13556,8 +13569,8 @@ const attachOrchestrationDiscussion = (
     pane.error = null;
     changed = true;
   }
-  if (!sessionId || pane.discussion) return changed;
-  const discussion = discussionForSession(allDiscussions(), accountId, sessionId);
+  if (!normalizedSessionId || pane.discussion) return changed;
+  const discussion = discussionForSession(allDiscussions(), accountId, normalizedSessionId);
   if (!discussion) return changed;
   pane.discussion = discussion;
   pane.contextUsage = null;
@@ -15125,6 +15138,120 @@ const openDiscussionForSession = (accountId: string, sessionId: string) => {
     return;
   }
   openDiscussionHistory(sessionId);
+};
+
+type OrchestrationSessionTarget = {
+  run: OrchestrationSnapshot;
+  accountId: string;
+  role: "orchestrator" | "worker";
+  taskId: string | null;
+  testerId: string | null;
+  label: string;
+};
+
+const orchestrationSessionTarget = (
+  sessionId: string,
+): OrchestrationSessionTarget | null => {
+  const normalizedSessionId = sessionId.trim();
+  for (const run of orchestrations) {
+    if (run.orchestratorSessionId?.trim() === normalizedSessionId) {
+      return {
+        run,
+        accountId: orchestrationOrchestratorAccountId(run),
+        role: "orchestrator",
+        taskId: null,
+        testerId: null,
+        label: "Chat orchestrateur",
+      };
+    }
+    const tester = run.testers.find(
+      (candidate) => candidate.sessionId?.trim() === normalizedSessionId,
+    );
+    if (tester) {
+      return {
+        run,
+        accountId: orchestrationOrchestratorAccountId(run),
+        role: "orchestrator",
+        taskId: null,
+        testerId: tester.id,
+        label: `Chat testeur ${tester.position}`,
+      };
+    }
+    const task = run.tasks.find(
+      (candidate) => candidate.sessionId?.trim() === normalizedSessionId,
+    );
+    if (task) {
+      return {
+        run,
+        accountId: orchestrationWorkerAccountId(run, task),
+        role: "worker",
+        taskId: task.id,
+        testerId: null,
+        label: `Sous-chat worker ${task.position}`,
+      };
+    }
+  }
+  return null;
+};
+
+const openOrchestrationSession = async (
+  requestedAccountId: string,
+  sessionId: string,
+): Promise<void> => {
+  await refreshDiscussions();
+  const target = orchestrationSessionTarget(sessionId);
+  if (!target) {
+    openDiscussionForSession(requestedAccountId, sessionId);
+    return;
+  }
+
+  if (target.taskId) {
+    dismissedOrchestrationWorkerPanes.delete(
+      orchestrationWorkerPaneKey(target.run.id, target.taskId),
+    );
+  } else if (target.testerId) {
+    dismissedOrchestrationTesterPanes.delete(
+      orchestrationTesterPaneKey(target.run.id, target.testerId),
+    );
+  }
+  syncOrchestrationChatPanes();
+
+  let pane = expertChatPanes.find(
+    (candidate) =>
+      candidate.orchestrationId === target.run.id
+      && candidate.orchestrationRole === target.role
+      && candidate.orchestrationTaskId === target.taskId
+      && candidate.orchestrationTesterId === target.testerId,
+  ) ?? null;
+  if (!pane) {
+    pane = createExpertChatPane(null, {
+      accountId: target.accountId,
+      pendingWorkspace: orchestrationRequestedProjectDir(target.run),
+      mode: "build",
+      sessionId,
+      orchestrationId: target.run.id,
+      orchestrationRole: target.role,
+      orchestrationTaskId: target.taskId,
+      orchestrationTesterId: target.testerId,
+    });
+    expertChatPanes.push(pane);
+  }
+  attachOrchestrationDiscussion(pane, sessionId, target.accountId);
+  if (!pane.discussion) {
+    pane.loading = true;
+    pane.error = null;
+  }
+
+  closeMobileOverlays();
+  activeView = "chat";
+  activateExpertChatPane(pane);
+  statusText = pane.discussion
+    ? `${target.label} ouvert`
+    : `${target.label} ouvert · transcript en cours d’initialisation`;
+  persistExpertChats();
+  render();
+  startAllExpertChatWork();
+  if (!pane.discussion) void refreshOrchestrations();
 };
 
 // Rattache une session restauree a son PTY encore vivant sur le noeud.
@@ -21821,12 +21948,15 @@ const renderOrchestrationMember = (
     : task
       ? orchestrationTaskStatusLabel(task.status)
       : "En attente du plan";
+  const memberCopy = sessionId
+    ? `<button type="button" class="orchestration-member-copy orchestration-member-open" data-orchestration-open-session="${escapeAttr(sessionId)}" data-orchestration-account="${escapeAttr(accountId)}" title="Ouvrir le chat de ${escapeAttr(roleName)}"><small>${escapeHtml(roleName)}</small><strong>${escapeHtml(task?.title || (role === "orchestrator" ? "Pilotage, revue et validation" : "Mission en préparation"))}</strong><span>${escapeHtml(status)}</span></button>`
+    : `<div class="orchestration-member-copy"><small>${escapeHtml(roleName)}</small><strong>${escapeHtml(task?.title || (role === "orchestrator" ? "Pilotage, revue et validation" : "Mission en préparation"))}</strong><span>${escapeHtml(status)}</span></div>`;
   const chatAction = sessionId
     ? `<button type="button" class="icon-button" data-orchestration-open-session="${escapeAttr(sessionId)}" data-orchestration-account="${escapeAttr(accountId)}" title="Ouvrir le chat de ${escapeAttr(roleName)}"><i data-lucide="message-square"></i></button>`
     : `<span class="orchestration-member-chat-pending" title="La session apparaîtra au prochain tour"><i data-lucide="clock-3"></i></span>`;
   return `<article class="orchestration-member ${role} ${isCurrent ? "is-current" : ""} ${handoffPending ? "has-handoff" : ""}">
     <span class="orchestration-member-avatar"><i data-lucide="${role === "orchestrator" ? "brain-circuit" : "bot"}"></i></span>
-    <div class="orchestration-member-copy"><small>${escapeHtml(roleName)}</small><strong>${escapeHtml(task?.title || (role === "orchestrator" ? "Pilotage, revue et validation" : "Mission en préparation"))}</strong><span>${escapeHtml(status)}</span></div>
+    ${memberCopy}
     <div class="orchestration-member-state">
       ${isCurrent ? '<b class="orchestration-live-pill"><i></i>En cours</b>' : ""}
       ${handoffPending ? '<b class="orchestration-handoff-pill">Reprise préparée</b>' : handoffCount ? `<b class="orchestration-handoff-pill is-done">${handoffCount} reprise${handoffCount > 1 ? "s" : ""}</b>` : ""}
@@ -21858,9 +21988,12 @@ const renderOrchestrationTesterMember = (
   const chatAction = tester.sessionId
     ? `<button type="button" class="icon-button" data-orchestration-open-session="${escapeAttr(tester.sessionId)}" data-orchestration-account="${escapeAttr(accountId)}" title="Ouvrir le chat de l’orchestrateur testeur ${tester.position}"><i data-lucide="message-square"></i></button>`
     : `<span class="orchestration-member-chat-pending" title="Le chat apparaîtra pendant la conception des tests"><i data-lucide="clock-3"></i></span>`;
+  const memberCopy = tester.sessionId
+    ? `<button type="button" class="orchestration-member-copy orchestration-member-open" data-orchestration-open-session="${escapeAttr(tester.sessionId)}" data-orchestration-account="${escapeAttr(accountId)}" title="Ouvrir le chat de l’orchestrateur testeur ${tester.position}"><small>Orchestrateur testeur ${tester.position}</small><strong>Tests de ${escapeHtml(assigned)}</strong><span>${escapeHtml(orchestrationTesterStatusLabel(tester.status))}</span></button>`
+    : `<div class="orchestration-member-copy"><small>Orchestrateur testeur ${tester.position}</small><strong>Tests de ${escapeHtml(assigned)}</strong><span>${escapeHtml(orchestrationTesterStatusLabel(tester.status))}</span></div>`;
   return `<article class="orchestration-member orchestrator tester status-${escapeAttr(tester.status)} ${isCurrent ? "is-current" : ""}">
     <span class="orchestration-member-avatar"><i data-lucide="flask-conical"></i></span>
-    <div class="orchestration-member-copy"><small>Orchestrateur testeur ${tester.position}</small><strong>Tests de ${escapeHtml(assigned)}</strong><span>${escapeHtml(orchestrationTesterStatusLabel(tester.status))}</span></div>
+    ${memberCopy}
     <div class="orchestration-member-state">${isCurrent ? '<b class="orchestration-live-pill"><i></i>En cours</b>' : tester.status === "passed" ? '<b class="orchestration-handoff-pill is-done">Validé</b>' : ""}</div>
     <div class="orchestration-member-account"><span>Adresse e-mail / compte</span><strong>${escapeHtml(orchestrationAccountLabel(accountId))}</strong><small>Même compte que l’orchestrateur principal pendant le test</small></div>
     <div class="orchestration-member-chat">${chatAction}</div>
@@ -22356,8 +22489,7 @@ const bindOrchestrationPanelUi = () => {
       const sessionId = button.dataset.orchestrationOpenSession;
       const accountId = button.dataset.orchestrationAccount;
       if (!sessionId || !accountId) return;
-      await refreshDiscussions();
-      openDiscussionForSession(accountId, sessionId);
+      await openOrchestrationSession(accountId, sessionId);
     });
   });
   document.querySelectorAll<HTMLButtonElement>("[data-orchestration-delete]").forEach((button) => {
