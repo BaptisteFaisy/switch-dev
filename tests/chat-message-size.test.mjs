@@ -40,11 +40,18 @@ test("un prompt engendre par l'application affiche son resume, pas son contenu",
 test("les deux chemins d'envoi passent la bulle par le meme filtre", () => {
   const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
 
-  const wired = main.match(/text: chatBubbleText\(prompt, submission\.displayText\)/g) ?? [];
+  const directlyWired = main.match(/text: chatBubbleText\(prompt, submission\.displayText\)/g) ?? [];
   assert.equal(
-    wired.length,
+    directlyWired.length,
+    1,
+    "le chat principal doit utiliser directement chatBubbleText",
+  );
+  assert.match(main, /const displayPrompt = chatBubbleText\(prompt, submission\.displayText\)/);
+  const expertWired = main.match(/text: displayPrompt/g) ?? [];
+  assert.equal(
+    expertWired.length,
     2,
-    "chat principal ET panneaux experts doivent utiliser chatBubbleText",
+    "l'orchestration forcee et le chat expert doivent partager le texte filtre",
   );
   assert.ok(
     !/text: prompt,\n\s+timestamp: Math\.floor/.test(main),

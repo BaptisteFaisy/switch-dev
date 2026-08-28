@@ -155,7 +155,8 @@ test("chaque message capture les outils actifs et les transmet au moteur", () =>
   assert.match(main, /enabledTools: \[\.\.\.pane\.enabledTools\]/);
   assert.match(main, /agentSkills: chatAgentSkillPrompts\(chatEnabledTools\)/);
   assert.match(main, /\.\.\.chatAgentSkillPrompts\(pane\.enabledTools\)/);
-  assert.match(main, /\.\.\.\(automaticOrchestration \? \[automaticOrchestrationRoutingSkill\(pane\.mode\)\] : \[\]\)/);
+  assert.doesNotMatch(main, /automaticOrchestrationRoutingSkill/);
+  assert.match(main, /agentSkills: \[\.\.\.chatAgentSkillPrompts\(pane\.enabledTools\)\]/);
   assert.match(main, /agentTools: submission\.enabledTools\.filter\(isChatAgentModeId\)/);
   assert.match(main, /agentSkills: submission\.agentSkills/);
   assert.match(main, /migratePersistedChatAgentTools\(persisted\)/);

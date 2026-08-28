@@ -211,7 +211,7 @@ test("la vue dédiée crée et expose chaque chat de l'équipe", () => {
   assert.match(style, /@media \(max-width: 860px\)[\s\S]*\.m-sheet-grid button\.m-orchestration-entry/);
 });
 
-test("un chat normal expose un bouton orchestrateur actif par défaut", () => {
+test("un chat normal force immédiatement l'équipe quand le bouton orchestrateur est actif", () => {
   assert.match(chatView, /toggle-automatic-orchestration/);
   assert.match(chatView, /Orchestrateur ·/);
   assert.match(main, /toggle-automatic-orchestration/);
@@ -220,9 +220,16 @@ test("un chat normal expose un bouton orchestrateur actif par défaut", () => {
   assert.doesNotMatch(chatView, /role: "available" \| "orchestrator" \| "worker"/);
   assert.match(style, /\.chat-agent-tool--orchestration\[aria-pressed="true"\]/);
   assert.match(chatView, /managedByOrchestration \? `<footer class="chat-orchestration-managed"/);
-  assert.match(main, /automaticOrchestrationRoutingSkill/);
+  assert.doesNotMatch(main, /automaticOrchestrationRoutingSkill/);
   assert.match(main, /parseAutomaticOrchestrationDecision/);
   assert.match(main, /launchAutomaticOrchestration/);
+  assert.match(main, /Le bouton est une commande, pas une suggestion adressee au modele/);
+  assert.match(main, /workerCount: MAX_ORCHESTRATION_WORKER_COUNT/);
+  assert.match(main, /reason: "Mode orchestrateur explicitement actif"/);
+  const sendExpert = main.indexOf("const sendExpertChatMessage");
+  const forcedCreation = main.indexOf("if (submission.automaticOrchestration)", sendExpert);
+  const ordinaryTurn = main.indexOf('invoke<ChatTurnSnapshot>("start_chat_turn"', sendExpert);
+  assert.ok(sendExpert >= 0 && forcedCreation > sendExpert && ordinaryTurn > forcedCreation);
   const routingDecision = main.indexOf("const shouldLaunchAutomaticOrchestration");
   const launchReservation = main.indexOf("pane.automaticOrchestrationLaunching = true", routingDecision);
   const sessionAttachment = main.indexOf("attached = await attachment", routingDecision);
@@ -233,7 +240,7 @@ test("un chat normal expose un bouton orchestrateur actif par défaut", () => {
   assert.doesNotMatch(main, /data-autonomous-orchestration-worker=/);
   assert.match(main, /workerAccountIds: state\.workerAccountIds\.slice/);
   assert.match(main, /Array\.from\(\{ length: decision\.workerCount \}, \(\) => account\.id\)/);
-  assert.match(main, /orchestratorSessionId: sessionId/);
+  assert.match(main, /orchestratorSessionId: sessionId \|\| null/);
   assert.match(main, /pane\.orchestrationRole = "orchestrator"/);
   assert.match(main, /run\.tasks\.forEach\(\(task\) =>/);
   assert.match(main, /orchestrationRole: "worker"/);

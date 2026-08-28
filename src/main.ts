@@ -6456,27 +6456,6 @@ const chatAgentSkillPrompts = (
     .filter((skill) => enabledTools.includes(skill.id) && skill.content.trim())
     .map(({ id, name, content }) => ({ id, name, content }));
 
-const automaticOrchestrationRoutingSkill = (mode: ChatMode): ChatAgentSkillPrompt => ({
-  id: "automatic-orchestration-router",
-  name: "Routage automatique vers une équipe",
-  content: `# Routage obligatoire avant action
-
-Le mode d'orchestration automatique est explicitement actif pour ce tour (mode courant : ${mode}). Avant toute modification ou réponse de fond, évalue si la demande bénéficie réellement d'un orchestrateur et de chats workers isolés.
-
-Choisis l'orchestration pour toute tâche de réalisation dans un dépôt Git qui peut être découpée en plusieurs missions cohérentes. Cherche le nombre maximal de missions réellement utiles, jusqu'à 5, afin d'exploiter l'équipe sans créer de remplissage. L'application ajoutera automatiquement au moins un orchestrateur testeur dédié (un par tranche de cinq workers) et empêchera la fin tant que tous ses tests ne passent pas. Une demande explicite d'équipe multi-agent est un signal fort.
-
-N'oriente pas vers l'orchestration une question, une explication, une demande de statut, une revue seule, une petite correction locale, une tâche essentiellement séquentielle, une demande ambiguë qui exige d'abord une réponse utilisateur, ni un tour en mode Planifier ou Question. Dans ces cas, traite normalement la demande sans parler de ce routage.
-
-Si l'orchestration est justifiée :
-- ne commence pas le travail et ne modifie aucun fichier ;
-- n'utilise pas toi-même de sous-agents : l'application va créer l'équipe ;
-- réponds uniquement par une ligne JSON compacte, sans Markdown ni texte autour, sous cette forme exacte :
-${AUTOMATIC_ORCHESTRATION_MARKER} {"decision":"orchestrate","workerCount":5,"reason":"raison courte"}
-- choisis entre 1 et 5 workers et prends le maximum de missions indépendantes réellement utiles.
-
-Sinon, accomplis directement la demande comme dans un chat normal et n'émets jamais le marqueur ${AUTOMATIC_ORCHESTRATION_MARKER}`,
-});
-
 const enabledToolsVisibleInChat = (
   enabledTools: readonly ChatAgentToolId[],
 ): ChatAgentToolId[] => {
@@ -11757,7 +11736,7 @@ const expertChatAutomaticOrchestrationOption = (
   return {
     enabled: pane.automaticOrchestrationEnabled,
     detail: pane.automaticOrchestrationEnabled
-      ? "Actif par défaut : une tâche est découpée en un maximum de 5 missions utiles, avec ce chat comme orchestrateur."
+      ? "Actif : chaque tâche lance immédiatement 5 workers et les orchestrateurs testeurs, avec ce chat comme orchestrateur principal."
       : "Mode direct : ce chat traite seul les prochaines demandes.",
     disabled: pane.automaticOrchestrationLaunching,
   };
@@ -12537,11 +12516,11 @@ const automaticOrchestrationName = (objective: string): string => {
 const launchAutomaticOrchestration = async (
   pane: ExpertChatPane,
   submission: QueuedChatSubmission,
-  snapshot: ChatTurnSnapshot,
+  sessionId: string | null,
   decision: AutomaticOrchestrationDecision,
-): Promise<void> => {
+): Promise<boolean> => {
   const account = accountById(submission.accountId) ?? expertChatSelectedAccount(pane);
-  const sessionId = snapshot.sessionId?.trim() || expertChatResumeSessionId(pane);
+  sessionId = sessionId?.trim() || expertChatResumeSessionId(pane);
   const projectDir =
     discussionFolderPath(pane.discussion)
     ?? userEnvironmentPath(pane.pendingWorkspace)
@@ -12558,17 +12537,15 @@ const launchAutomaticOrchestration = async (
       : "",
   ].filter(Boolean).join("\n\n");
 
-  if (!account || !sessionId || !projectDir) {
+  if (!account || !projectDir) {
     pane.automaticOrchestrationLaunching = false;
     if (!pane.draft.trim()) pane.draft = submission.prompt;
     statusText = !account
       ? "Orchestration automatique impossible : compte introuvable"
-      : !sessionId
-        ? "Orchestration automatique impossible : session introuvable"
-        : "Orchestration automatique impossible : environnement introuvable";
+      : "Orchestration automatique impossible : environnement introuvable";
     persistExpertChats();
     refreshExpertChatPane(pane);
-    return;
+    return false;
   }
 
   statusText = `Orchestration automatique retenue · préparation de ${decision.workerCount} worker${decision.workerCount > 1 ? "s" : ""}`;
@@ -12584,7 +12561,9 @@ const launchAutomaticOrchestration = async (
         name: automaticOrchestrationName(submission.prompt) || null,
         objective,
         workerCount: decision.workerCount,
-        orchestratorSessionId: sessionId,
+        // Un nouveau chat n'a pas encore de session. Le backend cree alors
+        // directement celle de l'orchestrateur pendant son tour de planification.
+        orchestratorSessionId: sessionId || null,
         orchestratorAccountId: account.id,
         workerAccountIds: Array.from({ length: decision.workerCount }, () => account.id),
         accountId: account.id,
@@ -12612,13 +12591,15 @@ const launchAutomaticOrchestration = async (
     startAllExpertChatWork();
     startOrchestrationsPoll();
     void refreshOrchestrations();
+    return true;
   } catch (error) {
     pane.automaticOrchestrationLaunching = false;
     if (!pane.draft.trim()) pane.draft = submission.prompt;
-    statusText = `Orchestration automatique recommandée mais non lancée : ${String(error)}`;
+    statusText = `Mode orchestrateur non lancé : ${String(error)}`;
     persistExpertChats();
     refreshExpertChatPane(pane);
     focusExpertChatPrompt(pane);
+    return false;
   }
 };
 
@@ -12771,7 +12752,7 @@ const applyExpertChatTurnSnapshot = async (
     void launchAutomaticOrchestration(
       pane,
       automaticSubmission,
-      snapshot,
+      snapshot.sessionId?.trim() || expertChatResumeSessionId(pane),
       automaticDecision,
     );
   } else if (automaticOrchestrationPending) {
@@ -12952,12 +12933,10 @@ const sendExpertChatMessage = async (
     model: preferences.model,
     reasoningEffort: preferences.reasoningEffort,
     enabledTools: [...pane.enabledTools],
-    agentSkills: [
-      ...chatAgentSkillPrompts(pane.enabledTools),
-      ...(automaticOrchestration ? [automaticOrchestrationRoutingSkill(pane.mode)] : []),
-    ],
+    agentSkills: [...chatAgentSkillPrompts(pane.enabledTools)],
     automaticOrchestration,
   };
+  const displayPrompt = chatBubbleText(prompt, submission.displayText);
   const resourceAdmissionPaused = chatResourceAdmissionPaused();
   if (
     chatTurnIsBusy(pane.turn?.status) ||
@@ -12985,6 +12964,57 @@ const sendExpertChatMessage = async (
     return true;
   }
 
+  if (submission.automaticOrchestration) {
+    // Le bouton est une commande, pas une suggestion adressee au modele. Creer
+    // l'equipe avant tout tour normal garantit qu'aucun agent principal ne peut
+    // commencer la tache seul ni decider silencieusement de ne pas orchestrer.
+    const messagesBeforeLaunch = pane.messages;
+    const launchedAt = Math.floor(Date.now() / 1000);
+    pane.automaticOrchestrationLaunching = true;
+    pane.error = null;
+    pane.messages = [
+      ...pane.messages,
+      {
+        role: "user",
+        text: displayPrompt,
+        timestamp: launchedAt,
+        deliveryState: "pending",
+      },
+    ];
+    statusText = `Mode orchestrateur · création immédiate de ${MAX_ORCHESTRATION_WORKER_COUNT} workers`;
+    persistExpertChats();
+    refreshExpertChatPane(pane);
+
+    const launched = await launchAutomaticOrchestration(
+      pane,
+      submission,
+      expertChatResumeSessionId(pane),
+      {
+        workerCount: MAX_ORCHESTRATION_WORKER_COUNT,
+        reason: "Mode orchestrateur explicitement actif",
+      },
+    );
+    if (!launched) {
+      pane.messages = messagesBeforeLaunch;
+      persistExpertChats();
+      refreshExpertChatPane(pane);
+      return false;
+    }
+    pane.messages = pane.messages.map((message, index) =>
+      index === pane.messages.length - 1 && message.deliveryState === "pending"
+        ? { role: message.role, text: message.text, timestamp: message.timestamp }
+        : message
+    );
+    if (!queuedSubmission) {
+      pane.draft = "";
+      disposeChatImagePreviews(pane.imageAttachments);
+      pane.imageAttachments = [];
+    }
+    persistExpertChats();
+    refreshExpertChatPane(pane);
+    return true;
+  }
+
   const wasAvailable = expertChatPaneIsAvailable(pane);
   if (!submission.automaticCapacityRetry) resetExpertModelCapacityRetry(pane);
   const turnBeforeStart = pane.turn;
@@ -13005,7 +13035,7 @@ const sendExpertChatMessage = async (
     ...pane.messages,
     {
       role: "user",
-      text: chatBubbleText(prompt, submission.displayText),
+      text: displayPrompt,
       timestamp: Math.floor(Date.now() / 1000),
       deliveryState: "pending",
     },
@@ -13867,12 +13897,7 @@ const resumeDiscussionInChat = async (
             )
           : null,
         enabledTools: [...pane.enabledTools],
-        agentSkills: [
-          ...chatAgentSkillPrompts(pane.enabledTools),
-          ...(pane.automaticOrchestrationEnabled && !pane.orchestrationRole && !pane.autonomousAgentId
-            ? [automaticOrchestrationRoutingSkill("build")]
-            : []),
-        ],
+        agentSkills: [...chatAgentSkillPrompts(pane.enabledTools)],
         automaticOrchestration:
           pane.automaticOrchestrationEnabled && !pane.orchestrationRole && !pane.autonomousAgentId,
         resumeSessionId: discussion?.rolloutId || discussion?.sessionId || null,
