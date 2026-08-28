@@ -30,7 +30,7 @@ use std::{
 use tauri::State;
 use uuid::Uuid;
 
-const STORE_VERSION: u32 = 8;
+const STORE_VERSION: u32 = 10;
 const MAX_OBJECTIVE_BYTES: usize = 64 * 1024;
 const MAX_NAME_CHARS: usize = 120;
 const MAX_TEST_COMMAND_CHARS: usize = 8_000;
