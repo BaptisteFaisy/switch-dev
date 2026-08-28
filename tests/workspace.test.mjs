@@ -9,6 +9,7 @@ import {
   normalizeWorkspaceExecutionTargetId,
   openWorkspaceRegistry,
   remoteEnvironmentPath,
+  selectableWorkspaceProfiles,
   setWorkspaceExecutionTarget,
   setWorkspaceMemory,
   terminalEnvironmentPath,
@@ -61,6 +62,25 @@ test("deux chemins Unix dont seule la casse differe restent distincts", () => {
   ]);
 
   assert.equal(merged.workspaces.length, 2);
+});
+
+test("un ancien chat ne devient pas automatiquement un environnement", () => {
+  const workspaces = selectableWorkspaceProfiles(
+    [{ id: "produit", label: "Produit", path: "C:\\Projects\\Produit", memory: "" }],
+    ["C:\\Projects\\Site"],
+    "C:\\Projects\\Produit",
+    [],
+    [
+      { path: "C:\\Projects\\Discussion-isolee", lastActivity: 300 },
+      { path: "C:\\Projects\\Site", lastActivity: 200 },
+      { path: "C:\\Projects\\Produit", lastActivity: 100 },
+    ],
+  );
+
+  assert.deepEqual(workspaces.map((workspace) => workspace.path), [
+    "C:\\Projects\\Produit",
+    "C:\\Projects\\Site",
+  ]);
 });
 
 test("fermer un dossier le retire du registre sans perdre son identite", () => {

@@ -352,6 +352,7 @@ import {
   normalizeWorkspacePath,
   openWorkspaceRegistry,
   remoteEnvironmentPath,
+  selectableWorkspaceProfiles,
   setWorkspaceExecutionTarget,
   setWorkspaceMemory,
   terminalsForFolder,
@@ -4162,49 +4163,31 @@ const activateDiscussionFolder = (discussion: DiscussionSummary): string | null 
   return folderPath;
 };
 
-// Enumeration des workspaces connus : union du registre synchronise, du MRU
-// local, du workspace actif, et des cwd distincts des discussions. Trie : actif
-// d'abord, puis par activite la plus recente, puis alphabetique.
+// Enumeration des environnements explicitement enregistres ou choisis. Les cwd
+// des discussions servent uniquement au tri : un dossier de chat projectless
+// ne doit pas apparaitre automatiquement dans le selecteur d'environnements.
 const knownWorkspaces = (): WorkspaceProfile[] => {
-  const byId = new Map<string, WorkspaceProfile>();
   const closedIds = closedWorkspaceIds();
-  const add = (rawPath: string | null | undefined) => {
-    const path = userWorkspacePath(rawPath);
-    if (!path) return;
-    const id = workspaceIdForPath(path);
-    if (closedIds.has(id)) return;
-    if (!byId.has(id)) {
-      byId.set(id, { id, label: workspaceBaseName(path), path, memory: "" });
-    }
-  };
-
-  mergeWorkspaceProfiles(settings?.workspaces ?? []).workspaces.forEach((ws) => {
-    if (!userWorkspacePath(ws.path)) return;
-    if (closedIds.has(ws.id)) return;
-    if (!byId.has(ws.id)) byId.set(ws.id, ws);
+  const registeredProfiles = (settings?.workspaces ?? []).flatMap((workspace) => {
+    const path = userWorkspacePath(workspace.path);
+    return path ? [{ ...workspace, id: workspaceIdForPath(path), path }] : [];
   });
-  add(currentWorkspace());
-  loadWorkspacePaths().forEach(add);
-  terminalSessions.forEach((session) => add(session.folderPath));
-  allDiscussions().forEach((discussion) => add(discussionFolderPath(discussion)));
+  const rememberedPaths = loadWorkspacePaths()
+    .map((path) => userWorkspacePath(path))
+    .filter((path): path is string => !!path);
+  const activePath = currentWorkspace();
+  const activity = allDiscussions().map((discussion) => ({
+    path: discussionFolderPath(discussion),
+    lastActivity: discussion.lastActivity,
+  }));
 
-  const lastActivity = new Map<string, number>();
-  allDiscussions().forEach((discussion) => {
-    const folderPath = discussionFolderPath(discussion);
-    if (!folderPath) return;
-    const id = workspaceIdForPath(folderPath);
-    lastActivity.set(id, Math.max(lastActivity.get(id) ?? 0, discussion.lastActivity));
-  });
-
-  const active = currentWorkspace();
-  const activeId = active ? workspaceIdForPath(active) : null;
-  return [...byId.values()].sort((left, right) => {
-    if (left.id === activeId) return -1;
-    if (right.id === activeId) return 1;
-    const delta = (lastActivity.get(right.id) ?? 0) - (lastActivity.get(left.id) ?? 0);
-    if (delta !== 0) return delta;
-    return left.label.localeCompare(right.label);
-  });
+  return selectableWorkspaceProfiles(
+    registeredProfiles,
+    rememberedPaths,
+    activePath,
+    [...closedIds],
+    activity,
+  );
 };
 
 const workspaceProfileForPath = (
@@ -5612,9 +5595,9 @@ const terminalWorkspaceGroups = (): TerminalWorkspaceGroup[] => {
     }
   };
 
-  // La liste canonique contient le registre synchronise, le MRU local, le
-  // workspace actif et ceux derives des discussions. Un meme chemin ne cree
-  // donc qu'un groupe, auquel toutes ses sessions sont ajoutees ci-dessous.
+  // La liste canonique contient uniquement le registre synchronise, le MRU
+  // local et le workspace actif. Les sessions encore ouvertes sont rattachees
+  // ci-dessous sans promouvoir tous les cwd de l'historique des discussions.
   knownWorkspaces().forEach((workspace) => addPath(workspace.path, workspace.label));
 
   terminalSessions.forEach((session) => {
