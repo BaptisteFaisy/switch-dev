@@ -38,7 +38,7 @@ test("le chat VPS expose l'envoi TikTok direct, le brouillon compatible et le su
   assert.match(server, /request\.into_prepare_request\(token\)/);
   assert.match(server, /wait_for_tiktok_submission/);
   assert.match(server, /status\.is_online\(metrics::now_ts\(\)\) && status\.agent_healthy/);
-  assert.match(chat, /enabled_tools=\[[^\n]*\{PREPARE_TIKTOK_DM_CAMPAIGN_TOOL_NAME\}/);
+  assert.match(chat, /let mut enabled_tool_names = vec!\[[\s\S]*?PREPARE_TIKTOK_DM_CAMPAIGN_TOOL_NAME/);
   assert.match(chat, /tools\.\{SEND_TIKTOK_DM_CAMPAIGN_TOOL_NAME\}\.approval_mode/);
   assert.match(chat, /mcp__\{MCP_SERVER_NAME\}__\{SEND_TIKTOK_DM_CAMPAIGN_TOOL_NAME\}/);
   assert.match(platform, /case "prepare_tiktok_dm_campaign"/);

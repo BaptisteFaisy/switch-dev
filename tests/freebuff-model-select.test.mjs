@@ -53,7 +53,7 @@ test("le champ modèle des réglages retombe sur le défaut du fournisseur, pas 
 test("le backend écrit freebuffModel avant le lancement du TUI", () => {
   assert.match(
     provider,
-    /"freebuffModel"\.to_string\(\),\n\s*Value::String\(model\.to_string\(\)\),\n\s*\);/,
+    /"freebuffModel"\.to_string\(\),\r?\n\s*Value::String\(model\.to_string\(\)\),\r?\n\s*\);/,
   );
   assert.match(provider, /`freebuffModel` est la cle que le binaire relit au demarrage/);
   assert.match(

@@ -11542,7 +11542,7 @@ const minimizeActiveBusyExpertChat = (pane: ExpertChatPane): boolean => {
 
 const displayedExpertChatPanesForCurrentEnvironment = (): ExpertChatPane[] =>
   expertChatsForDisplay(
-    userOpenedExpertChatPanesForCurrentEnvironment(),
+    expertChatPanesForCurrentEnvironment(),
     expertChatDisplayMode,
     expertChatPaneIsAvailable,
     expertChatPaneIsCreatedOrExplicitlyOpened,
@@ -12183,6 +12183,13 @@ const restoreExpertChats = () => {
       // reconciliation. Ces panneaux techniques se reconnaissent a leur cle
       // serveur et doivent etre reconstruits uniquement par l'orchestrateur.
       if (record.key.startsWith("orchestration:")) return [];
+      const normalizedRecord: PersistedExpertChatPane = {
+        ...record,
+        // La v1 ne permet pas de distinguer un chat ouvert volontairement
+        // d'un panneau adopte automatiquement. Ses discussions restent dans
+        // la barre laterale et repassent au premier plan au premier clic.
+        userOpened: persistedVersion === 2 ? record.userOpened !== false : !record.sessionId,
+      };
       const discussion = record.sessionId
         ? (
           record.accountId
@@ -13454,6 +13461,8 @@ const startAllExpertChatWork = () => {
 
 const activateExpertChatPane = (pane: ExpertChatPane, focusPrompt = false) => {
   if (!expertChatPanes.includes(pane)) return;
+  pane.userOpened = true;
+  pendingActiveExpertChatKey = null;
   pinExplicitlyOpenedExpertChat(pane);
   activeExpertChatKey = pane.key;
   moveExpertChatPageToPane(pane);
@@ -17550,7 +17559,7 @@ const renderChatSidebarConversations = (): string => {
         orchestrationId: orchestrationMember?.run.id ?? null,
         orchestrationRole: orchestrationMember?.role ?? null,
         orchestrationPosition: orchestrationMember?.position ?? 0,
-        html: `<div class="chat-side-item ${openedPane ? "active" : ""} ${current ? "current" : ""} ${busy ? "moving" : ""}" aria-busy="${busy}">
+        html: `<div class="chat-side-item ${openedPane ? "active" : ""} ${current ? "current" : ""} ${busy ? "moving" : ""}" aria-busy="${busy}" aria-current="${current ? "true" : "false"}">
         <button type="button" class="chat-side-open" data-open-chat="${escapeAttr(discussion.sessionId)}" data-open-account="${escapeAttr(discussion.accountId)}" title="${escapeAttr(title)}">
           ${renderChatSidebarStatus(openedPane ?? null, discussion, orchestrationMember?.role === "orchestrator")}
           <i class="chat-side-terminal-icon" data-lucide="${chatSidebarMemberIcon(orchestrationMember, "message-square")}"></i>

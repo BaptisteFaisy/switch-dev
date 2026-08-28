@@ -130,7 +130,7 @@ test("le titre semantique est affiche et rafraichi dans la colonne de gauche", (
 
 test("le chat selectionne est distinct des autres chats simplement ouverts", () => {
   assert.match(main, /chat-side-item \$\{openedPane \? "active" : ""\} \$\{current \? "current" : ""\}/);
-  assert.match(main, /current \? 'aria-current="true"' : ""/);
+  assert.match(main, /aria-current="\$\{current \? "true" : "false"\}"/);
   assert.match(style, /\.chat-side-item\.current\s*\{[^}]*box-shadow:\s*inset 3px 0 0 var\(--chat-accent\)/s);
 });
 

@@ -199,7 +199,7 @@ test("les cinq outils Microsoft restent synchronises aux quatre endroits", () =>
   const allowList = between(server, '"tools/call" => {', "let context_result");
   const dispatch = between(server, "let arguments = payload", '_ => unreachable!("outil valide avant le dispatch")');
   const allowedTools = between(chat, '.arg("--allowedTools")', "));");
-  const enabledTools = between(chat, "{prefix}.enabled_tools=[", "\n");
+  const enabledTools = between(chat, "let mut enabled_tool_names = vec![", "];\n");
 
   for (const [constant, wireName] of Object.entries(microsoftTools)) {
     assert.match(
@@ -215,7 +215,7 @@ test("les cinq outils Microsoft restent synchronises aux quatre endroits", () =>
       new RegExp(`mcp__\\{MCP_SERVER_NAME\\}__\\{${constant}\\}`),
       `${constant} manque a --allowedTools`,
     );
-    assert.match(enabledTools, new RegExp(`\\\\"\\{${constant}\\}\\\\"`), `${constant} manque a enabled_tools`);
+    assert.match(enabledTools, new RegExp(`\\b${constant}\\b`), `${constant} manque a enabled_tools`);
   }
 });
 
