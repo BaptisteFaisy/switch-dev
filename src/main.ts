@@ -25412,7 +25412,10 @@ const renderChatContextTasks = (tasks: readonly TaskItem[]): string => {
 };
 
 const renderChatFirstShell = () => {
-  const isChat = activeView === "chat";
+  // Le relais Freebuff est presente comme une conversation classique : il
+  // vit dans l'espace conversationnel (layout is-chat) plutot que dans une vue
+  // admin a part.
+  const isChat = activeView === "chat" || activeView === "freebuff-relay";
   const contextTasks = taskItemsForEnvironment(
     loadTaskItems(accountScopedStorage, currentTaskAccountId()),
     currentWorkspace(),
@@ -25516,7 +25519,9 @@ const renderChatFirstShell = () => {
       <button type="button" id="chatSidebarScrim" class="chat-sidebar-scrim" aria-label="Fermer le menu"></button>
 
       <main class="workspace chat-main-workspace" id="chatMainWorkspace">
-        ${isChat
+        ${activeView === "freebuff-relay"
+          ? `<section class="terminal-shell chat-admin-panel freebuff-relay-chat-host">${renderActiveAppPanel()}</section>`
+          : isChat
           ? renderExpertChatGrid()
           : `<header class="chat-admin-head">
               <button type="button" class="icon-button chat-sidebar-expand" data-toggle-chat-sidebar title="Afficher la barre latérale" aria-label="Afficher la barre latérale" aria-controls="chatAppSidebar">
