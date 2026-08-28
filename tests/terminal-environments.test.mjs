@@ -51,10 +51,11 @@ test("l'environnement actif contient ses propres chats", () => {
   for (const marker of [
     "expertChatPanesForCurrentEnvironment",
     "expertChatPaneEnvironmentPath",
-    "Chats de cet environnement",
+    "Groupes de chats",
   ]) {
     assert.ok(main.includes(marker), `contexte d'environnement incomplet: ${marker}`);
   }
+  assert.doesNotMatch(main, /Chats de cet environnement/);
   assert.match(main, /workspaceIdForPath\(panePath\) === environmentId/);
   assert.match(main, /discussion\.folderPath = capturedWorkspace/);
 });
@@ -197,7 +198,7 @@ test("la creation exige un environnement avant tout appel PTY", () => {
 
 test("un chat actif sans discussion listee reste visible dans la barre laterale", () => {
   // Regression : un nouveau chat (ou un chat dont le dossier n'est pas resolu)
-  // apparait dans la grille mais disparaissait de « Chats de cet environnement ».
+  // apparait dans la grille mais disparaissait des groupes de chats.
   // La barre laterale doit unir les discussions persistees et les panes ouverts.
   assert.match(main, /draftEnvironmentChatPanes\(\s*\n?\s*expertChatPanesForCurrentEnvironment\(\)/);
   // Le compteur additionne les brouillons aux discussions persistees.

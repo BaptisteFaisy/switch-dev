@@ -3336,6 +3336,43 @@
   background: #b23b3b;
 }
 
+:root[data-theme="light"] .chat-sidebar-group-toolbar :is(svg, strong) {
+  color: #5b4ace;
+}
+
+:root[data-theme="light"] .chat-sidebar-group-toolbar small {
+  color: #71717a;
+}
+
+:root[data-theme="light"] .chat-sidebar-group-toolbar > b {
+  background: rgba(91, 74, 206, 0.11);
+  color: #5b4ace;
+}
+
+:root[data-theme="light"] .chat-sidebar-new-group {
+  border-color: rgba(91, 74, 206, 0.35);
+  background: rgba(108, 92, 231, 0.055);
+  color: #29252f;
+}
+
+:root[data-theme="light"] .chat-sidebar-new-group:hover {
+  background: rgba(108, 92, 231, 0.1);
+}
+
+:root[data-theme="light"] .chat-sidebar-new-group > span:first-child {
+  background: rgba(91, 74, 206, 0.11);
+  color: #5b4ace;
+}
+
+:root[data-theme="light"] .chat-sidebar-new-group strong {
+  color: #3f376e;
+}
+
+:root[data-theme="light"] .chat-sidebar-new-group small,
+:root[data-theme="light"] .chat-sidebar-new-group > svg {
+  color: #6f6b7d;
+}
+
 :root[data-theme="light"] .chat-side-chat-group {
   border-color: rgba(24, 24, 27, 0.13);
   background: rgba(24, 24, 27, 0.018);

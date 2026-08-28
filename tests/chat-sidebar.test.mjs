@@ -223,10 +223,17 @@ test("les chats sont regroupes par orchestration avec le pilote en premier", () 
 
 test("la colonne de gauche rend des blocs d'equipe et distingue l'orchestrateur", () => {
   assert.match(main, /data-sidebar-orchestration-group=/);
-  assert.match(main, /Chats directs/);
+  assert.match(main, /id="chatSidebarGroupsTitle">Groupes de chats/);
+  assert.match(main, /id="newChatGroupFromSidebar"/);
+  assert.match(main, /openNewChatModal\(\{ group: true \}\)/);
+  assert.match(main, /visibleGroupCount = groupChatSidebarItems\(visibleItems\)\.length/);
+  assert.match(main, /Chats individuels/);
+  assert.doesNotMatch(main, /Chats de cet environnement/);
   assert.match(main, /createdSubchatCount[\s\S]*plannedSubchatCount[\s\S]*sous-chat/);
   assert.match(main, /chat-side-status--orchestrator/);
   assert.match(main, /return "Orchestrateur"/);
+  assert.match(style, /\.chat-sidebar-group-stack\s*\{/);
+  assert.match(style, /\.chat-sidebar-new-group\s*\{/);
   assert.match(style, /\.chat-side-chat-group--orchestration\s*\{/);
   assert.match(style, /\.chat-side-status--orchestrator\s*\{[^}]*transform:\s*rotate\(45deg\)/s);
 });

@@ -2509,6 +2509,7 @@ let newTerminalAccountFastMode = false;
 // etape obligatoire du parcours principal.
 type NewChatRoutingMode = "automatic" | "manual";
 let newChatModalOpen = false;
+let newChatGroupIntent = false;
 let newChatAccountId: string | null = null;
 let newChatRoutingMode: NewChatRoutingMode = "automatic";
 let newChatMode: ChatMode = "build";
@@ -3646,8 +3647,8 @@ const setChatSidebarHideRunning = (hidden: boolean): void => {
   chatSidebarHideRunning = hidden;
   localStorage.setItem(CHAT_SIDEBAR_HIDE_RUNNING_STORAGE_KEY, String(hidden));
   statusText = hidden
-    ? "Les chats orange sont masqués dans la liste de l’environnement"
-    : "Les chats orange sont affichés dans la liste de l’environnement";
+    ? "Les chats orange sont masqués dans leurs groupes"
+    : "Les chats orange sont affichés dans leurs groupes";
   render();
 };
 
@@ -14785,6 +14786,10 @@ const bindWorkspaceSwitcherUi = (root: ParentNode = document) => {
     "click",
     openTerminalEnvironmentMenu,
   );
+  root.querySelector<HTMLButtonElement>("#newChatGroupFromSidebar")?.addEventListener(
+    "click",
+    () => openNewChatModal({ group: true }),
+  );
   root.querySelectorAll<HTMLButtonElement>("[data-ws-select]").forEach((button) => {
     button.addEventListener("click", () => {
       const value = button.dataset.wsSelect;
@@ -17400,13 +17405,10 @@ const renderChatSidebarItemGroups = (
   items: readonly ChatSidebarRenderedItem[],
 ): string => {
   const groups = groupChatSidebarItems(items);
-  const grouped = groups.some((group) => group.orchestrationId !== null);
-  if (!grouped) return groups.flatMap((group) => group.items).map((item) => item.html).join("");
-
   return groups.map((group) => {
     if (!group.orchestrationId) {
       return `<section class="chat-side-chat-group chat-side-chat-group--direct">
-        <header><span><i data-lucide="messages-square"></i><strong>Chats directs</strong></span><b>${group.items.length}</b></header>
+        <header><span><i data-lucide="messages-square"></i><span><strong>Chats individuels</strong><small>Hors orchestration</small></span></span><b>${group.items.length}</b></header>
         <div>${group.items.map((item) => item.html).join("")}</div>
       </section>`;
     }
@@ -17587,6 +17589,7 @@ const renderChatSidebarConversations = (): string => {
   );
   const hiddenRunningCount = totalCount - visibleItems.length;
   const listItems = renderChatSidebarItemGroups(visibleItems);
+  const visibleGroupCount = groupChatSidebarItems(visibleItems).length;
   const countTitle = hiddenRunningCount > 0
     ? `${hiddenRunningCount} chat${hiddenRunningCount > 1 ? "s orange masqués" : " orange masqué"}`
     : `${totalCount} chat${totalCount > 1 ? "s affichés" : " affiché"}`;
@@ -17594,13 +17597,21 @@ const renderChatSidebarConversations = (): string => {
     ? `${hiddenRunningCount} chat${hiddenRunningCount > 1 ? "s orange sont masqués" : " orange est masqué"} par vos paramètres.`
     : query
       ? "Aucun résultat"
-      : "Aucun chat. Ouvrez-en un avec l'agent de votre choix.";
+      : "Aucun groupe. Créez-en un pour lancer un orchestrateur et ses sous-chats.";
 
   return `<section class="chat-workspace-group active chat-current-environment-chats">
     <div class="chat-folder-section-label"><span>Terminaux de cet environnement</span><b>${environmentTerminalItems ? environmentTerminals.length : 0}</b></div>
     <div class="chat-workspace-terminals">${environmentTerminalItems || `<div class="chat-workspace-empty">Aucun terminal ouvert.</div>`}</div>
-  </section><section class="chat-workspace-group active chat-current-environment-chats">
-    <div class="chat-folder-section-label"><span>Chats de cet environnement</span><b title="${escapeAttr(countTitle)}">${visibleItems.length}</b></div>
+  </section><section class="chat-sidebar-group-stack" aria-labelledby="chatSidebarGroupsTitle">
+    <header class="chat-sidebar-group-toolbar">
+      <span><i data-lucide="network"></i><span><strong id="chatSidebarGroupsTitle">Groupes de chats</strong><small>Un orchestrateur et ses sous-chats par bloc</small></span></span>
+      <b title="${escapeAttr(countTitle)}">${visibleGroupCount}</b>
+    </header>
+    <button type="button" class="chat-sidebar-new-group" id="newChatGroupFromSidebar" ${settings?.accounts.length ? "" : "disabled"}>
+      <span><i data-lucide="plus"></i></span>
+      <span><strong>Nouveau groupe</strong><small>Donnez une tâche à l’orchestrateur</small></span>
+      <i data-lucide="chevron-right"></i>
+    </button>
     <div class="chat-workspace-terminals chat-workspace-chat-groups">
       ${listItems || `<div class="chat-workspace-empty">${escapeHtml(emptyMessage)}</div>`}
     </div>
@@ -24319,11 +24330,11 @@ const renderSettingsPanel = (): string => {
         <div class="appearance-settings-copy">
           <span class="settings-card-icon"><i data-lucide="list-filter"></i></span>
           <span>
-            <strong id="chatSidebarPrioritySettingsTitle">Priorité dans « Chats de cet environnement »</strong>
+            <strong id="chatSidebarPrioritySettingsTitle">Priorité dans les groupes de chats</strong>
             <small>Le groupe choisi remonte en tête, sans changer l’ordre des autres chats.</small>
           </span>
         </div>
-        <div class="theme-choice-group" role="group" aria-label="Chats prioritaires dans la liste de l’environnement">
+        <div class="theme-choice-group" role="group" aria-label="Chats prioritaires dans les groupes">
           <button type="button" data-chat-sidebar-priority="recent" class="${chatSidebarPriorityMode === "recent" ? "active" : ""}" aria-pressed="${chatSidebarPriorityMode === "recent"}">
             <i data-lucide="clock-3"></i><span>Récents</span>
           </button>
@@ -24343,7 +24354,7 @@ const renderSettingsPanel = (): string => {
             <small>Les masquer ne les arrête pas : ils continuent leur tâche et réapparaissent quand leur statut change.</small>
           </span>
         </div>
-        <div class="theme-choice-group" role="group" aria-label="Affichage des chats orange dans la liste de l’environnement">
+        <div class="theme-choice-group" role="group" aria-label="Affichage des chats orange dans les groupes">
           <button type="button" data-chat-sidebar-running="show" class="${chatSidebarHideRunning ? "" : "active"}" aria-pressed="${!chatSidebarHideRunning}">
             <i data-lucide="eye"></i><span>Afficher</span>
           </button>
@@ -25423,7 +25434,7 @@ const renderChatFirstShell = () => {
           <i data-lucide="search"></i>
           <input id="chatSidebarSearch" type="search" value="${escapeAttr(chatSidebarSearch)}" placeholder="Rechercher dans cet environnement" aria-label="Rechercher dans l'environnement actif" />
         </label>
-        <nav class="chat-side-conversations" id="chatSideConversations" aria-label="Chats de l'environnement actif">${renderChatSidebarConversations()}</nav>
+        <nav class="chat-side-conversations" id="chatSideConversations" aria-label="Groupes de chats">${renderChatSidebarConversations()}</nav>
 
         <nav class="chat-left-tools" aria-label="Chats, agents et organisation visuelle">
           <span class="chat-left-tools-label">Organiser</span>
@@ -26574,9 +26585,15 @@ const renderNewChatModal = () => {
       <section class="modal new-chat-modal" role="dialog" aria-modal="true" aria-labelledby="newChatModalTitle" tabindex="-1">
         <header class="modal-head">
           <div>
-            <h2 id="newChatModalTitle">${pendingTaskTitle ? "Exécuter une tâche" : "Nouveau chat"}</h2>
+            <h2 id="newChatModalTitle">${pendingTaskTitle
+              ? "Exécuter une tâche"
+              : newChatGroupIntent ? "Nouveau groupe de chats" : "Nouveau chat"}</h2>
             <p>${pendingTaskTitle
               ? `L’exécution sera préparée automatiquement dans <strong>${escapeHtml(environmentLabel ?? "cet environnement")}</strong>.`
+              : newChatGroupIntent
+                ? environmentLabel
+                  ? `Le chat orchestrateur sera ouvert dans <strong>${escapeHtml(environmentLabel)}</strong>. Votre première tâche créera le groupe et ses sous-chats.`
+                  : "Le chat orchestrateur sera ouvert. Votre première tâche créera le groupe et ses sous-chats."
               : environmentLabel
                 ? `La conversation sera ouverte dans <strong>${escapeHtml(environmentLabel)}</strong>.`
                 : "La conversation est prête à être ouverte."}</p>
@@ -26673,7 +26690,10 @@ const renderNewChatModal = () => {
           <button class="tool-button" id="cancelNewChat">Annuler</button>
           <button class="tool-button primary new-chat-confirm" id="confirmNewChat" aria-describedby="newChatAutoStatus" ${account && environmentPath && !newChatBestQuotaInFlight ? "" : "disabled"}>
             <i data-lucide="${newChatBestQuotaInFlight ? "loader-circle" : pendingTaskTitle ? "play" : "plus"}"></i>
-            <span>${newChatBestQuotaInFlight ? "Préparation…" : pendingTaskTitle ? "Lancer l’exécution" : "Ouvrir le chat"}</span>
+            <span>${newChatBestQuotaInFlight
+              ? "Préparation…"
+              : pendingTaskTitle ? "Lancer l’exécution"
+                : newChatGroupIntent ? "Ouvrir l’orchestrateur" : "Ouvrir le chat"}</span>
           </button>
         </footer>
       </section>
@@ -30729,6 +30749,7 @@ const openNewChatModal = (
     accountId?: string | null;
     task?: Pick<TaskItem, "title"> | null;
     prompt?: string | null;
+    group?: boolean;
   } = {},
 ) => {
   if (!settings) return;
@@ -30740,6 +30761,7 @@ const openNewChatModal = (
     return;
   }
   newChatPendingWorkspace = environmentPath;
+  newChatGroupIntent = options.group === true;
   const requestedAccountId = accountById(options.accountId)?.id ?? null;
   newChatRoutingMode = requestedAccountId ? "manual" : "automatic";
   newChatAccountId = requestedAccountId ??
@@ -30767,7 +30789,7 @@ const openNewChatModal = (
     ? "Exécution prête à être lancée"
     : storedPrompt
       ? "Prompt prêt dans une nouvelle conversation"
-    : "Nouvelle conversation prête";
+    : newChatGroupIntent ? "Nouveau groupe prêt" : "Nouvelle conversation prête";
   render();
   void refreshLimitStatus(true);
   if (!window.matchMedia("(max-width: 860px)").matches) {
@@ -30782,6 +30804,7 @@ const closeNewChatModal = () => {
   const returnFocus = takeDialogTrigger("new-chat");
   cancelNewChatBestQuotaRequest();
   newChatModalOpen = false;
+  newChatGroupIntent = false;
   newChatPendingTaskTitle = null;
   newChatPendingPrompt = null;
   newChatPendingPromptAutoSend = false;
@@ -30852,6 +30875,7 @@ const confirmNewChatModal = async () => {
   const pendingPromptAutoSend = newChatPendingPromptAutoSend;
   forgetDialogTrigger("new-chat");
   newChatModalOpen = false;
+  newChatGroupIntent = false;
   newChatPendingTaskTitle = null;
   newChatPendingPrompt = null;
   newChatPendingPromptAutoSend = false;

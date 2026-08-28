@@ -7102,6 +7102,80 @@ button.chat-workspace-select:hover,
 .chat-workspace-new svg,
 .chat-workspace-close svg { width: 12px; height: 12px; }
 .chat-workspace-terminals { padding: 4px; }
+.chat-sidebar-group-stack {
+  display: grid;
+  gap: 7px;
+  margin: 12px 0 10px;
+}
+.chat-sidebar-group-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 3px;
+}
+.chat-sidebar-group-toolbar > span {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+.chat-sidebar-group-toolbar > span > span { display: grid; min-width: 0; gap: 1px; }
+.chat-sidebar-group-toolbar svg { width: 13px; height: 13px; color: #aca0ff; }
+.chat-sidebar-group-toolbar strong {
+  color: #d1caff;
+  font: 700 10px var(--font-head);
+  letter-spacing: 0.055em;
+  text-transform: uppercase;
+}
+.chat-sidebar-group-toolbar small { color: var(--chat-muted); font-size: 8px; }
+.chat-sidebar-group-toolbar > b {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 21px;
+  height: 21px;
+  padding-inline: 6px;
+  border-radius: 999px;
+  background: rgba(139, 123, 255, 0.14);
+  color: #b9afff;
+  font-size: 9px;
+}
+.chat-sidebar-new-group {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) 14px;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px;
+  border: 1px dashed rgba(139, 123, 255, 0.42);
+  border-radius: 11px;
+  background: rgba(108, 92, 231, 0.075);
+  color: var(--chat-text);
+  text-align: left;
+  cursor: pointer;
+}
+.chat-sidebar-new-group:hover {
+  border-style: solid;
+  background: rgba(108, 92, 231, 0.14);
+}
+.chat-sidebar-new-group:disabled { opacity: 0.45; cursor: not-allowed; }
+.chat-sidebar-new-group > span:first-child {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  background: rgba(139, 123, 255, 0.16);
+  color: #b7adff;
+}
+.chat-sidebar-new-group > span:nth-child(2) { display: grid; min-width: 0; gap: 2px; }
+.chat-sidebar-new-group strong { color: #ddd9ff; font: 650 11px var(--font-head); }
+.chat-sidebar-new-group small { color: #8e899f; font-size: 9px; }
+.chat-sidebar-new-group svg { width: 13px; height: 13px; }
+.chat-sidebar-new-group > svg { color: #827c94; }
+.chat-sidebar-group-stack > .chat-workspace-chat-groups { padding: 0; }
 .chat-workspace-chat-groups {
   display: grid;
   gap: 8px;
