@@ -3941,11 +3941,22 @@ fn filter_discussions_for_identity(
     mut dashboard: discussions::DiscussionsDashboard,
 ) -> discussions::DiscussionsDashboard {
     let owned_account_ids = owned_account_ids_for_identity(state, identity);
+    let orchestration_discussions = accessible_orchestration_discussion_keys(state, identity);
     let mut workspace_authorizations = HashMap::<String, bool>::new();
     for account in &mut dashboard.accounts {
         let account_owner = owned_account_ids.contains(&account.account_id);
         account.discussions.retain(|discussion| {
             account_owner
+                || orchestration_discussion_is_authorized(
+                    &orchestration_discussions,
+                    &account.account_id,
+                    &discussion.session_id,
+                )
+                || orchestration_discussion_is_authorized(
+                    &orchestration_discussions,
+                    &account.account_id,
+                    &discussion.rollout_id,
+                )
                 || discussion.cwd.as_deref().is_some_and(|cwd| {
                     *workspace_authorizations
                         .entry(cwd.to_string())
@@ -3976,11 +3987,15 @@ fn authorize_discussion_for_identity(
     account_id: &str,
     session_id: &str,
 ) -> Result<(), Response> {
-    let cwd = discussions::discussion_cwd_for_authorization(account_id, session_id)
-        .map_err(|error| api_error(StatusCode::NOT_FOUND, &error, &state.config))?;
     if identity_owns_account(state, identity, account_id) {
         return Ok(());
     }
+    let orchestration_discussions = accessible_orchestration_discussion_keys(state, identity);
+    if orchestration_discussion_is_authorized(&orchestration_discussions, account_id, session_id) {
+        return Ok(());
+    }
+    let cwd = discussions::discussion_cwd_for_authorization(account_id, session_id)
+        .map_err(|error| api_error(StatusCode::NOT_FOUND, &error, &state.config))?;
     let cwd = cwd.as_deref().ok_or_else(|| {
         api_error(
             StatusCode::FORBIDDEN,
@@ -8671,6 +8686,96 @@ fn orchestration_access_project_dir(run: &OrchestrationSnapshot) -> &str {
         .unwrap_or(&run.project_dir)
 }
 
+fn orchestration_orchestrator_account_id(run: &OrchestrationSnapshot) -> &str {
+    if run.orchestrator_account_id.trim().is_empty() {
+        &run.account_id
+    } else {
+        &run.orchestrator_account_id
+    }
+}
+
+fn orchestration_worker_account_id<'a>(
+    run: &'a OrchestrationSnapshot,
+    task: &'a crate::orchestration::OrchestrationTask,
+) -> &'a str {
+    if !task.account_id.trim().is_empty() {
+        &task.account_id
+    } else {
+        run.worker_account_ids
+            .get(task.position.saturating_sub(1) as usize)
+            .filter(|account_id| !account_id.trim().is_empty())
+            .map(String::as_str)
+            .unwrap_or(&run.account_id)
+    }
+}
+
+fn insert_orchestration_discussion_key(
+    keys: &mut HashSet<(String, String)>,
+    account_id: &str,
+    session_id: Option<&str>,
+) {
+    let account_id = account_id.trim();
+    let session_id = session_id.map(str::trim).filter(|value| !value.is_empty());
+    if account_id.is_empty() {
+        return;
+    }
+    if let Some(session_id) = session_id {
+        keys.insert((account_id.to_string(), session_id.to_string()));
+    }
+}
+
+fn orchestration_discussion_keys(run: &OrchestrationSnapshot) -> HashSet<(String, String)> {
+    let mut keys = HashSet::new();
+    let orchestrator_account_id = orchestration_orchestrator_account_id(run);
+    insert_orchestration_discussion_key(
+        &mut keys,
+        orchestrator_account_id,
+        run.orchestrator_session_id.as_deref(),
+    );
+    for tester in &run.testers {
+        insert_orchestration_discussion_key(
+            &mut keys,
+            orchestrator_account_id,
+            tester.session_id.as_deref(),
+        );
+    }
+    for task in &run.tasks {
+        insert_orchestration_discussion_key(
+            &mut keys,
+            orchestration_worker_account_id(run, task),
+            task.session_id.as_deref(),
+        );
+    }
+    keys
+}
+
+fn accessible_orchestration_discussion_keys(
+    state: &Arc<ServerState>,
+    identity: &AuthIdentity,
+) -> HashSet<(String, String)> {
+    state
+        .orchestration
+        .list()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|run| {
+            state
+                .workspace_access
+                .authorize_existing_environment(identity, orchestration_access_project_dir(run))
+                .is_ok()
+        })
+        .flat_map(|run| orchestration_discussion_keys(&run))
+        .collect()
+}
+
+fn orchestration_discussion_is_authorized(
+    keys: &HashSet<(String, String)>,
+    account_id: &str,
+    session_id: &str,
+) -> bool {
+    keys.contains(&(account_id.trim().to_string(), session_id.trim().to_string()))
+}
+
 async fn api_list_autonomous_agents(
     State(state): State<Arc<ServerState>>,
     headers: HeaderMap,
@@ -10937,6 +11042,85 @@ mod tests {
             resource_error_status("Etat des conversations verrouille"),
             StatusCode::INTERNAL_SERVER_ERROR
         );
+    }
+
+    #[test]
+    fn orchestration_discussion_acl_covers_every_session_and_resolved_account() {
+        let run: OrchestrationSnapshot = serde_json::from_value(json!({
+            "id": "run-1",
+            "name": "Equipe",
+            "objective": "Tester l'autorisation des chats",
+            "workerCount": 3,
+            "testerCount": 1,
+            "accountId": "account-legacy",
+            "orchestratorAccountId": "account-orchestrator",
+            "workerAccountIds": ["account-worker-1"],
+            "projectDir": "C:/internal/run/source",
+            "testCommand": "git diff --check",
+            "testTimeoutSeconds": 60,
+            "status": "active",
+            "phase": "working",
+            "createdAt": 1,
+            "updatedAt": 1,
+            "baseCommit": "base",
+            "integratedCommit": "base",
+            "sandboxRoot": "C:/internal/run",
+            "orchestratorDir": "C:/internal/run/orchestrator",
+            "orchestratorSessionId": "session-orchestrator",
+            "testers": [{
+                "id": "tester-01",
+                "position": 1,
+                "status": "designing",
+                "sessionId": "session-tester"
+            }],
+            "tasks": [
+                {
+                    "id": "task-01",
+                    "position": 1,
+                    "title": "Worker avec compte de la liste",
+                    "description": "",
+                    "status": "working",
+                    "sessionId": "session-worker-1"
+                },
+                {
+                    "id": "task-02",
+                    "position": 2,
+                    "title": "Worker reassigne",
+                    "description": "",
+                    "status": "working",
+                    "accountId": "account-worker-2",
+                    "sessionId": "session-worker-2"
+                },
+                {
+                    "id": "task-03",
+                    "position": 3,
+                    "title": "Worker legacy",
+                    "description": "",
+                    "status": "working",
+                    "sessionId": "session-worker-legacy"
+                }
+            ]
+        }))
+        .unwrap();
+
+        let keys = orchestration_discussion_keys(&run);
+        for (account_id, session_id) in [
+            ("account-orchestrator", "session-orchestrator"),
+            ("account-orchestrator", "session-tester"),
+            ("account-worker-1", "session-worker-1"),
+            ("account-worker-2", "session-worker-2"),
+            ("account-legacy", "session-worker-legacy"),
+        ] {
+            assert!(
+                orchestration_discussion_is_authorized(&keys, account_id, session_id),
+                "la session {session_id} doit etre autorisee pour {account_id}"
+            );
+        }
+        assert!(!orchestration_discussion_is_authorized(
+            &keys,
+            "account-worker-2",
+            "session-worker-1"
+        ));
     }
 
     #[test]
