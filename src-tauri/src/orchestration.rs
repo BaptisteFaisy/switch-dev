@@ -3507,9 +3507,7 @@ fn worktree_matches_commit(path: &Path, commit: &str, scratch_dir: &Path) -> Res
     let index_path = scratch_dir.join(format!(".publish-verify-{}.index", Uuid::new_v4()));
     let lock_path = index_path.with_extension("index.lock");
     let result = (|| {
-        let read_tree = git_command()
-            .arg("-C")
-            .arg(path)
+        let read_tree = git_command_at(path)
             .env("GIT_INDEX_FILE", &index_path)
             .args(["read-tree", commit])
             .output()
@@ -3524,9 +3522,7 @@ fn worktree_matches_commit(path: &Path, commit: &str, scratch_dir: &Path) -> Res
         // `read-tree` connait les blobs attendus mais pas encore les metadonnees
         // du worktree courant. Le rafraichissement evite que Git signale chaque
         // fichier comme modifie uniquement parce que son stat cache est vide.
-        let refresh = git_command()
-            .arg("-C")
-            .arg(path)
+        let refresh = git_command_at(path)
             .env("GIT_INDEX_FILE", &index_path)
             .args(["update-index", "--refresh"])
             .output()
@@ -3538,9 +3534,7 @@ fn worktree_matches_commit(path: &Path, commit: &str, scratch_dir: &Path) -> Res
             ));
         }
 
-        let tracked = git_command()
-            .arg("-C")
-            .arg(path)
+        let tracked = git_command_at(path)
             .env("GIT_INDEX_FILE", &index_path)
             .args(["diff-files", "--quiet", "--ignore-submodules"])
             .output()
@@ -3555,9 +3549,7 @@ fn worktree_matches_commit(path: &Path, commit: &str, scratch_dir: &Path) -> Res
             ));
         }
 
-        let untracked = git_command()
-            .arg("-C")
-            .arg(path)
+        let untracked = git_command_at(path)
             .env("GIT_INDEX_FILE", &index_path)
             .args(["ls-files", "--others", "--exclude-standard", "-z"])
             .output()
@@ -3614,9 +3606,7 @@ fn run_validation_command(run: &OrchestrationSnapshot, cancelled: &AtomicBool) -
                 output: "Validation annulee".to_string(),
             };
         }
-        let output = git_command()
-            .arg("-C")
-            .arg(&run.orchestrator_dir)
+        let output = git_command_at(Path::new(&run.orchestrator_dir))
             .args(["diff", "--check", &run.base_commit, "--"])
             .output();
         return match output {
@@ -4444,7 +4434,9 @@ fn clone_private_source_repository(
     sandbox_root: &Path,
 ) -> Result<PathBuf, String> {
     let repository = sandbox_root.join("source");
-    let output = git_command()
+    let mut command = git_command();
+    add_git_safe_directory(&mut command, source);
+    let output = command
         .args(["clone", "--no-local", "--no-checkout", "--no-tags"])
         .arg(source)
         .arg(&repository)
@@ -4620,13 +4612,7 @@ fn add_worktree(repo: &Path, target: &Path, commit: &str) -> Result<(), String> 
     if target.exists() {
         return Err(format!("Le sandbox existe deja : {}", target.display()));
     }
-    let output = git_command()
-        .args([
-            "-c",
-            &format!("core.hooksPath={}", disabled_git_hooks_path()),
-        ])
-        .arg("-C")
-        .arg(repo)
+    let output = git_command_at(repo)
         .args(["worktree", "add", "--detach"])
         .arg(target)
         .arg(commit)
@@ -4706,9 +4692,7 @@ fn remove_owned_worktrees(
             return Err("Refus de supprimer un worktree hors du sandbox".to_string());
         }
         if path.exists() {
-            let output = git_command()
-                .arg("-C")
-                .arg(repo)
+            let output = git_command_at(repo)
                 .args(["worktree", "remove", "--force"])
                 .arg(&path)
                 .output()
@@ -4746,10 +4730,33 @@ fn git_command() -> Command {
     command
 }
 
+fn git_safe_directory(path: &Path) -> String {
+    let normalized = comparison_path(path).to_string_lossy().replace('\\', "/");
+    if let Some(unc) = normalized.strip_prefix("//?/UNC/") {
+        format!("//{unc}")
+    } else {
+        normalized
+            .strip_prefix("//?/")
+            .unwrap_or(&normalized)
+            .to_string()
+    }
+}
+
+fn add_git_safe_directory(command: &mut Command, path: &Path) {
+    command
+        .arg("-c")
+        .arg(format!("safe.directory={}", git_safe_directory(path)));
+}
+
+fn git_command_at(path: &Path) -> Command {
+    let mut command = git_command();
+    add_git_safe_directory(&mut command, path);
+    command.arg("-C").arg(path);
+    command
+}
+
 fn git_text<'a>(path: &Path, args: impl IntoIterator<Item = &'a str>) -> Result<String, String> {
-    let output = git_command()
-        .arg("-C")
-        .arg(path)
+    let output = git_command_at(path)
         .args(args)
         .output()
         .map_err(|error| format!("Git est indisponible : {error}"))?;
@@ -4763,9 +4770,7 @@ fn git_status<'a>(
     path: &Path,
     args: impl IntoIterator<Item = &'a str>,
 ) -> Result<ExitStatus, String> {
-    git_command()
-        .arg("-C")
-        .arg(path)
+    git_command_at(path)
         .args(args)
         .status()
         .map_err(|error| format!("Git est indisponible : {error}"))
@@ -4777,9 +4782,7 @@ fn git_output_file<'a>(
     output_path: &Path,
 ) -> Result<(), String> {
     let file = File::create(output_path).map_err(|error| error.to_string())?;
-    let output = git_command()
-        .arg("-C")
-        .arg(path)
+    let output = git_command_at(path)
         .args(args)
         .stdout(Stdio::from(file))
         .stderr(Stdio::piped())
@@ -4797,8 +4800,8 @@ fn run_git<'a>(
     args: impl IntoIterator<Item = &'a str>,
     stdin_path: Option<&Path>,
 ) -> Result<(), String> {
-    let mut command = git_command();
-    command.arg("-C").arg(path).args(args);
+    let mut command = git_command_at(path);
+    command.args(args);
     if let Some(stdin_path) = stdin_path {
         command.stdin(Stdio::from(
             File::open(stdin_path).map_err(|error| error.to_string())?,
@@ -5446,6 +5449,27 @@ pub fn delete_orchestration(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn git_commands_trust_only_the_exact_repository() {
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("le manifeste Rust doit appartenir au depot");
+        let expected = format!("safe.directory={}", git_safe_directory(repository));
+        let command = git_command_at(repository);
+        let arguments = command
+            .get_args()
+            .map(|argument| argument.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+
+        assert!(arguments.iter().any(|argument| argument == &expected));
+        assert!(!arguments
+            .iter()
+            .any(|argument| argument == "safe.directory=*"));
+        assert!(!git_text(repository, ["rev-parse", "HEAD"])
+            .unwrap()
+            .is_empty());
+    }
 
     #[test]
     fn parses_single_line_plan_contract() {
