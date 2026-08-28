@@ -13122,9 +13122,21 @@ const sendExpertChatMessage = async (
     );
     if (!launched) {
       pane.messages = messagesBeforeLaunch;
+      // Un moteur d'orchestration indisponible ne doit jamais rendre le chat
+      // entier inutilisable. Revenir explicitement au chat direct, desactiver
+      // le bouton pour les messages suivants et rejouer exactement la demande
+      // conservee (ainsi que ses pieces jointes) sans demander une seconde
+      // action a l'utilisateur.
+      pane.automaticOrchestrationEnabled = false;
+      statusText = "Orchestrateur indisponible · lancement du chat direct";
       persistExpertChats();
       refreshExpertChatPane(pane);
-      return false;
+      return sendExpertChatMessage(
+        pane,
+        expertChatPaneRoot(pane),
+        submission.prompt,
+        intent,
+      );
     }
     pane.messages = pane.messages.map((message, index) =>
       index === pane.messages.length - 1 && message.deliveryState === "pending"

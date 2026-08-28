@@ -245,6 +245,18 @@ test("un chat normal force immédiatement l'équipe quand le bouton orchestrateu
   const forcedCreation = main.indexOf("if (submission.automaticOrchestration)", sendExpert);
   const ordinaryTurn = main.indexOf('invoke<ChatTurnSnapshot>("start_chat_turn"', sendExpert);
   assert.ok(sendExpert >= 0 && forcedCreation > sendExpert && ordinaryTurn > forcedCreation);
+  const orchestrationFallback = main.indexOf(
+    'statusText = "Orchestrateur indisponible · lancement du chat direct"',
+    forcedCreation,
+  );
+  assert.ok(
+    orchestrationFallback > forcedCreation && orchestrationFallback < ordinaryTurn,
+    "le repli direct doit rester dans le chemin d'echec de l'orchestration",
+  );
+  assert.match(
+    main.slice(forcedCreation, ordinaryTurn),
+    /pane\.automaticOrchestrationEnabled = false;[\s\S]*?return sendExpertChatMessage\([\s\S]*?submission\.prompt,[\s\S]*?intent/,
+  );
   const routingDecision = main.indexOf("const shouldLaunchAutomaticOrchestration");
   const launchReservation = main.indexOf("pane.automaticOrchestrationLaunching = true", routingDecision);
   const sessionAttachment = main.indexOf("attached = await attachment", routingDecision);
