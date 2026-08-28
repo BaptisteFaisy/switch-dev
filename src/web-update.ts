@@ -1,41 +1,17 @@
 const WEB_UPDATE_POLL_INTERVAL_MS = 5_000;
 
-type HealthBuild = {
-  version?: string;
-  commit?: string;
+export const frontendBuildIdentity = (html: string): string | null => {
+  const marker = html.match(
+    /<meta\b[^>]*\bname\s*=\s*["']cst-build-id["'][^>]*>/i,
+  )?.[0];
+  const identity = marker?.match(/\bcontent\s*=\s*["']([^"']+)["']/i)?.[1]?.trim() ?? "";
+  return identity || null;
 };
 
-const GIT_COMMIT_PATTERN = /^[0-9a-f]{7,40}$/i;
-
-const normalizedGitCommit = (value: string | undefined): string | null => {
-  const commit = value?.trim() ?? "";
-  return GIT_COMMIT_PATTERN.test(commit) ? commit.toLowerCase() : null;
-};
-
-const sameBuildIdentity = (left: string, right: string): boolean => {
-  if (left === right) return true;
-  if (!GIT_COMMIT_PATTERN.test(left) || !GIT_COMMIT_PATTERN.test(right)) return false;
-  // Le frontend et le serveur peuvent embarquer le meme SHA avec des longueurs
-  // differentes (par exemple 7 et 40 caracteres).
-  return left.startsWith(right) || right.startsWith(left);
-};
-
-let observedBuild: string | null = normalizedGitCommit(__CST_BUILD_COMMIT__);
+let observedBuild: string | null = __CST_BUILD_ID__.trim() || null;
 let poll: number | null = null;
 let checkInFlight = false;
 let reloading = false;
-
-const buildIdentity = (health: HealthBuild): string | null => {
-  const commit = normalizedGitCommit(health.commit);
-  if (commit) return commit;
-  // Un deploiement frontend seul peut laisser le serveur sur un identifiant de
-  // release (ex. "switch-vps-...") qui n'est pas comparable au SHA du bundle.
-  // Dans ce cas, ignorer la sonde evite un rechargement permanent. Le fallback
-  // par version ne sert que si le frontend n'a lui-meme aucun SHA exploitable.
-  if (observedBuild !== null) return null;
-  const version = health.version?.trim() ?? "";
-  return version || null;
-};
 
 const refreshToLatestBuild = async () => {
   if (reloading) return;
@@ -71,18 +47,21 @@ export const checkForWebUpdate = async (): Promise<void> => {
   if (checkInFlight || reloading) return;
   checkInFlight = true;
   try {
-    const response = await fetch("/healthz", {
+    // Comparer deux frontends. Le backend peut rester volontairement sur son
+    // commit precedent lors d'une publication CSS/JS sans redemarrage ; le
+    // comparer au bundle courant provoquait alors un reload toutes les 5 s.
+    const response = await fetch("/", {
       cache: "no-store",
-      headers: { Accept: "application/json" },
+      headers: { Accept: "text/html" },
     });
     if (!response.ok) return;
-    const identity = buildIdentity(await response.json() as HealthBuild);
+    const identity = frontendBuildIdentity(await response.text());
     if (!identity) return;
     if (observedBuild === null) {
       observedBuild = identity;
       return;
     }
-    if (!sameBuildIdentity(identity, observedBuild)) await refreshToLatestBuild();
+    if (identity !== observedBuild) await refreshToLatestBuild();
   } catch {
     // Une courte coupure est normale pendant la bascule atomique du serveur.
   } finally {

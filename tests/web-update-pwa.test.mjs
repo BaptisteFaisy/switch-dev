@@ -16,41 +16,22 @@ const block = (source, start, end) => {
   return source.slice(from, to);
 };
 
-test("la sonde web connaît son intervalle et le format des commits", () => {
+test("la sonde web connaît son intervalle et le marqueur du frontend", () => {
   assert.match(web, /const WEB_UPDATE_POLL_INTERVAL_MS = 5_000;/);
-  assert.match(web, /type HealthBuild = \{/);
-  assert.match(web, /version\?: string;/);
-  assert.match(web, /commit\?: string;/);
-  assert.match(web, /const GIT_COMMIT_PATTERN = \/\^\[0-9a-f\]\{7,40\}\$\/i;/);
+  assert.match(web, /export const frontendBuildIdentity = \(html: string\): string \| null =>/);
+  assert.match(web, /cst-build-id/);
+  assert.match(web, /__CST_BUILD_ID__\.trim\(\) \|\| null/);
   assert.ok(web.includes("5_000"), "intervalle de poll");
-  assert.ok(web.includes("0-9a-f"), "hexadécimal");
+  assert.ok(web.includes("cst-build-id"), "marqueur de build frontend");
 });
 
-test("normalizedGitCommit trime, vérifie et miniscule", () => {
-  const normalize = block(web, "const normalizedGitCommit", "const sameBuildIdentity");
-  assert.match(normalize, /value\?\.trim\(\) \?\? ""/);
-  assert.match(normalize, /GIT_COMMIT_PATTERN\.test\(commit\)/);
-  assert.match(normalize, /commit\.toLowerCase\(\)/);
-  assert.match(normalize, /: null;/);
-});
-
-test("sameBuildIdentity accepte l'égalité et les préfixes de SHA", () => {
-  const same = block(web, "const sameBuildIdentity", "let observedBuild");
-  assert.match(same, /if \(left === right\) return true;/);
-  assert.match(same, /!GIT_COMMIT_PATTERN\.test\(left\) \|\| !GIT_COMMIT_PATTERN\.test\(right\)/);
-  assert.match(same, /return false;/);
-  assert.match(same, /left\.startsWith\(right\) \|\| right\.startsWith\(left\)/);
-  assert.ok(same.indexOf("7 et 40 caracteres") >= 0, "commentaire 7/40");
-});
-
-test("l'identité de build gère SHA, release seule et fallback version", () => {
-  const identity = block(web, "const buildIdentity", "const refreshToLatestBuild");
-  assert.match(identity, /normalizedGitCommit\(health\.commit\)/);
-  assert.match(identity, /if \(commit\) return commit;/);
-  assert.match(identity, /if \(observedBuild !== null\) return null;/);
-  assert.match(identity, /health\.version\?\.trim\(\) \?\? ""/);
-  assert.match(identity, /return version \|\| null;/);
-  assert.ok(identity.indexOf("switch-vps-") >= 0, "identifiant de release connu");
+test("frontendBuildIdentity extrait et nettoie le marqueur meta", () => {
+  const identity = block(web, "export const frontendBuildIdentity", "let observedBuild");
+  assert.match(identity, /html\.match\(/);
+  assert.match(identity, /name\\s\*=\\s\*\["'\]cst-build-id/);
+  assert.match(identity, /content\\s\*=\\s\*\["'\]\(\[\^"'\]\+\)/);
+  assert.match(identity, /\?\.\[1\]\?\.trim\(\) \?\? ""/);
+  assert.match(identity, /return identity \|\| null;/);
 });
 
 test("refreshToLatestBuild met à jour le worker puis recharge", () => {
@@ -69,15 +50,15 @@ test("checkForWebUpdate ne re-vérifie jamais en vol ni pendant un rechargement"
   const check = block(web, "export const checkForWebUpdate", "export const initWebAutoUpdate");
   assert.match(check, /if \(checkInFlight \|\| reloading\) return;/);
   assert.match(check, /checkInFlight = true;/);
-  assert.match(check, /fetch\("\/healthz", \{/);
+  assert.match(check, /fetch\("\/", \{/);
   assert.match(check, /cache: "no-store"/);
-  assert.match(check, /Accept: "application\/json"/);
+  assert.match(check, /Accept: "text\/html"/);
   assert.match(check, /if \(!response\.ok\) return;/);
-  assert.match(check, /buildIdentity\(await response\.json\(\)/);
+  assert.match(check, /frontendBuildIdentity\(await response\.text\(\)\)/);
   assert.match(check, /if \(!identity\) return;/);
   assert.match(check, /if \(observedBuild === null\) \{/);
   assert.match(check, /observedBuild = identity;/);
-  assert.match(check, /sameBuildIdentity\(identity, observedBuild\)/);
+  assert.match(check, /identity !== observedBuild/);
   assert.match(check, /await refreshToLatestBuild\(\);/);
   assert.match(check, /finally \{/);
   assert.match(check, /checkInFlight = false;/);

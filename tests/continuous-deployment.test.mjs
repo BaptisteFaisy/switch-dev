@@ -33,6 +33,7 @@ test("le push main deploie des artefacts precompiles et signes puis les clients 
   assert.match(updater, /minisign -Vm "\$asset" -x "\$asset\.minisig" -P "\$MINISIGN_PUBKEY"/);
   assert.match(updater, /Mode frontend : binaire conserve \(\$BUILT_BIN\), seul dist\/ est remplace/);
 
-  assert.match(webUpdate, /fetch\("\/healthz"/);
+  assert.match(webUpdate, /fetch\("\/"/);
+  assert.match(webUpdate, /cst-build-id/);
   assert.match(webUpdate, /window\.location\.reload\(\)/);
 });

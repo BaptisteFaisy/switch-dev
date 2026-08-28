@@ -8,8 +8,8 @@ test("le client web detecte un nouveau build et recharge sans cache", async () =
   const source = await read("src/web-update.ts");
   const main = await read("src/main.ts");
 
-  assert.match(source, /fetch\("\/healthz"/);
-  assert.match(source, /__CST_BUILD_COMMIT__/);
+  assert.match(source, /fetch\("\/"/);
+  assert.match(source, /__CST_BUILD_ID__/);
   assert.match(source, /cache: "no-store"/);
   assert.match(source, /serviceWorker\?\.getRegistration\(\)/);
   assert.match(source, /window\.location\.reload\(\)/);
@@ -17,14 +17,15 @@ test("le client web detecte un nouveau build et recharge sans cache", async () =
   assert.match(main, /initWebAutoUpdate\(\)/);
 });
 
-test("le client ne compare pas un SHA frontend avec un identifiant de release serveur", async () => {
+test("le client compare le frontend charge avec l'index servi, jamais avec le backend", async () => {
   const source = await read("src/web-update.ts");
+  const vite = await read("vite.config.ts");
 
-  assert.match(source, /GIT_COMMIT_PATTERN = \/\^\[0-9a-f\]\{7,40\}\$\/i/);
-  assert.match(source, /normalizedGitCommit\(health\.commit\)/);
-  assert.match(source, /if \(observedBuild !== null\) return null/);
-  assert.match(source, /sameBuildIdentity\(identity, observedBuild\)/);
-  assert.match(source, /left\.startsWith\(right\) \|\| right\.startsWith\(left\)/);
+  assert.match(source, /let observedBuild: string \| null = __CST_BUILD_ID__\.trim\(\) \|\| null/);
+  assert.match(source, /frontendBuildIdentity\(await response\.text\(\)\)/);
+  assert.match(source, /identity !== observedBuild/);
+  assert.doesNotMatch(source, /fetch\("\/healthz"/);
+  assert.match(vite, /name: "cst-build-id", content: buildId/);
 });
 
 test("le commit embarque vient de CST_GIT_COMMIT et est declare pour tsc", async () => {

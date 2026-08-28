@@ -5,11 +5,11 @@ const buildId =
   process.env.CST_BUILD_ID
   ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 
-// Commit git embarque dans le bundle frontend. Le serveur expose le meme commit
-// via /healthz (server.rs COMMIT, lui-meme alimente par CST_GIT_COMMIT) : le
-// client web compare les deux pour recharger automatiquement apres un
-// deploiement. Priorite identique a src-tauri/build.rs : env CST_GIT_COMMIT,
-// puis `git rev-parse --short HEAD`, puis "unknown".
+// Commit git embarque dans le bundle frontend pour la tracabilite du build.
+// L'auto-update utilise le buildId propre au frontend dans index.html : une
+// publication CSS/JS peut ainsi rester independante du commit du backend.
+// Priorite identique a src-tauri/build.rs : env CST_GIT_COMMIT, puis
+// `git rev-parse --short HEAD`, puis "unknown".
 const gitShortCommit = (): string | undefined => {
   try {
     const commit = execSync("git rev-parse --short HEAD", { encoding: "utf8" }).trim();
@@ -46,7 +46,14 @@ const dynamicEntryChunk = (): Plugin => ({
       "});",
       "</script>",
     ].join("");
-    return html.replace(entry[0], bootstrap);
+    return {
+      html: html.replace(entry[0], bootstrap),
+      tags: [{
+        tag: "meta",
+        attrs: { name: "cst-build-id", content: buildId },
+        injectTo: "head-prepend",
+      }],
+    };
   },
 });
 
