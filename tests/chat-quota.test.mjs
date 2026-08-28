@@ -6,6 +6,7 @@ import {
   bestQuotaAccountForNewChat,
   combinedQuotaUsage,
   deduplicateQuotaAccountsForDisplay,
+  fallbackAccountForNewChat,
   isQuotaAuthenticationError,
   isQuotaExhaustionError,
   OPEN_CHAT_QUOTA_RESERVATION_PERCENT,
@@ -180,6 +181,28 @@ test("le nouveau chat choisit le plus gros quota apres reservation des chats ouv
   );
 });
 
+test("le nouveau chat peut utiliser un compte connecte sans quota mesure", () => {
+  const accounts = [
+    { id: "deconnecte", hasTokens: false },
+    { id: "occupe", hasTokens: true },
+    { id: "libre", hasTokens: true },
+    { id: "invalide", hasTokens: true, error: "401 Unauthorized" },
+  ];
+
+  assert.equal(
+    fallbackAccountForNewChat(
+      accounts,
+      accounts.map((account) => account.id),
+      ["occupe", "occupe"],
+    )?.id,
+    "libre",
+  );
+  assert.equal(
+    fallbackAccountForNewChat(accounts, ["deconnecte", "invalide"], []),
+    null,
+  );
+});
+
 test("l'action principale route silencieusement vers le compte compatible le plus disponible", () => {
   const routingStart = main.indexOf("const confirmNewChatWithBestQuota = async");
   const routingEnd = main.indexOf("\nconst openNewChatModal =", routingStart);
@@ -190,8 +213,10 @@ test("l'action principale route silencieusement vers le compte compatible le plu
   assert.match(main, /const confirmNewChatWithBestQuota = async/);
   assert.match(
     main,
-    /compatibleAccountIds[\s\S]*?bestQuotaAccountForNewChat\([\s\S]*?openChatAccountIdsForQuotaSelection\(\)/,
+    /compatibleAccountIds[\s\S]*?bestQuotaAccountForNewChat\([\s\S]*?fallbackAccountForNewChat/,
   );
+  assert.match(routing, /selectAutomaticAccount\(compatibleAccountIds\)[\s\S]*?selectAutomaticAccount\(allAccountIds\)/);
+  assert.match(routing, /if \(!automaticAccount\)[\s\S]*?Aucun agent connecté/);
   assert.match(
     main,
     /newChatRoutingMode === "automatic"[\s\S]*?void confirmNewChatWithBestQuota\(\)/,

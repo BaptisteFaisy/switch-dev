@@ -293,6 +293,35 @@ export const bestQuotaAccountForNewChat = <T extends ChatAccountQuota>(
 };
 
 /**
+ * Repli pour les fournisseurs connectes qui n'exposent pas de pourcentage de
+ * quota exploitable. Le compte ayant le moins de chats ouverts est choisi ; un
+ * compte deconnecte ou dont l'authentification a expire reste toujours exclu.
+ */
+export const fallbackAccountForNewChat = <T extends ChatAccountQuota>(
+  accounts: T[],
+  eligibleAccountIds: Iterable<string>,
+  openChatAccountIds: Iterable<string>,
+): T | null => {
+  const eligible = new Set(eligibleAccountIds);
+  const openChatCounts = new Map<string, number>();
+  for (const accountId of openChatAccountIds) {
+    openChatCounts.set(accountId, (openChatCounts.get(accountId) ?? 0) + 1);
+  }
+
+  let selected: T | null = null;
+  let selectedOpenChatCount = Number.POSITIVE_INFINITY;
+  for (const account of accounts) {
+    if (!eligible.has(account.id) || !quotaAccountIsSelectable(account)) continue;
+    const openChatCount = openChatCounts.get(account.id) ?? 0;
+    if (openChatCount < selectedOpenChatCount) {
+      selected = account;
+      selectedOpenChatCount = openChatCount;
+    }
+  }
+  return selected;
+};
+
+/**
  * Un tour deja lance doit etre repris ailleurs lorsque la lecture serveur
  * confirme que son compte est a zero. L'identifiant 0 est uniquement l'etat
  * optimiste du frontend : il n'existe pas encore de processus backend a

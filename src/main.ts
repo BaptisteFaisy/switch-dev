@@ -172,6 +172,7 @@ import {
   bestQuotaAccountForNewChat,
   combinedQuotaUsage,
   deduplicateQuotaAccountsForDisplay,
+  fallbackAccountForNewChat,
   isQuotaAuthenticationError,
   isQuotaExhaustionError,
   quotaAfterOpenChatReservations,
@@ -30514,17 +30515,35 @@ const confirmNewChatWithBestQuota = async (): Promise<void> => {
     // appel reseau ; la reprise automatique prendra le relais si necessaire.
     const currentAccount = accountById(newChatAccountId);
     const currentProvider = accountProvider(currentAccount);
-    const compatibleAccountIds = settings.accounts
+    const availableAccounts = settings.accounts.filter((account) => !accountSessionBusy(account));
+    const compatibleAccountIds = availableAccounts
       .filter((account) => accountProvider(account) === currentProvider)
       .map((account) => account.id);
-    const best = bestQuotaAccountForNewChat(
-      limitStatus,
-      compatibleAccountIds,
-      openChatAccountIdsForQuotaSelection(),
-    );
-    if (best) {
-      selectNewChatAccount(best.account.id, { automatic: true });
+    const chatAccountIds = availableAccounts
+      .filter((account) => accountProvider(account) !== "freebuff")
+      .map((account) => account.id);
+    const allAccountIds = chatAccountIds.length > 0
+      ? chatAccountIds
+      : availableAccounts.map((account) => account.id);
+    const openChatAccountIds = openChatAccountIdsForQuotaSelection();
+    const selectAutomaticAccount = (eligibleAccountIds: string[]): AccountLimitView | null =>
+      bestQuotaAccountForNewChat(
+        limitStatus,
+        eligibleAccountIds,
+        openChatAccountIds,
+      )?.account
+      ?? fallbackAccountForNewChat(limitStatus, eligibleAccountIds, openChatAccountIds);
+    // La preference de fournisseur reste prioritaire, mais elle ne doit jamais
+    // condamner l'ouverture si tous ses comptes sont deconnectes. Dans ce cas,
+    // l'attribution automatique bascule vers un autre agent de chat connecte.
+    const automaticAccount = selectAutomaticAccount(compatibleAccountIds)
+      ?? selectAutomaticAccount(allAccountIds);
+    if (!automaticAccount) {
+      setNewChatAutoStatus("Aucun agent connecté n’est disponible. Connectez un compte ou choisissez-en un autre.");
+      statusText = "Aucun agent connecté disponible pour ouvrir ce chat";
+      return;
     }
+    selectNewChatAccount(automaticAccount.id, { automatic: true });
     setNewChatAutoStatus("Ouverture de la conversation…");
     await confirmNewChatModal();
   } finally {
