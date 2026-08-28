@@ -40,3 +40,10 @@ Exemple de tâche enregistrée (en attente) :
 - Le push GitHub est obligatoire pour valider une modification destinée au dépôt distant, mais il doit être effectué uniquement après confirmation explicite de l’utilisateur juste avant `git push`.
 - Avant un commit, vérifier le diff et l’historique récent ; ne jamais inclure de secrets, fichiers générés ou modifications sans rapport.
 - Avant tout déploiement distant, analyser le diff depuis le dernier commit, valider le build et les tests, puis demander une confirmation explicite pour l’action réseau.
+
+# Protection des chats de développement
+
+- La copie locale/SSD reste exclusivement la version de développement. Son serveur HTTP doit être lancé via `scripts/start-switch-development-runtime.ps1` : le binaire et `dist` sont mis en cache sur le disque interne, tandis que les données et workspaces restent sur le Samsung T7.
+- Pour appliquer un nouveau binaire au serveur de développement, utiliser `scripts/restart-switch-development.ps1`. Ce script attend que `activeChatTurns + activeTerminals` soit nul, arme une courte lease de drain, puis redémarre.
+- Ne jamais arrêter directement `cst-server.exe`, utiliser `Stop-Process`, `taskkill` ou redémarrer la tâche planifiée tant qu’un chat ou un terminal est actif. L’option `-Force` du script de redémarrage n’est autorisée que sur demande explicite de l’utilisateur.
+- Un build peut être préparé pendant un chat, mais sa bascule vers le runtime ne doit avoir lieu qu’après l’inactivité constatée par le script protégé.

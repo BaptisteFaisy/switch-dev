@@ -1,0 +1,180 @@
+[CmdletBinding()]
+param(
+  [Parameter(Mandatory = $true)]
+  [string]$DeploymentRoot
+)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = "Stop"
+
+$deploymentRoot = [IO.Path]::GetFullPath($DeploymentRoot)
+$configPath = Join-Path $deploymentRoot "config\server.local.env.ps1"
+$sourceServerPath = Join-Path $deploymentRoot "app\cst-server.exe"
+$sourceStaticPath = Join-Path $deploymentRoot "app\dist"
+$dataPath = Join-Path $deploymentRoot "data"
+$deploymentRunPath = Join-Path $deploymentRoot "run"
+
+# Une reconstruction de developpement peut remplacer momentanement le paquet
+# principal. Utiliser le dernier backup complet evite de demarrer un ensemble
+# executable/frontend incomplet.
+if (
+  -not (Test-Path -LiteralPath $sourceServerPath -PathType Leaf) -or
+  -not (Test-Path -LiteralPath (Join-Path $sourceStaticPath "index.html") -PathType Leaf)
+) {
+  $fallbackRoot = Get-ChildItem -LiteralPath $deploymentRoot -Directory -Filter "app.bak-*" |
+    Where-Object {
+      (Test-Path -LiteralPath (Join-Path $_.FullName "cst-server.exe") -PathType Leaf) -and
+      (Test-Path -LiteralPath (Join-Path $_.FullName "dist\index.html") -PathType Leaf)
+    } |
+    Sort-Object Name -Descending |
+    Select-Object -First 1
+
+  if ($fallbackRoot) {
+    $sourceServerPath = Join-Path $fallbackRoot.FullName "cst-server.exe"
+    $sourceStaticPath = Join-Path $fallbackRoot.FullName "dist"
+  }
+}
+
+foreach ($requiredPath in @(
+  $configPath,
+  $sourceServerPath,
+  (Join-Path $sourceStaticPath "index.html")
+)) {
+  if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
+    throw "Deploiement Switch developpement incomplet : $requiredPath est absent."
+  }
+}
+
+. $configPath
+if (-not $env:CST_ADMIN_TOKEN) {
+  throw "CST_ADMIN_TOKEN est absent de la configuration locale."
+}
+if (-not $env:LOCALAPPDATA) {
+  throw "LOCALAPPDATA est indisponible : le runtime interne ne peut pas etre prepare."
+}
+
+# Le Samsung T7 a deja subi des reprises d'E/S Windows (event 153), capables de
+# tuer un executable mappe depuis E:. Le code et les fichiers statiques tournent
+# donc depuis le disque interne. Les donnees et workspaces restent ceux de la
+# version de developpement sur E:, sans aucune copie vers la production.
+$runtimeRoot = Join-Path $env:LOCALAPPDATA "SwitchDevelopmentRuntime"
+$runtimeReleasesPath = Join-Path $runtimeRoot "releases"
+$runtimeLogPath = Join-Path $runtimeRoot "logs"
+$runtimeRunPath = Join-Path $runtimeRoot "run"
+New-Item -ItemType Directory -Path @(
+  $runtimeReleasesPath,
+  $runtimeLogPath,
+  $runtimeRunPath,
+  $deploymentRunPath
+) -Force | Out-Null
+
+$sourceServerHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $sourceServerPath).Hash
+$sourceIndexPath = Join-Path $sourceStaticPath "index.html"
+$sourceIndexHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $sourceIndexPath).Hash
+$releaseId = $sourceServerHash.Substring(0, 16) + "-" + $sourceIndexHash.Substring(0, 16)
+$runtimeReleasePath = Join-Path $runtimeReleasesPath $releaseId
+$runtimeServerPath = Join-Path $runtimeReleasePath "cst-server.exe"
+$runtimeStaticPath = Join-Path $runtimeReleasePath "dist"
+$runtimeIndexPath = Join-Path $runtimeStaticPath "index.html"
+
+if (
+  -not (Test-Path -LiteralPath $runtimeServerPath -PathType Leaf) -or
+  -not (Test-Path -LiteralPath $runtimeIndexPath -PathType Leaf)
+) {
+  $stagePath = Join-Path $runtimeReleasesPath ("stage-" + [Guid]::NewGuid().ToString("N"))
+  New-Item -ItemType Directory -Path $stagePath -Force | Out-Null
+  Copy-Item -LiteralPath $sourceServerPath -Destination (Join-Path $stagePath "cst-server.exe")
+  Copy-Item -LiteralPath $sourceStaticPath -Destination $stagePath -Recurse
+
+  $stagedServerPath = Join-Path $stagePath "cst-server.exe"
+  $stagedIndexPath = Join-Path $stagePath "dist\index.html"
+  $stagedServerHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $stagedServerPath).Hash
+  $stagedIndexHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $stagedIndexPath).Hash
+  $sourceServerHashAfterCopy = (Get-FileHash -Algorithm SHA256 -LiteralPath $sourceServerPath).Hash
+  $sourceIndexHashAfterCopy = (Get-FileHash -Algorithm SHA256 -LiteralPath $sourceIndexPath).Hash
+
+  if (
+    $stagedServerHash -ne $sourceServerHash -or
+    $stagedIndexHash -ne $sourceIndexHash -or
+    $sourceServerHashAfterCopy -ne $sourceServerHash -or
+    $sourceIndexHashAfterCopy -ne $sourceIndexHash
+  ) {
+    throw "Le paquet Switch a change pendant sa mise en cache ; demarrage annule sans toucher au serveur existant."
+  }
+
+  if (-not (Test-Path -LiteralPath $runtimeReleasePath)) {
+    Move-Item -LiteralPath $stagePath -Destination $runtimeReleasePath
+  }
+  $runtimeServerPath = Join-Path $runtimeReleasePath "cst-server.exe"
+  $runtimeStaticPath = Join-Path $runtimeReleasePath "dist"
+}
+
+$runtimeIndexPath = Join-Path $runtimeStaticPath "index.html"
+foreach ($runtimeRequiredPath in @($runtimeServerPath, $runtimeIndexPath)) {
+  if (-not (Test-Path -LiteralPath $runtimeRequiredPath -PathType Leaf)) {
+    throw "Runtime Switch developpement incomplet : $runtimeRequiredPath est absent."
+  }
+}
+if (
+  (Get-FileHash -Algorithm SHA256 -LiteralPath $runtimeServerPath).Hash -ne $sourceServerHash -or
+  (Get-FileHash -Algorithm SHA256 -LiteralPath $runtimeIndexPath).Hash -ne $sourceIndexHash
+) {
+  throw "Runtime Switch developpement incoherent ; demarrage annule."
+}
+
+$env:CST_BIND = "127.0.0.1:18082"
+$env:CST_DATA_DIR = $dataPath
+$env:CST_STATIC_DIR = $runtimeStaticPath
+$env:CST_PUBLIC_BASE_URL = "https://pc-fixe-cst.tail3a8bdf.ts.net:10000"
+$env:CST_ALLOWED_ORIGINS = $env:CST_PUBLIC_BASE_URL
+$env:CST_DEVICE_EMBEDDED_CONNECTOR = "1"
+
+$listener = Get-NetTCPConnection -State Listen -LocalPort 18082 -ErrorAction SilentlyContinue |
+  Select-Object -First 1
+if ($listener) {
+  try {
+    $health = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:18082/healthz" -TimeoutSec 3
+    if ($health.StatusCode -eq 200) {
+      Write-Output "Switch developpement est deja disponible sur 127.0.0.1:18082."
+      return
+    }
+  } catch {
+    # Le port est occupe sans reponse Switch saine : ne jamais tuer aveuglement
+    # le processus d'un autre chantier.
+  }
+  throw "Le port 18082 est deja occupe par un autre processus."
+}
+
+$stamp = Get-Date -Format "yyyyMMdd-HHmmss"
+$stdoutPath = Join-Path $runtimeLogPath "cst-server-$stamp.stdout.log"
+$stderrPath = Join-Path $runtimeLogPath "cst-server-$stamp.stderr.log"
+$process = Start-Process -FilePath $runtimeServerPath `
+  -WorkingDirectory $runtimeReleasePath `
+  -WindowStyle Hidden `
+  -RedirectStandardOutput $stdoutPath `
+  -RedirectStandardError $stderrPath `
+  -PassThru
+$process.Id | Set-Content -LiteralPath (Join-Path $runtimeRunPath "cst-server.pid") -Encoding ascii
+$process.Id | Set-Content -LiteralPath (Join-Path $deploymentRunPath "cst-server.pid") -Encoding ascii
+
+for ($attempt = 0; $attempt -lt 40; $attempt += 1) {
+  if ($process.HasExited) {
+    $errorTail = if (Test-Path -LiteralPath $stderrPath) {
+      (Get-Content -LiteralPath $stderrPath -Tail 20) -join "`n"
+    } else {
+      "aucun journal d'erreur"
+    }
+    throw "Switch developpement s'est arrete au demarrage : $errorTail"
+  }
+  try {
+    $health = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:18082/healthz" -TimeoutSec 2
+    if ($health.StatusCode -eq 200) {
+      Write-Output "Switch developpement demarre (PID $($process.Id)) depuis le runtime interne $runtimeReleasePath."
+      return
+    }
+  } catch {
+    Start-Sleep -Milliseconds 250
+  }
+}
+
+throw "Switch developpement n'a pas repondu a /healthz dans le delai prevu."
