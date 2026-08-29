@@ -46,7 +46,7 @@ test("l'image contient le frontend, le serveur et les outils de travail", () => 
   assert.match(dockerfile, /--profile server/);
   assert.match(
     dockerfile,
-    /npm install --global --prefix \/home\/cst\/\.local @openai\/codex @anthropic-ai\/claude-code(?:@[\d.]+)? opencode-ai freebuff/,
+    /npm install --global --prefix \/home\/cst\/\.local @openai\/codex@0\.150\.1 @anthropic-ai\/claude-code(?:@[\d.]+)? opencode-ai freebuff/,
   );
   assert.match(dockerfile, /codex --version/);
   assert.match(dockerfile, /claude --version/);

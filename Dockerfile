@@ -111,7 +111,7 @@ RUN --mount=type=cache,id=cst-runtime-npm-${TARGETARCH},target=/home/cst/.npm,ui
     # scripts/tokscale-all.sh utilise le binaire local plutot que `npx`, faible
     # RAM). Le token/credentials vivent dans TOKSCALE_CONFIG_DIR=/srv/cst/.tokscale
     # (voir deploy/cst-container.env).
-    npm install --global --prefix /home/cst/.local @openai/codex @anthropic-ai/claude-code@2.1.207 opencode-ai freebuff tokscale \
+    npm install --global --prefix /home/cst/.local @openai/codex@0.150.1 @anthropic-ai/claude-code@2.1.207 opencode-ai freebuff tokscale \
     && command -v codex >/dev/null \
     && codex --version \
     && command -v claude >/dev/null \
