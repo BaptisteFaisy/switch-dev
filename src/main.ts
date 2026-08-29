@@ -7478,9 +7478,7 @@ const setActiveView = (view: AppView) => {
     activeView === "orchestration"
     || activeView === "chat"
   ) {
-    if (!orchestrationAccountId) {
-      orchestrationAccountId = selectedAccountId ?? settings?.defaultAccountId ?? null;
-    }
+    orchestrationAccountId = resolveOrchestrationDraftAccount()?.id ?? null;
     normalizeOrchestrationWorkerDrafts(orchestrationWorkerCount, orchestrationAccountId ?? "");
     if (!orchestrationProjectDir) orchestrationProjectDir = currentWorkspace() ?? "";
     startOrchestrationsPoll();
@@ -7798,7 +7796,7 @@ const reconcileAccountSelections = () => {
   newChatAccountId = keepOrFallback(newChatAccountId);
   newTerminalAccountId = keepOrFallback(newTerminalAccountId);
   autonomousAccountId = keepOrFallback(autonomousAccountId);
-  orchestrationAccountId = keepOrFallback(orchestrationAccountId);
+  orchestrationAccountId = resolveOrchestrationDraftAccount()?.id ?? null;
 };
 
 const scheduleUnconnectedAccountCleanup = (minimumDelayMs = 0) => {
@@ -22088,8 +22086,24 @@ const bindAutonomousPanelUi = () => {
 const orchestrationAccountLabel = (accountId: string): string =>
   accountById(accountId)?.label ?? accountId;
 
+const resolveOrchestrationDraftAccount = (): AccountProfile | null => {
+  for (const accountId of [
+    orchestrationAccountId,
+    selectedAccountId,
+    settings?.defaultAccountId,
+  ]) {
+    const account = accountById(accountId);
+    if (account && accountSupportsChat(account)) return account;
+  }
+  return chatCapableAccounts()[0] ?? null;
+};
+
 const orchestrationAccountOptions = (selectedAccountId: string): string => {
-  const known = settings?.accounts ?? [];
+  // Freebuff n'expose pas de mode non interactif ni de sortie structuree : le
+  // proposer ici cree bien le run, mais ses tours echouent ensuite avant le
+  // premier plan. Les anciens runs qui le reference encore gardent une option
+  // explicite "indisponible" afin de pouvoir etre reaffectes.
+  const known = chatCapableAccounts();
   const missing = selectedAccountId && !known.some((account) => account.id === selectedAccountId)
     ? `<option value="${escapeAttr(selectedAccountId)}" selected>Compte indisponible · ${escapeHtml(selectedAccountId)}</option>`
     : "";
@@ -22379,7 +22393,8 @@ const renderOrchestrationCard = (run: OrchestrationSnapshot): string => {
 };
 
 const renderOrchestrationPanel = (): string => {
-  const accountId = accountById(orchestrationAccountId)?.id ?? settings?.defaultAccountId ?? settings?.accounts[0]?.id ?? "";
+  const accountId = resolveOrchestrationDraftAccount()?.id ?? "";
+  orchestrationAccountId = accountId || null;
   const accountOptions = orchestrationAccountOptions(accountId);
   const workerAccountIds = normalizeOrchestrationWorkerDrafts(orchestrationWorkerCount, accountId);
   const workerDrafts = workerAccountIds.map((_workerAccountId, index) => `<div class="orchestration-create-worker">
@@ -22547,6 +22562,11 @@ const bindOrchestrationPanelUi = () => {
     }
     if (!account) {
       statusText = "Choisis un compte pour l’équipe d’agents";
+      render();
+      return;
+    }
+    if (!accountSupportsChat(account)) {
+      statusText = `${account.label} ne peut pas piloter de chat structuré`;
       render();
       return;
     }
