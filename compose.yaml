@@ -190,7 +190,7 @@ services:
     ports:
       # Façade HTTP unique de Switch développement. Tailscale Serve continue
       # de viser le même port loopback ; aucun Funnel ni port public n'est ajouté.
-      - "127.0.0.1:${CST_HOST_PORT:-18080}:8081"
+      - "${CST_HOST_BIND:-127.0.0.1}:${CST_HOST_PORT:-18080}:8081"
     read_only: true
     tmpfs:
       - /tmp:size=8m,mode=1777

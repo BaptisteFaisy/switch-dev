@@ -97,7 +97,10 @@ test("le runtime OpenCode est mutualise et pre-chauffe dans l'image", () => {
 test("Compose garde le runtime prive et les donnees hors de l'image", () => {
   // La pile de production Azure peut utiliser un port d'écoute différent de la pile locale.
 
-  assert.match(compose, /127\.0\.0\.1:\$\{CST_HOST_PORT:-\d+\}:\d+/);
+  assert.match(
+    compose,
+    /\$\{CST_HOST_BIND:-127\.0\.0\.1\}:\$\{CST_HOST_PORT:-\d+\}:\d+/,
+  );
   assert.match(compose, /:\/srv\/cst/);
   assert.match(compose, /no-new-privileges:true/);
   assert.match(composeTemplate, /127\.0\.0\.1:\{\{ cst_remote_port \}\}:\d+/);
