@@ -4550,7 +4550,10 @@ pub(crate) fn is_synthetic_prompt(msg: &str) -> bool {
     let agents_heading = first_line.strip_prefix("# ").unwrap_or(first_line);
     (agents_heading == "AGENTS.md instructions"
         || agents_heading.starts_with("AGENTS.md instructions for "))
-        && msg.lines().any(|line| line.trim() == "<INSTRUCTIONS>")
+        && msg
+            .lines()
+            .skip(1)
+            .any(|line| line.trim_start().starts_with("<INSTRUCTIONS>"))
 }
 
 /// Claude Code marque ses lignes injectees avec `isMeta`. C'est le signal le
