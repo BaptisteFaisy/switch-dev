@@ -1462,6 +1462,12 @@ fn require_authenticated_account<'a>(
         .iter()
         .find(|candidate| candidate.id == account_id)
         .ok_or_else(|| format!("Compte introuvable : {account_id}"))?;
+    if !orchestration_provider_supported(account.provider) {
+        return Err(format!(
+            "Compte incompatible avec l'orchestration structuree : {}. Freebuff est un TUI interactif ; choisis un compte Codex, Claude ou compatible API.",
+            account.label
+        ));
+    }
     if !settings::account_has_auth_tokens(account) {
         return Err(format!(
             "Compte non authentifie : {}. Connecte ce compte avant de l'affecter a l'orchestration.",
@@ -1469,6 +1475,10 @@ fn require_authenticated_account<'a>(
         ));
     }
     Ok(account)
+}
+
+fn orchestration_provider_supported(provider: settings::Provider) -> bool {
+    provider != settings::Provider::Freebuff
 }
 
 fn normalize_worker_accounts(
@@ -4394,6 +4404,20 @@ pub fn delete_orchestration(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn structured_orchestration_rejects_the_interactive_freebuff_provider() {
+        assert!(!orchestration_provider_supported(settings::Provider::Freebuff));
+        for provider in [
+            settings::Provider::Codex,
+            settings::Provider::Claude,
+            settings::Provider::OpenCode,
+            settings::Provider::Aihubmix,
+            settings::Provider::OpenAiCompatible,
+        ] {
+            assert!(orchestration_provider_supported(provider));
+        }
+    }
 
     #[test]
     fn parses_single_line_plan_contract() {

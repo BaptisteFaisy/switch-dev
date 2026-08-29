@@ -161,6 +161,18 @@ test("chaque rôle résout son propre compte avec migration des anciens snapshot
   );
 });
 
+test("les comptes Freebuff ne peuvent plus bloquer une orchestration structurée", () => {
+  const optionsStart = main.indexOf("const orchestrationAccountOptions =");
+  const optionsEnd = main.indexOf("const normalizeOrchestrationWorkerDrafts", optionsStart);
+  const options = main.slice(optionsStart, optionsEnd);
+  assert.match(options, /const known = chatCapableAccounts\(\)/);
+  assert.match(main, /const resolveOrchestrationDraftAccount =/);
+  assert.match(main, /if \(account && accountSupportsChat\(account\)\) return account/);
+  assert.match(main, /if \(!accountSupportsChat\(account\)\)/);
+  assert.match(backend, /if !orchestration_provider_supported\(account\.provider\)/);
+  assert.match(backend, /provider != settings::Provider::Freebuff/);
+});
+
 test("la vue dédiée crée et expose chaque chat de l'équipe", () => {
   assert.match(main, /\| "orchestration"/);
   assert.match(main, /id="orchestrationCreateForm"/);
