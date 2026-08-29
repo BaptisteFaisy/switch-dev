@@ -29,7 +29,7 @@ test("les constantes Freebuff Cloud pointent vers les bons services", () => {
   assert.match(cloud, /const SESSION_URL: &str = "https:\/\/freebuff\.com\/api\/web\/freebuff-session"/);
   assert.match(cloud, /const CONVEX_TOKEN_URL: &str = "https:\/\/freebuff\.com\/api\/web\/convex-token"/);
   assert.match(cloud, /const AGENT_RUNS_STREAM_PATH: &str = "\/api\/agent-runs\/stream"/);
-  assert.match(cloud, /const CONVEX_TOKEN_CACHE_SECS: u64 = 50 \* 60/);
+  assert.match(cloud, /const CONVEX_TOKEN_CACHE_SECS: u64 = 4 \* 60/);
   assert.match(cloud, /const HTTP_TIMEOUT_SECS: u64 = 30/);
   assert.match(cloud, /STORE_FILE/);
   assert.match(cloud, /CONVEX_DEPLOYMENT/);
@@ -290,8 +290,8 @@ test("status reflète la connexion sans fuir le cookie", () => {
 
 test("les projets utilisent la fonction Convex getUserProjects", () => {
   const projects = block(cloud, "pub async fn projects(", "/// Crée un projet vierge");
-  assert.match(projects, /"query", "project:getUserProjects"/);
-  assert.match(projects, /json!\(\{\}\)/);
+  assert.match(projects, /"query",\s*"project:getUserProjects"/);
+  assert.match(projects, /json!\(\{ "surface": "cloud", "archivedOnly": false \}\)/);
   assert.match(projects, /Value::Array\(projects\) => Ok\(projects\)/);
   assert.match(projects, /Value::Null => Ok\(Vec::new\(\)\)/);
   assert.match(projects, /Réponse de projets Freebuff Cloud invalide/);

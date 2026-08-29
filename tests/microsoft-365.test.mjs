@@ -199,7 +199,8 @@ test("les cinq outils Microsoft restent synchronises aux quatre endroits", () =>
   const allowList = between(server, '"tools/call" => {', "let context_result");
   const dispatch = between(server, "let arguments = payload", '_ => unreachable!("outil valide avant le dispatch")');
   const allowedTools = between(chat, '.arg("--allowedTools")', "));");
-  const enabledTools = between(chat, "{prefix}.enabled_tools=[", "\n");
+  const enabledToolNames = between(chat, "let mut enabled_tool_names = vec![", "\n    ];");
+  const enabledToolsConfig = between(chat, "let enabled_tools_list =", "let mut model_tool_values");
 
   for (const [constant, wireName] of Object.entries(microsoftTools)) {
     assert.match(
@@ -215,8 +216,10 @@ test("les cinq outils Microsoft restent synchronises aux quatre endroits", () =>
       new RegExp(`mcp__\\{MCP_SERVER_NAME\\}__\\{${constant}\\}`),
       `${constant} manque a --allowedTools`,
     );
-    assert.match(enabledTools, new RegExp(`\\\\"\\{${constant}\\}\\\\"`), `${constant} manque a enabled_tools`);
+    assert.match(enabledToolNames, new RegExp(`\\b${constant}\\b`), `${constant} manque a enabled_tools`);
   }
+  assert.match(enabledToolsConfig, /\.map\(\|name\| format!\("\\"\{name\}\\""\)\)/);
+  assert.match(chat, /format!\("\{prefix\}\.enabled_tools=\[\{enabled_tools_list\}\]"\)/);
 });
 
 test("les trois outils d'ecriture n'aboutissent que par la file de confirmation", () => {

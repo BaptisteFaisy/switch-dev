@@ -240,7 +240,7 @@ test("le reglage Disponibles pilote le mur principal et reste persistant", () =>
   assert.match(main, /expertChatDisplayMode = loadExpertChatDisplayMode\(\)/);
   assert.match(
     main,
-    /expertChatsForDisplay\(\s*userOpenedExpertChatPanesForCurrentEnvironment\(\),\s*expertChatDisplayMode,\s*expertChatPaneIsAvailable,?\s*\)/,
+    /expertChatsForDisplay\(\s*expertChatPanesForCurrentEnvironment\(\),\s*expertChatDisplayMode,\s*expertChatPaneIsAvailable,?\s*\)/,
   );
 });
 
