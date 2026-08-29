@@ -42,3 +42,13 @@ test("les comptes Autre reutilisent les sessions et historiques OpenCode", () =>
   assert.match(chat, /Provider::OpenCode \| Provider::OpenAiCompatible/);
   assert.match(discussions, /Provider::OpenCode \| settings::Provider::OpenAiCompatible/);
 });
+
+test("le provider openai-compatible (forme du frontend) est accepte par le backend", () => {
+  assert.match(
+    settings,
+    /#\[serde\(rename = "openai-compatible", alias = "openaicompatible"\)\]\s*OpenAiCompatible/,
+  );
+  assert.match(main, /value="openai-compatible"/);
+  assert.doesNotMatch(main, /openaicompatible/);
+  assert.match(settings, /Provider::OpenAiCompatible => "openai-compatible"/);
+});

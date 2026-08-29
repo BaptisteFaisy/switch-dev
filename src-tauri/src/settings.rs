@@ -35,6 +35,13 @@ pub enum Provider {
     Aihubmix,
     /// Compte OpenAI-compatible generique : nom libre, endpoint /v1, cle API
     /// securisee cote serveur, catalogue /models scanne, intensite reglable.
+    ///
+    /// Le serde `rename_all = "lowercase"` produirait `openaicompatible`, forme
+    /// que ne connait ni le frontend ni l'API du client (qui utilisent
+    /// `openai-compatible`). La variante porte donc son propre nom canonique
+    /// `openai-compatible`, avec l'ancienne forme `openaicompatible` en alias
+    /// pour ne pas casser les donnees deja persistees (settings.json, snapshots).
+    #[serde(rename = "openai-compatible", alias = "openaicompatible")]
     OpenAiCompatible,
 }
 
@@ -2735,6 +2742,22 @@ mod tests {
         .unwrap();
         assert!(credentials.contains("sk-private-test"));
         let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn openai_compatible_provider_uses_the_frontend_name_and_accepts_legacy_data() {
+        assert_eq!(
+            serde_json::to_string(&Provider::OpenAiCompatible).unwrap(),
+            "\"openai-compatible\""
+        );
+        assert_eq!(
+            serde_json::from_str::<Provider>("\"openai-compatible\"").unwrap(),
+            Provider::OpenAiCompatible
+        );
+        assert_eq!(
+            serde_json::from_str::<Provider>("\"openaicompatible\"").unwrap(),
+            Provider::OpenAiCompatible
+        );
     }
 
     #[test]
