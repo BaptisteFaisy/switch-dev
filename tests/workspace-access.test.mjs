@@ -10,6 +10,17 @@ const server = readFileSync(new URL("../src-tauri/src/server.rs", import.meta.ur
 const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
 const platform = readFileSync(new URL("../src/platform.ts", import.meta.url), "utf8");
 const style = readFileSync(new URL("../src/style.css", import.meta.url), "utf8");
+const smoke = readFileSync(new URL("../scripts/smoke-site.mjs", import.meta.url), "utf8");
+
+test("une réponse d’accès mal formée ne casse pas les interactions du menu", () => {
+  const start = main.indexOf("const refreshWorkspaceAccess =");
+  const end = main.indexOf("const submitWorkspaceAccessRequest", start);
+  const implementation = main.slice(start, end);
+
+  assert.match(implementation, /const response = await invoke<unknown>\("workspace_access"\)/);
+  assert.match(implementation, /if \(!Array\.isArray\(response\)\)/);
+  assert.match(smoke, /if \(path === "\/api\/workspaces\/access"\) return \[\]/);
+});
 
 test("le navigateur de dossiers reste strictement dans la racine personnelle", () => {
   const start = access.indexOf("pub(crate) fn authorize_browse_path");

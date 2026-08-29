@@ -5680,7 +5680,11 @@ const refreshWorkspaceAccess = async (): Promise<void> => {
   workspaceAccessError = "";
   if (terminalEnvironmentMenuOpen) render();
   try {
-    workspaceAccess = await invoke<WorkspaceAccessView[]>("workspace_access");
+    const response = await invoke<unknown>("workspace_access");
+    if (!Array.isArray(response)) {
+      throw new Error("Réponse invalide du service d’accès aux environnements");
+    }
+    workspaceAccess = response as WorkspaceAccessView[];
     workspaceAccessLoaded = true;
     const knownIds = new Set(knownWorkspaces().map((workspace) => workspace.id));
     const receivedNewEnvironment = workspaceAccess.some(

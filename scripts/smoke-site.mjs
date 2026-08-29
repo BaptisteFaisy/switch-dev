@@ -248,6 +248,7 @@ const jsonFor = (path) => {
   }
   if (path === "/api/autonomous-agents") return autonomousAgentsMock;
   if (path === "/api/orchestrations") return orchestrationsMock;
+  if (path === "/api/workspaces/access") return [];
   if (path.includes("/events") || path.includes("/history")) return [];
   if (path.includes("account") && path.includes("usage")) {
     return { generatedAt: Date.now(), profileCount: 1, totalTokens: 0, totalCostUsd: 0, totalSessions: 0, accounts: [] };
