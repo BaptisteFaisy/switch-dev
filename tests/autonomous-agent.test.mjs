@@ -893,7 +893,12 @@ test("le smoke test web :8080 transmet les connecteurs Google au serveur", () =>
   assert.match(smoke, /\/api\/autonomous-agents\/autonomous-smoke\/orchestration/);
   assert.match(smoke, /\/api\/autonomous-agents\/autonomous-smoke\/account/);
   assert.match(smoke, /autonomousOrchestrationForm/);
-  assert.match(smoke, /data-autonomous-orchestration-worker/);
+  assert.doesNotMatch(smoke, /data-autonomous-orchestration-worker/);
+  assert.doesNotMatch(smoke, /data-autonomous-launch-worker/);
+  assert.match(smoke, /JSON\.stringify\(\[accountId, accountId\]\)/);
+  assert.match(smoke, /testerCount: Math\.max/);
+  assert.match(smoke, /testers: \[\]/);
+  assert.match(smoke, /if \(path === "\/api\/limits"\) \{[\s\S]*?hasTokens: true/);
   assert.match(smoke, /autonomousAccountMutation/);
   assert.match(smoke, /promotionMutation\.payload\.workerAccountIds/);
   assert.match(smoke, /workerAccountMutation\.payload\.role !== "worker"/);

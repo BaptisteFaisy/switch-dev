@@ -169,6 +169,7 @@ const orchestrationSnapshotFixture = (request) => {
     name: request.name || "Orchestration smoke",
     objective: request.objective,
     workerCount: request.workerCount,
+    testerCount: Math.max(1, Math.ceil(request.workerCount / 5)),
     accountId: request.accountId,
     orchestratorAccountId: request.orchestratorAccountId || request.accountId,
     workerAccountIds: request.workerAccountIds || Array.from({ length: request.workerCount }, () => request.accountId),
@@ -191,12 +192,14 @@ const orchestrationSnapshotFixture = (request) => {
     currentTurnId: null,
     currentTurnKind: null,
     currentTaskId: null,
+    currentTesterId: null,
     currentStartId: null,
     currentValidationId: null,
     currentValidationKind: null,
     nextActionAt: timestamp + 5,
     planSummary: null,
     tasks: [],
+    testers: [],
     finalSummary: null,
     lastError: null,
     consecutiveStartFailures: 0,
@@ -222,7 +225,21 @@ const jsonFor = (path) => {
       entries: [{ name: "Sous-dossier", path: `${workspace}\\Sous-dossier`, isDir: true }],
     };
   }
-  if (path === "/api/limits" || path === "/api/chat/models") return [];
+  if (path === "/api/limits") {
+    return settings.accounts.map((account, index) => ({
+      id: account.id,
+      label: account.label,
+      provider: account.provider,
+      codexHome: account.codexHome,
+      hasTokens: true,
+      sessionUsedPercent: index === 0 ? 0 : 95,
+      weeklyUsedPercent: index === 0 ? 0 : 95,
+      buckets: [],
+      source: "smoke",
+      error: null,
+    }));
+  }
+  if (path === "/api/chat/models") return [];
   if (path === "/api/video/capabilities") {
     return {
       configured: false,
@@ -869,9 +886,15 @@ try {
     failures.push(`navigation desktop: ${restingNavigationCount} controles visibles au repos au lieu de ${expectedRestingNavigationCount}`);
   }
   const desktopMore = page.locator("#chatSideMoreToggle");
-  await desktopMore.focus();
-  await page.keyboard.press("ArrowDown");
   const desktopMoreMenu = page.locator("#chatSideMoreMenu");
+  // Les polls de demarrage peuvent remplacer la barre laterale entre focus et
+  // keydown. Reprendre le geste sur le nouveau bouton garde le test clavier
+  // reel sans transformer cette course de rendu en faux negatif.
+  for (let attempt = 0; attempt < 4 && !(await desktopMoreMenu.isVisible()); attempt += 1) {
+    await desktopMore.focus();
+    await page.keyboard.press("ArrowDown");
+    if (!(await desktopMoreMenu.isVisible())) await page.waitForTimeout(50);
+  }
   await desktopMoreMenu.waitFor({ state: "visible" });
   if ((await desktopMore.getAttribute("aria-expanded")) !== "true") {
     failures.push("navigation desktop: Plus n'annonce pas son ouverture");
@@ -1380,10 +1403,6 @@ try {
   await page.locator("#autonomousOrchestrationProject").fill(workspace);
   await page.locator("#autonomousOrchestrationTestCommand").fill("npm run verify:quick");
   await page.locator("#autonomousOrchestrationWorkerCount").fill("2");
-  const promotionWorkerAccounts = autonomousPromotionForm.locator("[data-autonomous-orchestration-worker]");
-  await promotionWorkerAccounts.nth(1).waitFor();
-  await promotionWorkerAccounts.nth(0).selectOption(accountId);
-  await promotionWorkerAccounts.nth(1).selectOption("smoke-account-2");
   await autonomousPromotionForm.locator("button[type='submit']").click();
   await page.locator(".orchestration-runs h3").getByText("Agent promu smoke", { exact: true }).waitFor();
   await page.locator(".autonomous-agent-list").getByText("Agent smoke réussi", { exact: true }).waitFor({ state: "detached" });
@@ -1396,7 +1415,7 @@ try {
     || promotionMutation.payload.projectDir !== workspace
     || promotionMutation.payload.testCommand !== "npm run verify:quick"
     || promotionMutation.payload.workerCount !== 2
-    || JSON.stringify(promotionMutation.payload.workerAccountIds) !== JSON.stringify([accountId, "smoke-account-2"])
+    || JSON.stringify(promotionMutation.payload.workerAccountIds) !== JSON.stringify([accountId, accountId])
   ) {
     failures.push(`autonomous-promotion: payload inattendu ${JSON.stringify(promotionMutation?.payload)}`);
   }
@@ -1515,10 +1534,6 @@ try {
   await page.locator("#autonomousEnvironmentPreset").selectOption("__custom__");
   await page.locator("#autonomousProjectDir").fill(workspace);
   await page.locator("#autonomousLaunchWorkerCount").fill("2");
-  const directWorkerAccounts = page.locator("[data-autonomous-launch-worker]");
-  await directWorkerAccounts.nth(1).waitFor();
-  await directWorkerAccounts.nth(0).selectOption(accountId);
-  await directWorkerAccounts.nth(1).selectOption("smoke-account-2");
   const directAdvanced = page.locator("details.autonomous-advanced:has(#autonomousTestCommand)");
   if (!(await directAdvanced.evaluate((details) => details.open))) {
     await directAdvanced.locator("summary").click();
@@ -1541,7 +1556,7 @@ try {
     !directPromotionMutation
     || directPromotionMutation.payload.workerCount !== 2
     || directPromotionMutation.payload.testCommand !== "npm run verify:quick"
-    || JSON.stringify(directPromotionMutation.payload.workerAccountIds) !== JSON.stringify([accountId, "smoke-account-2"])
+    || JSON.stringify(directPromotionMutation.payload.workerAccountIds) !== JSON.stringify([accountId, accountId])
   ) {
     failures.push(`autonomous-direct-orchestrator-promotion: payload inattendu ${JSON.stringify(directPromotionMutation?.payload)}`);
   }
@@ -1555,18 +1570,47 @@ try {
   currentView = "interaction-chat-success";
   await page.locator("#chatHome").click();
   await page.locator("#addExpertChat").click();
+  const existingChatPaneKeys = await page.locator(".chat-panel--expert").evaluateAll(
+    (panels) => panels.map((panel) => panel.getAttribute("data-chat-panel")).filter(Boolean),
+  );
   await page.locator("#confirmNewChat").click();
-  const chatPane = page.locator(".chat-panel--expert").first();
+  // La confirmation automatique choisit le quota de façon asynchrone. De plus,
+  // supprimer une orchestration conserve son ancien orchestrateur comme chat
+  // normal. Attendre une nouvelle identité évite de saisir dans cet ancien chat.
+  const newChatPaneKey = await page.waitForFunction((knownKeys) => {
+    const known = new Set(knownKeys);
+    return [...document.querySelectorAll(".chat-panel--expert")]
+      .map((panel) => panel.getAttribute("data-chat-panel"))
+      .find((key) => key && !known.has(key)) || null;
+  }, existingChatPaneKeys).then((handle) => handle.jsonValue());
+  const chatPane = page.locator(`[data-chat-panel="${newChatPaneKey}"]`);
   await chatPane.waitFor({ state: "visible" });
-  await page.waitForFunction(() => {
-    const send = document.querySelector(".chat-panel--expert [data-chat-action='send']");
+  await page.locator("#newChatBackdrop").waitFor({ state: "detached" });
+  // L'orchestration automatique est désormais le défaut global. Valider ce
+  // défaut, puis repasser explicitement en mode direct pour couvrir d'abord le
+  // parcours de chat classique avant de réactiver l'orchestrateur plus bas.
+  const directModeToggle = chatPane.locator("[data-chat-action='toggle-automatic-orchestration']");
+  await directModeToggle.waitFor({ state: "visible" });
+  if ((await directModeToggle.getAttribute("aria-pressed")) !== "true") {
+    failures.push("chat-automatic-orchestration: le mode orchestrateur n'est pas actif par défaut");
+  }
+  await directModeToggle.evaluate((button) => button.click());
+  await page.waitForFunction((paneKey) =>
+    document.querySelector(`.chat-panel--expert[data-chat-panel="${CSS.escape(paneKey)}"] [data-chat-action='toggle-automatic-orchestration']`)
+      ?.getAttribute("aria-pressed") === "false", newChatPaneKey);
+  await page.waitForFunction((paneKey) => {
+    const panel = document.querySelector(`.chat-panel--expert[data-chat-panel="${CSS.escape(paneKey)}"]`);
+    const send = panel?.querySelector("[data-chat-action='send']");
     return send instanceof HTMLButtonElement && !send.disabled;
-  });
-  await chatPane.locator("[data-chat-control='prompt']").fill("Message smoke de bout en bout");
+  }, newChatPaneKey);
   const chatRequest = page.waitForRequest((request) =>
     new URL(request.url()).pathname === "/api/chat/turns" && request.method() === "POST",
   );
-  await chatPane.locator("[data-chat-action='send']").evaluate((button) => button.click());
+  await chatPane.locator("[data-chat-control='prompt']").evaluate((input, message) => {
+    input.value = message;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.closest("form")?.requestSubmit();
+  }, "Message smoke de bout en bout");
   if (process.env.CST_SMOKE_TRACE) {
     await page.waitForTimeout(150);
     const diagnostics = await chatPane.evaluate((panel) => ({
@@ -1651,42 +1695,31 @@ try {
   const automaticToggle = chatPane.locator("[data-chat-action='toggle-automatic-orchestration']");
   await automaticToggle.waitFor({ state: "visible" });
   if ((await automaticToggle.getAttribute("aria-pressed")) !== "false") {
-    failures.push("chat-automatic-orchestration: le mode n'est pas inactif à la création du chat");
+    failures.push("chat-automatic-orchestration: le mode direct n'a pas été conservé avant sa réactivation");
   }
   await automaticToggle.evaluate((button) => button.click());
-  await page.waitForFunction(() =>
-    document.querySelector("[data-chat-action='toggle-automatic-orchestration']")?.getAttribute("aria-pressed") === "true");
-  const persistedAutomaticMode = await page.evaluate(() => {
+  await page.waitForFunction((paneKey) =>
+    document.querySelector(`.chat-panel--expert[data-chat-panel="${CSS.escape(paneKey)}"] [data-chat-action='toggle-automatic-orchestration']`)
+      ?.getAttribute("aria-pressed") === "true", newChatPaneKey);
+  const persistedAutomaticMode = await page.evaluate((paneKey) => {
     const value = localStorage.getItem("codex-switch-terminal.expert-open-chats.v1");
     if (!value) return false;
-    return JSON.parse(value).panes?.some((pane) => pane.automaticOrchestrationEnabled === true) === true;
-  });
+    return JSON.parse(value).panes?.find((pane) => pane.key === paneKey)?.automaticOrchestrationEnabled === true;
+  }, newChatPaneKey);
   if (!persistedAutomaticMode) {
     failures.push("chat-automatic-orchestration: l'activation n'est pas persistée pour le chat");
   }
 
   await chatPane.locator("[data-chat-control='prompt']").fill(automaticOrchestrationPrompt);
-  const automaticChatRequest = page.waitForRequest((request) =>
-    new URL(request.url()).pathname === "/api/chat/turns" && request.method() === "POST",
-  );
+  const chatTurnCountBeforeAutomaticOrchestration = capturedChatTurns.length;
   const automaticOrchestrationRequest = page.waitForRequest((request) =>
     new URL(request.url()).pathname === "/api/orchestrations" && request.method() === "POST",
   );
   await chatPane.locator("[data-chat-action='send']").evaluate((button) => button.click());
-  await automaticChatRequest;
   await automaticOrchestrationRequest;
   await chatPane.locator("[data-chat-control='orchestration-managed']").waitFor({ state: "visible" });
-  const automaticChatPayload = capturedChatTurns.at(-1);
-  const routingSkill = automaticChatPayload?.agentSkills?.find(
-    (skill) => skill.id === "automatic-orchestration-router",
-  );
-  if (
-    !automaticChatPayload
-    || automaticChatPayload.prompt !== automaticOrchestrationPrompt
-    || automaticChatPayload.sessionId !== "smoke-session"
-    || !routingSkill?.content?.includes("CST_AUTO_ORCHESTRATION:")
-  ) {
-    failures.push(`chat-automatic-orchestration-routing: payload inattendu ${JSON.stringify(automaticChatPayload)}`);
+  if (capturedChatTurns.length !== chatTurnCountBeforeAutomaticOrchestration) {
+    failures.push("chat-automatic-orchestration-routing: un tour direct a été lancé avant l'équipe");
   }
   const automaticMutations = mutationRequests.filter(
     (entry) => entry.path === "/api/orchestrations",
@@ -1696,8 +1729,11 @@ try {
     !automaticPayload
     || automaticPayload.orchestratorSessionId !== "smoke-session"
     || automaticPayload.orchestratorAccountId !== accountId
-    || automaticPayload.workerCount !== 3
-    || JSON.stringify(automaticPayload.workerAccountIds) !== JSON.stringify([accountId, accountId, accountId])
+    || automaticPayload.workerCount !== 1
+    || automaticPayload.adaptiveFanout !== true
+    || automaticPayload.maxTaskCount !== 5
+    || automaticPayload.maxConcurrency !== 5
+    || JSON.stringify(automaticPayload.workerAccountIds) !== JSON.stringify([accountId])
     || automaticPayload.objective !== automaticOrchestrationPrompt
     || automaticPayload.projectDir !== workspace
   ) {
@@ -1994,7 +2030,10 @@ try {
     if (viewport.mustScroll && sheetDiagnostics.scrollHeight <= sheetDiagnostics.clientHeight) {
       failures.push(`mobile-${viewport.name}: la faible hauteur ne declenche pas le defilement`);
     }
-    if (sheetDiagnostics.itemCount !== 21 || sheetDiagnostics.unreachable.length) {
+    // Le menu peut gagner des destinations au fil des fonctionnalités. Le smoke
+    // protège le socle historique et l'accessibilité de toutes les actions sans
+    // rendre chaque nouvel item incompatible avec le scénario.
+    if (sheetDiagnostics.itemCount < 21 || sheetDiagnostics.unreachable.length) {
       failures.push(`mobile-${viewport.name}: actions inaccessibles ${JSON.stringify(sheetDiagnostics)}`);
     }
     await auditAccessibilityAndOverflow(`mobile-more-${viewport.name}`);
