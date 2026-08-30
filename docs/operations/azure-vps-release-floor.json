@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "environment": "azure-vps-production",
+  "authoritativeGate": "/usr/local/sbin/switch-release-gate",
+  "authoritativeStateDirectory": "/srv/switch/ui-runtime/deployment-gate",
+  "observedAtUtc": "2026-08-30T17:10:36Z",
+  "acceptedGeneration": 202608300200,
+  "acceptedRelease": "/srv/switch/releases/switch-vps-minimax-chatgpt-transfer-v1-20260830",
+  "acceptedBuildId": "prod-minimax-chatgpt-transfer-v1-20260830",
+  "acceptedIndexSha256": "08d7d748270c6c67ed663cbd3ababba84fbb4b987daa519e1016ee9ddc4cd450",
+  "gateSha256": "00f244aa0d8e784d0d45941b5ba6956908471ae46cf5a37c782d96fba17b9021",
+  "policySha256": "5112fa7910c3579f29d637da5ad14bb77db34017a47a746ead6b604aef38e25e",
+  "protectedAssetsManifestSha256": "38eba4cc9893e05d7eed9c31cd3ac02f43c89230f83e3cf30c3d63b44632da14",
+  "authoritativeAtOperationTime": false
+}

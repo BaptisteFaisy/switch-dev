@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "minimumGeneration": 202608301618,
+  "baselineSourceCommit": "7b3a3a976cdc9a77a3957a78113090e5e8814377",
+  "baselinePackage": {
+    "releaseId": "012819DBBD62A68C-DE3ED962EBEC3123",
+    "buildId": "dev-chat-queue-drain-v1-20260830",
+    "serverSha256": "012819DBBD62A68CEEA30EF350029CAE35A7A6EFFF1B0938E47DC444DFB31E43",
+    "indexSha256": "DE3ED962EBEC312360FA2511B1CE77FD439CCF0A8EC818B069E318A05AA24E10",
+    "serviceWorkerSha256": "E91D52B586E8DCC7775D78BBA4AFBCB809C8412412D3392D196EC2BE9DAABB55",
+    "entryAsset": "assets/index-BmdqKW3K.js",
+    "entrySha256": "D5CD06B7638A708B9F394F9E5345FFD19D8D807E6256648DB4407299DE2BB7FE",
+    "serverVersion": "cst-server 0.1.0 (c5a042f18f21b1da5766ec1bc4fbb37c37e79316)"
+  },
+  "requiredSourceProofs": [
+    {
+      "id": "main-chat-attachment-nonblocking",
+      "path": "src/main.ts",
+      "text": "void attachCreatedChat(snapshot.sessionId).catch"
+    },
+    {
+      "id": "main-chat-transcript-nonblocking",
+      "path": "src/main.ts",
+      "text": "if (attached) void loadChatTranscript();"
+    },
+    {
+      "id": "expert-chat-transcript-nonblocking",
+      "path": "src/main.ts",
+      "text": "if (attached) void loadExpertChatTranscript(pane);"
+    },
+    {
+      "id": "remote-transcript-timeout",
+      "path": "src/platform.ts",
+      "text": "REMOTE_DISCUSSION_TRANSCRIPT_TIMEOUT_MS = 15_000"
+    },
+    {
+      "id": "queue-release-regression-test",
+      "path": "tests/chat-runtime-status.test.mjs",
+      "text": "la fin d'un tour libere la file sans attendre le transcript"
+    }
+  ]
+}

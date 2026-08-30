@@ -20,10 +20,13 @@ $appRoot = Split-Path -Parent $scriptRoot
 $deploymentRoot = Split-Path -Parent $appRoot
 $configPath = Join-Path $deploymentRoot "config\server.local.env.ps1"
 $launcher = Join-Path $scriptRoot "start-switch-development-runtime.ps1"
+$releaseGate = Join-Path $scriptRoot "switch-development-release-gate.ps1"
 $baseUrl = "http://127.0.0.1:18082"
 
-if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) {
-  throw "Configuration Switch developpement introuvable : $configPath"
+foreach ($requiredPath in @($configPath, $launcher, $releaseGate)) {
+  if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
+    throw "Composant Switch developpement introuvable : $requiredPath"
+  }
 }
 . $configPath
 if (-not $env:CST_ADMIN_TOKEN) {
@@ -88,6 +91,11 @@ try {
     throw "Un autre redemarrage Switch developpement est deja en cours."
   }
 
+  $initialHealth = Get-DevelopmentHealth
+  if ($null -ne $initialHealth) {
+    & $releaseGate -Operation AuditActive -DeploymentRoot $deploymentRoot
+  }
+
   $deadline = (Get-Date).AddSeconds($WaitTimeoutSeconds)
   while ($true) {
     $health = Get-DevelopmentHealth
@@ -107,6 +115,7 @@ try {
     Start-Sleep -Seconds 1
   }
 
+  & $releaseGate -Operation AuditActive -DeploymentRoot $deploymentRoot
   Set-DevelopmentDrain -Draining $true
   $drainArmed = $true
   Start-Sleep -Milliseconds 300
@@ -157,6 +166,11 @@ try {
       else {
         Write-Host "[restart] check-other-agents.ps1 absent ; l'agent doit verifier manuellement l'activite des autres chats."
       }
+
+      # Derniere barriere avant l'arret : le paquet a servir doit encore etre
+      # la release acceptee ou le candidat manifeste exact. Une ancienne
+      # sauvegarde, un dist complet non prouve ou une generation stale bloque.
+      & $releaseGate -Operation AuditPackage -DeploymentRoot $deploymentRoot -CandidateRoot $appRoot
 
       Stop-Process -Id ([int]$serverProcess.ProcessId) -Force -ErrorAction Stop
     }

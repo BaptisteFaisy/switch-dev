@@ -79,3 +79,21 @@ Le nœud accueille plusieurs chats en parallèle (des agents `codex.exe` et le b
 - `restart-switch-development.ps1 -EnforceCollaboration` appelle ce check au moment de la bascule et **refuse de redémarrer le serveur** si une concurrence active est détectée (commits récents, working tree sale, builds concurrents). Sans `-EnforceCollaboration`, le check est affiché à titre informatif.
 - Si une concurrence est signalée : **intégrer** les changements des autres chats avant de déployer — récupérer leurs commits (`git log` / dernière release) et ne pas les retirer ; vérifier qu'aucun fichier qu'on remplace ne leur appartient (`-OverlapPaths`). Le déploiement doit « s'empiler au-dessus » de leur travail, pas le remplacer, sauf demande explicite de l'utilisateur.
 - Le watchdog (relais automatique du serveur) n'est jamais bloqué par cette obligation : elle ne s'applique qu'aux bascules déclenchées par un agent ou l'utilisateur, pas au redémarrage d'entretien.
+
+# Verrou anti-régression obligatoire
+
+- Le verrou local est `scripts/switch-development-release-gate.ps1`. Son état accepté se trouve hors du dépôt dans `E:\AppsData\SwitchDevelopment\.guard\release-gate\state.json`.
+- Avant toute mise en cache, bascule ou relance du web de développement, exécuter `AuditPackage`. Avant d'arrêter le runtime actif, exécuter `AuditActive`. Les scripts officiels de démarrage et de redémarrage font ces contrôles automatiquement.
+- Il est interdit de charger automatiquement un dossier `app.bak-*`, une sauvegarde, un snapshot ou une ancienne release lorsque `app\cst-server.exe` ou `app\dist` est incomplet. L'opération doit échouer sans toucher au runtime actif.
+- Un nouveau paquet doit provenir d'un commit descendant du commit accepté, conserver toutes les preuves fonctionnelles de la politique et posséder une génération de 12 chiffres strictement supérieure.
+- Pour un changement frontend, le build ID doit se terminer par la génération exacte. Pour un changement backend, `cst-server --version` doit contenir le commit source candidat.
+- Après build et vérifications, créer le manifeste avec `PrepareCandidate -Generation <YYYYMMDDHHMM> -ChangeKind frontend|backend|mixed -ConfirmAllConcurrentChangesMerged`. Ne jamais écrire ou modifier manuellement `candidate.json`.
+- Seul `start-switch-development-runtime.ps1` peut enregistrer le candidat après avoir vérifié le binaire, le `dist`, l'index réellement servi, le commit backend et `/healthz`. Une release n'est acceptée qu'après `RecordRuntime` réussi.
+- Le verrou VPS reste distinct et autoritaire pour la production. La copie locale de son état dans `docs/operations/azure-vps-release-floor.json` est informative et ne permet aucune synchronisation ni aucun déploiement.
+
+# Plan de montée à 10 000 agents
+
+- Le plan fondé sur l'architecture et la release Switch développement actuelles se trouve dans `docs/architecture/PLAN-10000-AGENTS-SWITCH-DEV-ACTUEL.md`.
+- Son chemin absolu sur le SSD est `E:\AppsData\SwitchDevelopment\app\docs\architecture\PLAN-10000-AGENTS-SWITCH-DEV-ACTUEL.md`.
+- Avant toute implémentation liée à cette montée en charge, relire ce plan et vérifier à nouveau la baseline active ; les limites, hashes et métriques observés dans le document sont datés et ne remplacent pas les contrôles de runtime.
+- Ce plan concerne exclusivement Switch développement et n'autorise aucune action sur le VPS Azure.

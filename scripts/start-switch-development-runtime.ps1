@@ -11,6 +11,7 @@ $deploymentRoot = [IO.Path]::GetFullPath($DeploymentRoot)
 $configPath = Join-Path $deploymentRoot "config\server.local.env.ps1"
 $sourceServerPath = Join-Path $deploymentRoot "app\cst-server.exe"
 $sourceStaticPath = Join-Path $deploymentRoot "app\dist"
+$releaseGate = Join-Path $deploymentRoot "app\scripts\switch-development-release-gate.ps1"
 $dataPath = Join-Path $deploymentRoot "data"
 $deploymentRunPath = Join-Path $deploymentRoot "run"
 $launchMutex = [Threading.Mutex]::new($false, "Local\SwitchDevelopmentLaunch-18082")
@@ -26,34 +27,14 @@ try {
     throw "Un autre lancement Switch developpement est deja en cours."
   }
 
-# Une reconstruction de developpement peut remplacer momentanement le paquet
-# principal. Utiliser le dernier backup complet evite de demarrer un ensemble
-# executable/frontend incomplet.
-if (
-  -not (Test-Path -LiteralPath $sourceServerPath -PathType Leaf) -or
-  -not (Test-Path -LiteralPath (Join-Path $sourceStaticPath "index.html") -PathType Leaf)
-) {
-  $fallbackRoot = Get-ChildItem -LiteralPath $deploymentRoot -Directory -Filter "app.bak-*" |
-    Where-Object {
-      (Test-Path -LiteralPath (Join-Path $_.FullName "cst-server.exe") -PathType Leaf) -and
-      (Test-Path -LiteralPath (Join-Path $_.FullName "dist\index.html") -PathType Leaf)
-    } |
-    Sort-Object Name -Descending |
-    Select-Object -First 1
-
-  if ($fallbackRoot) {
-    $sourceServerPath = Join-Path $fallbackRoot.FullName "cst-server.exe"
-    $sourceStaticPath = Join-Path $fallbackRoot.FullName "dist"
-  }
-}
-
 foreach ($requiredPath in @(
   $configPath,
+  $releaseGate,
   $sourceServerPath,
   (Join-Path $sourceStaticPath "index.html")
 )) {
   if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
-    throw "Deploiement Switch developpement incomplet : $requiredPath est absent."
+    throw "Deploiement Switch developpement incomplet : $requiredPath est absent. Aucun backup ancien ne sera charge."
   }
 }
 
@@ -98,6 +79,11 @@ try {
   if (-not $deployLockHeld) {
     throw "Un autre deploiement Switch developpement est en cours ; demarrage annule, aucun paquet incoherent servi."
   }
+
+# Verrou monotone : le paquet app\ doit etre soit la release acceptee, soit un
+# candidat manifeste descendant de celle-ci. Le repli silencieux vers app.bak-*
+# est volontairement interdit.
+& $releaseGate -Operation AuditPackage -DeploymentRoot $deploymentRoot -CandidateRoot (Join-Path $deploymentRoot "app")
 
 $sourceServerHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $sourceServerPath).Hash
 $sourceIndexPath = Join-Path $sourceStaticPath "index.html"
@@ -152,6 +138,7 @@ if (
 ) {
   throw "Runtime Switch developpement incoherent ; demarrage annule."
 }
+& $releaseGate -Operation AuditPackage -DeploymentRoot $deploymentRoot -CandidateRoot $runtimeReleasePath
 
 $env:CST_BIND = "127.0.0.1:18082"
 $env:CST_DATA_DIR = $dataPath
@@ -166,6 +153,7 @@ if ($listener) {
   try {
     $health = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:18082/healthz" -TimeoutSec 3
     if ($health.StatusCode -eq 200) {
+      & $releaseGate -Operation AuditActive -DeploymentRoot $deploymentRoot
       Write-Output "Switch developpement est deja disponible sur 127.0.0.1:18082."
       return
     }
@@ -200,6 +188,7 @@ for ($attempt = 0; $attempt -lt 40; $attempt += 1) {
   try {
     $health = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:18082/healthz" -TimeoutSec 2
     if ($health.StatusCode -eq 200) {
+      & $releaseGate -Operation RecordRuntime -DeploymentRoot $deploymentRoot -RuntimeReleasePath $runtimeReleasePath
       Write-Output "Switch developpement demarre (PID $($process.Id)) depuis le runtime interne $runtimeReleasePath."
       return
     }
