@@ -115,6 +115,33 @@ test("l'indexation d'un nouveau rollout ne bloque plus le suivi du chat", () => 
   assert.doesNotMatch(source, /snapshot\.sessionId\s*\?\s*await attachCreatedExpertChat/);
 });
 
+test("la fin d'un tour libere la file sans attendre le transcript", () => {
+  const mainApplyStart = main.indexOf("const applyChatTurnSnapshot = async");
+  const mainApplyEnd = main.indexOf("\nconst pollChatTurn", mainApplyStart);
+  const mainApply = main.slice(mainApplyStart, mainApplyEnd);
+  assert.match(mainApply, /void attachCreatedChat\(snapshot\.sessionId\)\.catch/);
+  assert.match(
+    mainApply,
+    /stopChatTurnPoll\(\);\s*if \(attached\) void loadChatTranscript\(\);/,
+  );
+  assert.doesNotMatch(mainApply, /await loadChatTranscript\(\)/);
+
+  const expertApplyStart = main.indexOf("const applyExpertChatTurnSnapshot = async");
+  const expertApplyEnd = main.indexOf("\nconst pollExpertChatTurn", expertApplyStart);
+  const expertApply = main.slice(expertApplyStart, expertApplyEnd);
+  assert.match(
+    expertApply,
+    /stopExpertChatTurnPoll\(pane\);\s*if \(attached\) void loadExpertChatTranscript\(pane\);/,
+  );
+  assert.doesNotMatch(expertApply, /await loadExpertChatTranscript\(pane\)/);
+
+  assert.match(platform, /REMOTE_DISCUSSION_TRANSCRIPT_TIMEOUT_MS = 15_000/);
+  assert.match(
+    platform,
+    /get_discussion_transcript[\s\S]*?REMOTE_DISCUSSION_TRANSCRIPT_TIMEOUT_MS/,
+  );
+});
+
 test("le rattachement d'un rollout respecte compte et noeud", () => {
   assert.match(main, /const discussionMatchesExpertPaneSession =/);
   assert.match(main, /discussion\.accountId !== pane\.accountId/);

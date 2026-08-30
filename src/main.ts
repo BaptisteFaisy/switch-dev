@@ -10519,14 +10519,23 @@ const applyChatTurnSnapshot = async (snapshot: ChatTurnSnapshot) => {
     snapshot.status === "failed" &&
     isQuotaExhaustionError(snapshot.error);
   const retryableFailure = failedTurnIsRetryable(snapshot, chatActiveSubmission);
-  const attached = snapshot.sessionId ? await attachCreatedChat(snapshot.sessionId) : !!chatDiscussion;
+  const attached = !!chatDiscussion;
+  if (snapshot.sessionId && !attached) {
+    // Le rattachement au rollout et son premier transcript sont des caches
+    // secondaires. Une indexation lente ne doit jamais retenir le statut
+    // terminal du tour ni les messages utilisateur deja mis en attente.
+    void attachCreatedChat(snapshot.sessionId).catch((error) => {
+      statusText = `Indexation du chat : ${String(error)}`;
+      if (activeView === "chat") refreshChatSyncIndicator();
+    });
+  }
 
   if (snapshot.status === "finalizing") {
     statusText = "Reponse terminee, synchronisation…";
   } else if (snapshot.status === "completed") {
     statusText = "Reponse terminee";
-    if (attached) await loadChatTranscript();
     stopChatTurnPoll();
+    if (attached) void loadChatTranscript();
   } else if (snapshot.status === "failed") {
     chatMessages = markLatestPendingMessageFailed(chatMessages);
     statusText = snapshot.error || "La reponse a echoue";
@@ -12795,8 +12804,8 @@ const applyExpertChatTurnSnapshot = async (
     statusText = automaticOrchestrationPending
       ? "Orchestration automatique retenue · préparation de l'équipe"
       : "Reponse terminee";
-    if (attached) await loadExpertChatTranscript(pane);
     stopExpertChatTurnPoll(pane);
+    if (attached) void loadExpertChatTranscript(pane);
   } else if (snapshot.status === "failed") {
     pane.messages = markLatestPendingMessageFailed(pane.messages);
     statusText = snapshot.error || "La reponse a echoue";

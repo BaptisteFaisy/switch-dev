@@ -1107,6 +1107,8 @@ async function remoteInvoke<T>(command: string, args: Record<string, any>): Prom
         args.sessionId,
         "GET",
         `/api/discussions/transcript?accountId=${encodeURIComponent(String(args.accountId))}&sessionId=${encodeURIComponent(String(args.sessionId))}`,
+        undefined,
+        REMOTE_DISCUSSION_TRANSCRIPT_TIMEOUT_MS,
       );
     case "list_forum_topics":
       return api<T>("GET", "/api/forum/topics");
@@ -1675,6 +1677,8 @@ async function apiAt<T>(
   }
 }
 
+const REMOTE_DISCUSSION_TRANSCRIPT_TIMEOUT_MS = 15_000;
+
 function defaultRemoteRoute(): RemoteTerminalRoute {
   return {
     label: "Serveur principal",
@@ -1956,14 +1960,20 @@ function serializeRemoteChatStart<T>(work: () => Promise<T>): Promise<T> {
   return result;
 }
 
-async function listRemoteDiscussions<T>(): Promise<T> {
+async function listRemoteDiscussions<T>(timeoutMs?: number): Promise<T> {
   const routes = parseRemoteNodes().map(nodeToRoute);
   const results = await Promise.all(
     routes.map(async (route) => {
       try {
         return {
           route,
-          dashboard: await apiAt<Record<string, any>>(route, "GET", "/api/discussions"),
+          dashboard: await apiAt<Record<string, any>>(
+            route,
+            "GET",
+            "/api/discussions",
+            undefined,
+            timeoutMs,
+          ),
           error: null as unknown,
         };
       } catch (error) {
@@ -2098,10 +2108,10 @@ async function listRemotePromptHistory<T>(requestedLimit: unknown): Promise<T> {
   } as T;
 }
 
-async function locateRemoteSession(accountId: string, sessionId: string) {
+async function locateRemoteSession(accountId: string, sessionId: string, timeoutMs?: number) {
   const known = remoteSessionRoute(accountId, sessionId);
   if (known) return known;
-  await listRemoteDiscussions<unknown>();
+  await listRemoteDiscussions<unknown>(timeoutMs);
   return remoteSessionRoute(accountId, sessionId);
 }
 
@@ -2369,13 +2379,14 @@ async function remoteSessionApi<T>(
   method: string,
   path: string,
   body?: unknown,
+  timeoutMs?: number,
 ): Promise<T> {
   const route = remoteSessionRoute(accountId, sessionId)
     ?? (typeof accountId === "string" && typeof sessionId === "string"
-      ? await locateRemoteSession(accountId, sessionId)
+      ? await locateRemoteSession(accountId, sessionId, timeoutMs)
       : null)
     ?? defaultRemoteRoute();
-  const response = await apiAt<T>(route, method, path, body);
+  const response = await apiAt<T>(route, method, path, body, timeoutMs);
   if (!response || typeof response !== "object" || Array.isArray(response)) return response;
   const value = response as Record<string, any>;
   const responseAccountId = value.accountId ?? accountId;
