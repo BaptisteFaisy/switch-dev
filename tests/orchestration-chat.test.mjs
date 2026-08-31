@@ -27,7 +27,15 @@ import {
 const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
 const chatView = readFileSync(new URL("../src/chat/view.ts", import.meta.url), "utf8");
 const platform = readFileSync(new URL("../src/platform.ts", import.meta.url), "utf8");
-const backend = readFileSync(new URL("../src-tauri/src/orchestration.rs", import.meta.url), "utf8");
+const backendRoot = readFileSync(new URL("../src-tauri/src/orchestration.rs", import.meta.url), "utf8");
+const backendModules = new URL("../src-tauri/src/orchestration/", import.meta.url);
+const backend = [
+  backendRoot,
+  ...[...backendRoot.matchAll(/^mod ([a-z_]+);$/gm)]
+    .map(([, moduleName]) => moduleName)
+    .sort()
+    .map((moduleName) => readFileSync(new URL(`${moduleName}.rs`, backendModules), "utf8")),
+].join("\n");
 const chat = readFileSync(new URL("../src-tauri/src/chat.rs", import.meta.url), "utf8");
 const server = readFileSync(new URL("../src-tauri/src/server.rs", import.meta.url), "utf8");
 const lib = readFileSync(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8");
