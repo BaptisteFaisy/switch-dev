@@ -22,6 +22,7 @@ import {
 } from "../src/chat/orchestration.ts";
 
 const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
+const types = readFileSync(new URL("../src/types.ts", import.meta.url), "utf8");
 const chatView = readFileSync(new URL("../src/chat/view.ts", import.meta.url), "utf8");
 const platform = readFileSync(new URL("../src/platform.ts", import.meta.url), "utf8");
 const backend = readFileSync(new URL("../src-tauri/src/orchestration.rs", import.meta.url), "utf8");
@@ -174,7 +175,7 @@ test("les comptes Freebuff ne peuvent plus bloquer une orchestration structurée
 });
 
 test("la vue dédiée crée et expose chaque chat de l'équipe", () => {
-  assert.match(main, /\| "orchestration"/);
+  assert.match(types, /\| "orchestration"/);
   assert.match(main, /id="orchestrationCreateForm"/);
   assert.match(main, /id="orchestrationCreateAdvanced"/);
   assert.match(main, /class="orchestration-required-grid"/);

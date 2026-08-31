@@ -4,6 +4,7 @@ import test from "node:test";
 
 const read = (path) => readFileSync(new URL(path, import.meta.url), "utf8");
 const main = read("../src/main.ts");
+const types = read("../src/types.ts");
 const view = read("../src/transcription.ts");
 const styles = read("../src/transcription.css");
 const chatView = read("../src/chat/view.ts");
@@ -20,7 +21,7 @@ const ansiblePlaybook = read("../deploy/ansible/playbook.yml");
 const deploy = read("../scripts/deploy-vps-ansible.ps1");
 
 test("un onglet Transcrire est charge a la demande sur desktop et mobile", () => {
-  assert.match(main, /\| "transcription"/);
+  assert.match(types, /\| "transcription"/);
   assert.match(main, /import\("\.\/transcription"\)/);
   assert.match(main, /data-view="transcription"[^>]*>[\s\S]*?Transcrire/);
   assert.match(main, /id="transcriptionToggle"[\s\S]*?<span>Transcrire<\/span>/);

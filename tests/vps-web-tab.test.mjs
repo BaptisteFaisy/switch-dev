@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
+const types = readFileSync(new URL("../src/types.ts", import.meta.url), "utf8");
 const panel = readFileSync(new URL("../src/vps.ts", import.meta.url), "utf8");
 const styles = readFileSync(new URL("../src/vps.css", import.meta.url), "utf8");
 const platform = readFileSync(new URL("../src/platform.ts", import.meta.url), "utf8");
@@ -10,7 +11,7 @@ const server = readFileSync(new URL("../src-tauri/src/server.rs", import.meta.ur
 const manager = readFileSync(new URL("../src-tauri/src/vps_deploy.rs", import.meta.url), "utf8");
 
 test("le site :8080 expose un onglet VPS sur bureau et mobile", () => {
-  assert.match(main, /\| "vps"/);
+  assert.match(types, /\| "vps"/);
   assert.match(main, /id="vpsToggle"/);
   assert.match(main, /data-view="vps"/);
   assert.match(main, /type VpsModule = typeof import\("\.\/vps"\)/);

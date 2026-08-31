@@ -173,13 +173,14 @@ test("rend un panneau échappé avec l'heure, l'environnement et les actions", (
 
 test("la vue Chat planifié est reliée aux navigations et au runtime", () => {
   const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
+const types = readFileSync(new URL("../src/types.ts", import.meta.url), "utf8");
   const initialStyles = ["style.css", "theme.css"]
     .map((file) => readFileSync(new URL(`../src/${file}`, import.meta.url), "utf8"))
     .join("\n");
   const view = readFileSync(new URL("../src/scheduled-chats-view.ts", import.meta.url), "utf8");
   const style = readFileSync(new URL("../src/scheduled-chats.css", import.meta.url), "utf8");
 
-  assert.match(main, /\| "scheduled-chat"/);
+  assert.match(types, /\| "scheduled-chat"/);
   assert.match(main, /id="scheduledChatToggle"/);
   assert.match(main, /role="menuitem" data-view="scheduled-chat"/);
   assert.match(main, /type ScheduledChatsViewModule = typeof import\("\.\/scheduled-chats-view"\)/);

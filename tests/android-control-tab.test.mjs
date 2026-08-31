@@ -4,6 +4,7 @@ import test from "node:test";
 
 const read = (path) => readFileSync(new URL(path, import.meta.url), "utf8");
 const main = read("../src/main.ts");
+const types = read("../src/types.ts");
 const view = read("../src/android-control.ts");
 const styles = read("../src/android-control.css");
 const tiktok = read("../src/tiktok-accounts.ts");
@@ -11,7 +12,7 @@ const backend = read("../src-tauri/src/tiktok_messaging.rs");
 const server = read("../src-tauri/src/server.rs");
 
 test("Android possède son propre onglet lazy sur ordinateur et mobile", () => {
-  assert.match(main, /\| "android"/);
+  assert.match(types, /\| "android"/);
   assert.match(main, /type AndroidControlModule = typeof import\("\.\/android-control"\)/);
   assert.match(main, /androidControlModulePromise = import\("\.\/android-control"\)/);
   assert.match(main, /if \(view === "android" && !androidControlModule\)/);
