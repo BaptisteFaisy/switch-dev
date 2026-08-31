@@ -1,0 +1,52 @@
+{
+  "contract": "switch-http/v1",
+  "environment": "development",
+  "status": "phase-0-read-only",
+  "baseUrlPolicy": {
+    "canonical": "https://pc-fixe-cst.tail3a8bdf.ts.net:10000",
+    "localHosts": [
+      "localhost",
+      "127.0.0.1"
+    ],
+    "composeOrigins": [
+      "http://switch:8080"
+    ],
+    "redirects": "forbidden"
+  },
+  "authentication": {
+    "type": "http-bearer",
+    "requiredForApi": true,
+    "requiredForHealth": false,
+    "header": "Authorization",
+    "secret": true
+  },
+  "operations": {
+    "health": {
+      "method": "GET",
+      "path": "/healthz",
+      "readOnly": true,
+      "authenticationRequired": false,
+      "response": "json-or-text"
+    },
+    "listActiveChatTurns": {
+      "method": "GET",
+      "path": "/api/chat/turns/active",
+      "readOnly": true,
+      "authenticationRequired": true,
+      "response": "array"
+    },
+    "listOrchestrations": {
+      "method": "GET",
+      "path": "/api/orchestrations",
+      "readOnly": true,
+      "authenticationRequired": true,
+      "response": "array"
+    }
+  },
+  "excludedUntilWritePhase": [
+    "POST",
+    "PUT",
+    "PATCH",
+    "DELETE"
+  ]
+}

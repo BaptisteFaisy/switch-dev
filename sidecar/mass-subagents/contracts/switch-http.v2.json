@@ -1,0 +1,79 @@
+{
+  "contract": "switch-http/v2",
+  "environment": "development",
+  "status": "no-tool-read-only-pilot",
+  "baseUrlPolicy": {
+    "canonical": "https://pc-fixe-cst.tail3a8bdf.ts.net:10000",
+    "localHosts": ["localhost", "127.0.0.1"],
+    "composeOrigins": ["http://switch:8080"],
+    "redirects": "forbidden"
+  },
+  "authentication": {
+    "type": "http-bearer",
+    "requiredForApi": true,
+    "requiredForHealth": false,
+    "header": "Authorization",
+    "secret": true
+  },
+  "safety": {
+    "dispatchMode": "ask",
+    "toolScope": "none",
+    "requiredHealthCapability": "chatTurnToolScopes includes none",
+    "filesystem": "read-only",
+    "appConnectors": [],
+    "appWriteApproved": false,
+    "unknownStartOutcome": "reconcile-by-sourceChatKey-or-stop",
+    "automaticRetryAfterUnknownOutcome": false
+  },
+  "operations": {
+    "health": {
+      "method": "GET",
+      "path": "/healthz",
+      "readOnly": true,
+      "authenticationRequired": false,
+      "response": "json-or-text"
+    },
+    "listActiveChatTurns": {
+      "method": "GET",
+      "path": "/api/chat/turns/active",
+      "readOnly": true,
+      "authenticationRequired": true,
+      "response": "array"
+    },
+    "listOrchestrations": {
+      "method": "GET",
+      "path": "/api/orchestrations",
+      "readOnly": true,
+      "authenticationRequired": true,
+      "response": "array"
+    },
+    "startChatTurn": {
+      "method": "POST",
+      "path": "/api/chat/turns",
+      "readOnly": false,
+      "authenticationRequired": true,
+      "request": "StartChatTurnRequest(mode=ask,toolScope=none)",
+      "response": "ChatTurnSnapshot"
+    },
+    "getChatTurn": {
+      "method": "GET",
+      "pathTemplate": "/api/chat/turns/{id}",
+      "readOnly": true,
+      "authenticationRequired": true,
+      "response": "ChatTurnSnapshot"
+    },
+    "cancelChatTurn": {
+      "method": "DELETE",
+      "pathTemplate": "/api/chat/turns/{id}",
+      "readOnly": false,
+      "authenticationRequired": true,
+      "response": "ChatTurnSnapshot"
+    }
+  },
+  "excludedUntilScopedWriteIsolation": [
+    "build-mode chat dispatch",
+    "write-scope roles",
+    "integrator role",
+    "automatic retry of an ambiguous POST"
+  ]
+}

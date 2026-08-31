@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://switch.dev/schemas/agent-roles/v1/patch-manifest.schema.json",
+  "title": "Immutable writer patch manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "run_id",
+    "agent_id",
+    "task_id",
+    "attempt_id",
+    "base_commit",
+    "fencing_token",
+    "scope",
+    "files_changed",
+    "tests_requested",
+    "patch_sha256",
+    "result"
+  ],
+  "properties": {
+    "schema_version": { "const": "patch-manifest/v1" },
+    "run_id": { "$ref": "#/$defs/identifier" },
+    "agent_id": { "$ref": "#/$defs/identifier" },
+    "task_id": { "$ref": "#/$defs/identifier" },
+    "attempt_id": { "$ref": "#/$defs/identifier" },
+    "base_commit": { "$ref": "#/$defs/commit" },
+    "fencing_token": { "type": "integer", "minimum": 1 },
+    "scope": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1, "maxLength": 640 }
+    },
+    "files_changed": {
+      "type": "array",
+      "maxItems": 512,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/repo_path" }
+    },
+    "tests_requested": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 128,
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1, "maxLength": 512 }
+    },
+    "patch_sha256": { "$ref": "#/$defs/sha256" },
+    "result": { "enum": ["draft", "ready_for_independent_review"] }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"
+    },
+    "commit": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{7,64}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "repo_path": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?![A-Za-z]:)[^\\\\\\u0000]+$"
+    }
+  }
+}

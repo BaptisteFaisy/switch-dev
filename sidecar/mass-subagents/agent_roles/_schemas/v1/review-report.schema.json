@@ -1,0 +1,127 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://switch.dev/schemas/agent-roles/v1/review-report.schema.json",
+  "title": "Immutable code-quality-review/v1 report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "policy",
+    "run_id",
+    "task_id",
+    "attempt_id",
+    "review_id",
+    "reviewer_agent_id",
+    "author_agent_id",
+    "base_commit",
+    "patch_sha256",
+    "verdict",
+    "second_review_required",
+    "dimensions_checked",
+    "findings",
+    "waivers",
+    "created_at"
+  ],
+  "properties": {
+    "policy": { "const": "code-quality-review/v1" },
+    "run_id": { "$ref": "#/$defs/identifier" },
+    "task_id": { "$ref": "#/$defs/identifier" },
+    "attempt_id": { "$ref": "#/$defs/identifier" },
+    "review_id": { "$ref": "#/$defs/identifier" },
+    "reviewer_agent_id": { "$ref": "#/$defs/identifier" },
+    "author_agent_id": { "$ref": "#/$defs/identifier" },
+    "base_commit": { "type": "string", "pattern": "^[a-f0-9]{7,64}$" },
+    "patch_sha256": { "$ref": "#/$defs/sha256" },
+    "verdict": { "enum": ["pass", "changes_requested", "uncertain"] },
+    "second_review_required": { "type": "boolean" },
+    "dimensions_checked": {
+      "type": "array",
+      "minItems": 8,
+      "maxItems": 8,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "structural_regression",
+          "code_judo",
+          "branching",
+          "boundaries_and_types",
+          "file_size",
+          "modularity",
+          "legibility",
+          "orchestration_and_atomicity"
+        ]
+      }
+    },
+    "findings": {
+      "type": "array",
+      "maxItems": 7,
+      "items": { "$ref": "#/$defs/finding" }
+    },
+    "waivers": {
+      "type": "array",
+      "maxItems": 7,
+      "items": { "$ref": "#/$defs/waiver" }
+    },
+    "created_at": { "type": "string", "format": "date-time" }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"
+    },
+    "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "finding_id",
+        "severity",
+        "category",
+        "confidence",
+        "file",
+        "line",
+        "evidence",
+        "impact",
+        "recommended_change",
+        "complexity_removed",
+        "verification"
+      ],
+      "properties": {
+        "finding_id": { "$ref": "#/$defs/identifier" },
+        "severity": { "enum": ["blocker", "major", "advisory"] },
+        "category": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "file": { "type": ["string", "null"], "maxLength": 512 },
+        "line": { "type": ["integer", "null"], "minimum": 1 },
+        "evidence": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "impact": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "recommended_change": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "complexity_removed": {
+          "type": "array",
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1, "maxLength": 512 }
+        },
+        "verification": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1, "maxLength": 1024 }
+        }
+      }
+    },
+    "waiver": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["finding_id", "author", "justification", "evidence", "scope", "expires_at"],
+      "properties": {
+        "finding_id": { "$ref": "#/$defs/identifier" },
+        "author": { "$ref": "#/$defs/identifier" },
+        "justification": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "evidence": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "scope": { "type": "string", "minLength": 1, "maxLength": 1024 },
+        "expires_at": { "type": ["string", "null"], "format": "date-time" }
+      }
+    }
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "environment": "development",
+  "switchBaseUrl": "http://127.0.0.1:18082",
+  "bind": "127.0.0.1",
+  "port": 18084,
+  "executor": "fake",
+  "switchCapacity": 2,
+  "microtasksPerSession": 32,
+  "maxLogicalAgents": 10000,
+  "maxCoordinators": 32,
+  "realChatDispatchEnabled": false
+}

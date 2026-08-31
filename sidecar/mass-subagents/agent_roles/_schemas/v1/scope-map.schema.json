@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://switch.dev/schemas/agent-roles/v1/scope-map.schema.json",
+  "title": "Scout scope map",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "base_commit", "cells"],
+  "properties": {
+    "schema_version": { "const": "scope-map/v1" },
+    "base_commit": { "$ref": "#/$defs/commit" },
+    "cells": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 10000,
+      "items": { "$ref": "#/$defs/cell" }
+    }
+  },
+  "$defs": {
+    "commit": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{7,64}$"
+    },
+    "identifier": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]{0,127}$"
+    },
+    "scope": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 640
+    },
+    "cell": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cell_id",
+        "scope",
+        "depends_on",
+        "acceptance_criteria",
+        "expected_tests",
+        "priority",
+        "risk_class"
+      ],
+      "properties": {
+        "cell_id": { "$ref": "#/$defs/identifier" },
+        "scope": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/scope" }
+        },
+        "depends_on": {
+          "type": "array",
+          "maxItems": 10000,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/identifier" }
+        },
+        "acceptance_criteria": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1, "maxLength": 1024 }
+        },
+        "expected_tests": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1, "maxLength": 512 }
+        },
+        "priority": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "risk_class": { "enum": ["low", "medium", "high", "critical"] }
+      }
+    }
+  }
+}

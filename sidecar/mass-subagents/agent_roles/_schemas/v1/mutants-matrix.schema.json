@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://switch.dev/schemas/agent-roles/v1/mutants-matrix.schema.json",
+  "title": "Deterministic mutation-testing matrix",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "patch_sha256", "seed", "totals", "mutants"],
+  "properties": {
+    "schema_version": { "const": "mutants-matrix/v1" },
+    "patch_sha256": { "$ref": "#/$defs/sha256" },
+    "seed": { "type": "integer", "minimum": 0 },
+    "totals": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["generated", "killed", "survived", "equivalent", "score"],
+      "properties": {
+        "generated": { "type": "integer", "minimum": 0 },
+        "killed": { "type": "integer", "minimum": 0 },
+        "survived": { "type": "integer", "minimum": 0 },
+        "equivalent": { "type": "integer", "minimum": 0 },
+        "score": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    },
+    "mutants": {
+      "type": "array",
+      "maxItems": 100000,
+      "items": { "$ref": "#/$defs/mutant" }
+    }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "mutant": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mutant_id", "category", "severity", "status", "file", "line", "evidence"],
+      "properties": {
+        "mutant_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$" },
+        "category": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "severity": { "enum": ["blocker", "major", "advisory"] },
+        "status": { "enum": ["killed", "survived", "equivalent"] },
+        "file": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "line": { "type": "integer", "minimum": 1 },
+        "evidence": { "type": "string", "minLength": 1, "maxLength": 4096 }
+      }
+    }
+  }
+}

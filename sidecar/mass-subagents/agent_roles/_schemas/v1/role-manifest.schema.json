@@ -1,0 +1,136 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://switch.dev/schemas/agent-roles/v1/role-manifest.schema.json",
+  "title": "Switch versioned logical-agent role manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "$schema",
+    "schema_version",
+    "role_id",
+    "role_version",
+    "execution_kind",
+    "archetype_id",
+    "archetype",
+    "model",
+    "reasoning",
+    "service_tier",
+    "write_access",
+    "tools_allowlist",
+    "capsule",
+    "out_schema",
+    "output_contract",
+    "require_review",
+    "second_review_rules"
+  ],
+  "properties": {
+    "$schema": {
+      "const": "../../_schemas/v1/role-manifest.schema.json"
+    },
+    "schema_version": {
+      "const": "switch-agent-role/v1"
+    },
+    "role_id": {
+      "enum": [
+        "scout",
+        "implementer",
+        "test_writer",
+        "mutation_operator",
+        "adversary",
+        "quality_reviewer",
+        "integrator"
+      ]
+    },
+    "role_version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+$"
+    },
+    "execution_kind": {
+      "enum": ["chat", "controlled-code"]
+    },
+    "archetype_id": {
+      "enum": ["T1", "T2", "T3", "T4", "T5", "CAS"]
+    },
+    "archetype": {
+      "enum": [
+        "chat-scout",
+        "chat-writer",
+        "chat-auditor",
+        "chat-reviewer",
+        "chat-batch",
+        "controlled-integration"
+      ]
+    },
+    "model": {
+      "type": "string",
+      "pattern": "^gpt-[a-z0-9.-]+$"
+    },
+    "reasoning": {
+      "enum": ["none", "low", "medium", "high"]
+    },
+    "service_tier": {
+      "enum": ["default", "priority"]
+    },
+    "write_access": {
+      "enum": ["read", "write-scope", "integrate"]
+    },
+    "tools_allowlist": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 32,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+      }
+    },
+    "capsule": {
+      "type": "string",
+      "pattern": "^[^\\\\/]+/v[0-9]+/capsule\\.md$"
+    },
+    "out_schema": {
+      "type": "string",
+      "pattern": "^_schemas/v[0-9]+/[a-z0-9-]+\\.schema\\.json$"
+    },
+    "output_contract": {
+      "enum": [
+        "scope_map",
+        "patch_manifest",
+        "mutants_matrix",
+        "proof_or_none",
+        "review_report",
+        "integration_record"
+      ]
+    },
+    "require_review": {
+      "type": "boolean"
+    },
+    "second_review_rules": {
+      "type": ["string", "null"],
+      "maxLength": 128
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "role_id": { "const": "integrator" }
+        },
+        "required": ["role_id"]
+      },
+      "then": {
+        "properties": {
+          "execution_kind": { "const": "controlled-code" },
+          "archetype_id": { "const": "CAS" },
+          "archetype": { "const": "controlled-integration" },
+          "write_access": { "const": "integrate" }
+        }
+      },
+      "else": {
+        "properties": {
+          "execution_kind": { "const": "chat" }
+        }
+      }
+    }
+  ]
+}

@@ -8,7 +8,10 @@ use crate::{
         ReassignAutonomousAgentAccountRequest, ScheduleAutonomousAgentRequest,
         SendAutonomousAgentMessageRequest, UpdateAutonomousAgentRequest,
     },
-    chat::{ChatTurnManager, StartChatTurnRequest, MAX_CHAT_TURN_REQUEST_BYTES},
+    chat::{
+        validate_chat_turn_tool_scope, ChatTurnManager, ChatTurnToolScope, StartChatTurnRequest,
+        MAX_CHAT_TURN_REQUEST_BYTES,
+    },
     chat_model_tools::{
         self, ApplyAutonomousAgentPolicyToolArguments, AutonomousAgentToolContext,
         ChatModelToolServerConfig, ChatOpenRequestRegistry, ChatPostRequestRegistry,
@@ -385,6 +388,7 @@ struct HealthResponse {
     active_chat_turns: usize,
     available_account_ids: Vec<String>,
     capacity: usize,
+    chat_turn_tool_scopes: [&'static str; 2],
     terminal_capacity: usize,
     started_at: i64,
 }
@@ -404,6 +408,7 @@ struct LivenessResponse {
     active_terminals: usize,
     active_chat_turns: usize,
     capacity: usize,
+    chat_turn_tool_scopes: [&'static str; 2],
     terminal_capacity: usize,
     /// Vrai tant qu'un nettoyage demande depuis l'interface web n'a pas encore
     /// ete execute par le gardien Windows. Lu sans authentification par le
@@ -3213,6 +3218,7 @@ async fn api_healthz(State(state): State<Arc<ServerState>>) -> Response {
         active_terminals: state.terminals.active_count(),
         active_chat_turns: state.chat.active_count(),
         capacity: state.config.node_capacity,
+        chat_turn_tool_scopes: ["full", "none"],
         terminal_capacity: state.config.terminal_capacity,
         cleanup_pending: cleanup_pending(&state),
     })
@@ -3500,6 +3506,7 @@ async fn api_health(State(state): State<Arc<ServerState>>, headers: HeaderMap) -
             active_chat_turns: state.chat.active_count(),
             available_account_ids,
             capacity: state.config.node_capacity,
+            chat_turn_tool_scopes: ["full", "none"],
             terminal_capacity: state.config.terminal_capacity,
             started_at: state.started_at,
         }))
@@ -5464,6 +5471,13 @@ fn normalize_source_chat_key(value: Option<String>) -> Result<Option<String>, St
     Ok(Some(value))
 }
 
+fn requested_chat_tool_scope(request: &StartChatTurnRequest) -> Option<ChatToolScope> {
+    match request.tool_scope {
+        ChatTurnToolScope::Full => Some(ChatToolScope::Full),
+        ChatTurnToolScope::None => None,
+    }
+}
+
 async fn api_start_chat_turn(
     State(state): State<Arc<ServerState>>,
     headers: HeaderMap,
@@ -5518,42 +5532,53 @@ async fn api_start_chat_turn(
         Ok(value) => value,
         Err(error) => return api_error(StatusCode::BAD_REQUEST, &error, &state.config),
     };
+    if let Err(error) = validate_chat_turn_tool_scope(&request) {
+        return api_error(StatusCode::BAD_REQUEST, &error, &state.config);
+    }
     // L'identite nominative est calculee AVANT l'emission de la capacite : elle
     // est la seule cle qui permette a un outil de retrouver la boite Microsoft
     // du demandeur. `actor.owner_id()` ne conviendrait pas, il renvoie le
     // pseudo-compte "server-admin" pour un tour lance au jeton administrateur.
     let owner_id = actor.user().map(|identity| identity.id.clone());
-    let token = match state
-        .chat_tool_capabilities
-        .issue(AutonomousAgentToolContext {
-            account_id: request.account_id.clone(),
-            scope: ChatToolScope::Full,
-            user_id: owner_id.clone(),
-            source_chat_key: request.source_chat_key.clone(),
-            project_dir: request.project_dir.clone(),
-            mode: request.mode,
-            model: request.model.clone(),
-            reasoning_effort: request.reasoning_effort.clone(),
-            goal_key: None,
-        }) {
-        Ok(value) => value,
-        Err(error) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, &error, &state.config),
-    };
-    let tool_server = match state.config.chat_tools_mcp_url() {
-        Ok(url) => ChatModelToolServerConfig {
-            url,
-            bearer_token: token.clone(),
-        },
-        Err(error) => {
-            state.chat_tool_capabilities.revoke(&token);
-            return api_error(StatusCode::INTERNAL_SERVER_ERROR, &error, &state.config);
+    let (token, tool_server) = match requested_chat_tool_scope(&request) {
+        None => (None, None),
+        Some(scope) => {
+            let token = match state
+                .chat_tool_capabilities
+                .issue(AutonomousAgentToolContext {
+                    account_id: request.account_id.clone(),
+                    scope,
+                    user_id: owner_id.clone(),
+                    source_chat_key: request.source_chat_key.clone(),
+                    project_dir: request.project_dir.clone(),
+                    mode: request.mode,
+                    model: request.model.clone(),
+                    reasoning_effort: request.reasoning_effort.clone(),
+                    goal_key: None,
+                }) {
+                Ok(value) => value,
+                Err(error) => {
+                    return api_error(StatusCode::INTERNAL_SERVER_ERROR, &error, &state.config)
+                }
+            };
+            let tool_server = match state.config.chat_tools_mcp_url() {
+                Ok(url) => ChatModelToolServerConfig {
+                    url,
+                    bearer_token: token.clone(),
+                },
+                Err(error) => {
+                    state.chat_tool_capabilities.revoke(&token);
+                    return api_error(StatusCode::INTERNAL_SERVER_ERROR, &error, &state.config);
+                }
+            };
+            (Some(token), Some(tool_server))
         }
     };
     let start_state = state.clone();
     let result = tokio::task::spawn_blocking(move || {
         let value = start_state
             .chat
-            .start_with_model_tools(request, Some(tool_server))?;
+            .start_with_model_tools(request, tool_server)?;
         if let Some(owner_id) = owner_id.as_deref() {
             if let Err(error) = start_state.chat.assign_owner(value.id, owner_id) {
                 let _ = start_state.chat.stop(value.id);
@@ -5566,11 +5591,15 @@ async fn api_start_chat_turn(
     match result {
         Ok(Ok(value)) => json_response(value),
         Ok(Err(error)) => {
-            state.chat_tool_capabilities.revoke(&token);
+            if let Some(token) = token.as_deref() {
+                state.chat_tool_capabilities.revoke(token);
+            }
             api_error(agent_start_status(&error), &error, &state.config)
         }
         Err(error) => {
-            state.chat_tool_capabilities.revoke(&token);
+            if let Some(token) = token.as_deref() {
+                state.chat_tool_capabilities.revoke(token);
+            }
             api_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 &format!("spawn chat interrompu: {error}"),
@@ -10708,6 +10737,8 @@ fn agent_start_status(error: &str) -> StatusCode {
         StatusCode::TOO_MANY_REQUESTS
     } else if error.starts_with("memoire insuffisante") {
         StatusCode::SERVICE_UNAVAILABLE
+    } else if error.starts_with("toolScope=none") || error.starts_with("Le mode sans outils") {
+        StatusCode::BAD_REQUEST
     } else if error.contains("deja vivant")
         || error.contains("déjà en cours")
         || error.starts_with("Compte Freebuff indisponible")
@@ -11042,6 +11073,48 @@ mod tests {
             resource_error_status("Etat des conversations verrouille"),
             StatusCode::INTERNAL_SERVER_ERROR
         );
+    }
+
+    #[test]
+    fn no_tool_chat_scope_is_fail_closed_and_legacy_full_remains_default() {
+        let legacy: StartChatTurnRequest = serde_json::from_value(json!({
+            "accountId": "account",
+            "prompt": "Inspecte"
+        }))
+        .unwrap();
+        assert_eq!(legacy.tool_scope, ChatTurnToolScope::Full);
+        assert!(validate_chat_turn_tool_scope(&legacy).is_ok());
+        assert_eq!(
+            requested_chat_tool_scope(&legacy),
+            Some(ChatToolScope::Full)
+        );
+
+        let no_tools: StartChatTurnRequest = serde_json::from_value(json!({
+            "accountId": "account",
+            "prompt": "Inspecte",
+            "mode": "ask",
+            "toolScope": "none",
+            "appConnectors": [],
+            "appWriteApproved": false,
+            "agentTools": [],
+            "agentSkills": [],
+            "questionTool": false,
+            "proofTool": false
+        }))
+        .unwrap();
+        assert!(validate_chat_turn_tool_scope(&no_tools).is_ok());
+        assert_eq!(requested_chat_tool_scope(&no_tools), None);
+
+        for invalid in [
+            json!({"accountId":"account","prompt":"x","mode":"build","toolScope":"none"}),
+            json!({"accountId":"account","prompt":"x","mode":"ask","toolScope":"none","sessionId":"0199a213-81c0-7800-8aa1-bbab2a035a53"}),
+            json!({"accountId":"account","prompt":"x","mode":"ask","toolScope":"none","appConnectors":["gmail"]}),
+            json!({"accountId":"account","prompt":"x","mode":"ask","toolScope":"none","appWriteApproved":true}),
+            json!({"accountId":"account","prompt":"x","mode":"ask","toolScope":"none","questionTool":true}),
+        ] {
+            let request: StartChatTurnRequest = serde_json::from_value(invalid).unwrap();
+            assert!(validate_chat_turn_tool_scope(&request).is_err());
+        }
     }
 
     #[test]

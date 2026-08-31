@@ -10,7 +10,10 @@
 
 use crate::{
     autonomous::AutonomousAgentManager,
-    chat::{ChatTurnManager, ChatTurnMode, ChatTurnSnapshot, ChatTurnStatus, StartChatTurnRequest},
+    chat::{
+        ChatTurnManager, ChatTurnMode, ChatTurnSnapshot, ChatTurnStatus, ChatTurnToolScope,
+        StartChatTurnRequest,
+    },
     discussions, fs_util, metrics, settings,
 };
 use serde::{Deserialize, Serialize};
@@ -1701,6 +1704,7 @@ fn start_chat_turn(
         image_attachments: Vec::new(),
         project_dir: Some(project_dir),
         mode,
+        tool_scope: ChatTurnToolScope::Full,
         model: (account_id == run.account_id)
             .then(|| run.model.clone())
             .flatten(),

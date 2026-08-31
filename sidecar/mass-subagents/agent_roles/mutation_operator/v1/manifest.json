@@ -1,0 +1,19 @@
+{
+  "$schema": "../../_schemas/v1/role-manifest.schema.json",
+  "schema_version": "switch-agent-role/v1",
+  "role_id": "mutation_operator",
+  "role_version": "1.0",
+  "execution_kind": "chat",
+  "archetype_id": "T5",
+  "archetype": "chat-batch",
+  "model": "gpt-5.6-luna",
+  "reasoning": "low",
+  "service_tier": "priority",
+  "write_access": "read",
+  "tools_allowlist": ["read", "code_search", "run_tests"],
+  "capsule": "mutation_operator/v1/capsule.md",
+  "out_schema": "_schemas/v1/mutants-matrix.schema.json",
+  "output_contract": "mutants_matrix",
+  "require_review": false,
+  "second_review_rules": null
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "../../_schemas/v1/role-manifest.schema.json",
+  "schema_version": "switch-agent-role/v1",
+  "role_id": "scout",
+  "role_version": "1.0",
+  "execution_kind": "chat",
+  "archetype_id": "T1",
+  "archetype": "chat-scout",
+  "model": "gpt-5.6-terra",
+  "reasoning": "low",
+  "service_tier": "priority",
+  "write_access": "read",
+  "tools_allowlist": ["read", "code_search"],
+  "capsule": "scout/v1/capsule.md",
+  "out_schema": "_schemas/v1/scope-map.schema.json",
+  "output_contract": "scope_map",
+  "require_review": false,
+  "second_review_rules": null
+}

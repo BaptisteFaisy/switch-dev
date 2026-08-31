@@ -1,0 +1,19 @@
+{
+  "$schema": "../../_schemas/v1/role-manifest.schema.json",
+  "schema_version": "switch-agent-role/v1",
+  "role_id": "test_writer",
+  "role_version": "1.0",
+  "execution_kind": "chat",
+  "archetype_id": "T2",
+  "archetype": "chat-writer",
+  "model": "gpt-5.6-terra",
+  "reasoning": "low",
+  "service_tier": "priority",
+  "write_access": "write-scope",
+  "tools_allowlist": ["read", "code_search", "edit_scope", "run_tests"],
+  "capsule": "test_writer/v1/capsule.md",
+  "out_schema": "_schemas/v1/patch-manifest.schema.json",
+  "output_contract": "patch_manifest",
+  "require_review": true,
+  "second_review_rules": "code-quality-review/v1"
+}

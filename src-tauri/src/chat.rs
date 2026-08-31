@@ -363,6 +363,8 @@ pub struct StartChatTurnRequest {
     #[serde(default)]
     pub mode: ChatTurnMode,
     #[serde(default)]
+    pub tool_scope: ChatTurnToolScope,
+    #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
     pub reasoning_effort: Option<String>,
@@ -382,6 +384,58 @@ pub struct StartChatTurnRequest {
     pub proof_tool: bool,
     #[serde(default)]
     pub source_chat_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatTurnToolScope {
+    #[default]
+    Full,
+    None,
+}
+
+pub(crate) fn validate_chat_turn_tool_scope(request: &StartChatTurnRequest) -> Result<(), String> {
+    if request.tool_scope == ChatTurnToolScope::Full {
+        return Ok(());
+    }
+    if request.mode != ChatTurnMode::Ask {
+        return Err("toolScope=none exige mode=ask".to_string());
+    }
+    if request.session_id.is_some() {
+        return Err("toolScope=none refuse la reprise d'une session existante".to_string());
+    }
+    if !request
+        .app_connectors
+        .as_ref()
+        .is_some_and(|connectors| connectors.is_empty())
+        || request.app_write_approved
+    {
+        return Err("toolScope=none exige une liste de connecteurs explicitement vide".to_string());
+    }
+    if !request.agent_tools.is_empty()
+        || !request.agent_skills.is_empty()
+        || request.question_tool
+        || request.proof_tool
+    {
+        return Err("toolScope=none refuse tous les outils et skills de tour".to_string());
+    }
+    Ok(())
+}
+
+fn validate_chat_turn_execution_scope(
+    request: &StartChatTurnRequest,
+    has_model_tool_server: bool,
+    filesystem_scope: ChatFilesystemScope,
+) -> Result<(), String> {
+    validate_chat_turn_tool_scope(request)?;
+    if request.tool_scope == ChatTurnToolScope::None
+        && (has_model_tool_server || filesystem_scope != ChatFilesystemScope::Default)
+    {
+        return Err(
+            "toolScope=none refuse un serveur MCP ou un espace de travail modifiable".to_string(),
+        );
+    }
+    Ok(())
 }
 
 struct ChatTurn {
@@ -829,6 +883,11 @@ impl ChatTurnManager {
         model_tool_server: Option<ChatModelToolServerConfig>,
         filesystem_scope: ChatFilesystemScope,
     ) -> Result<ChatTurnSnapshot, String> {
+        validate_chat_turn_execution_scope(
+            &request,
+            model_tool_server.is_some(),
+            filesystem_scope,
+        )?;
         self.prune_finished_turns();
         let _start_guard = self
             .start_gate
@@ -874,6 +933,14 @@ impl ChatTurnManager {
             .find(|candidate| candidate.id == request.account_id)
             .cloned()
             .ok_or_else(|| "Compte introuvable".to_string())?;
+        if request.tool_scope == ChatTurnToolScope::None
+            && !matches!(account.provider, Provider::Codex | Provider::Claude)
+        {
+            return Err(
+                "Le mode sans outils est actuellement pris en charge uniquement par Codex et Claude"
+                    .to_string(),
+            );
+        }
         if account.provider == Provider::Freebuff {
             return Err(format!(
                 "Le chat ne prend pas en charge freebuff ({}) : son CLI est un TUI interactif, sans prompt en argument ni sortie structuree. Ouvre-le dans un onglet terminal.",
@@ -1076,6 +1143,7 @@ impl ChatTurnManager {
                 model_tool_server.as_ref(),
                 model_tool_file.as_ref().map(|file| file.path.as_path()),
                 image_files.paths(),
+                request.tool_scope,
                 effective_filesystem_scope,
             );
             // `configure_provider_command...` pose d'abord le MCP goal dans
@@ -2099,6 +2167,7 @@ pub fn start_chat_turn(
         image_attachments: image_attachments.unwrap_or_default(),
         project_dir,
         mode: mode.unwrap_or_default(),
+        tool_scope: ChatTurnToolScope::Full,
         model,
         reasoning_effort,
         app_connectors: None,
@@ -2432,6 +2501,7 @@ fn configure_provider_command_with_images(
         model_tool_server,
         model_tool_config_path,
         image_paths,
+        ChatTurnToolScope::Full,
         ChatFilesystemScope::Default,
     );
 }
@@ -2449,6 +2519,7 @@ fn configure_provider_command_with_images_and_scope(
     model_tool_server: Option<&ChatModelToolServerConfig>,
     model_tool_config_path: Option<&Path>,
     image_paths: &[PathBuf],
+    tool_scope: ChatTurnToolScope,
     filesystem_scope: ChatFilesystemScope,
 ) {
     match account.provider {
@@ -2456,6 +2527,13 @@ fn configure_provider_command_with_images_and_scope(
         Provider::Freebuff | Provider::Aihubmix => {}
         Provider::Codex => {
             command.arg("exec");
+            if tool_scope == ChatTurnToolScope::None {
+                command
+                    .arg("--ignore-user-config")
+                    .arg("--ephemeral")
+                    .arg("-c")
+                    .arg("mcp_servers={}");
+            }
             if matches!(
                 filesystem_scope,
                 ChatFilesystemScope::ReviewProofArtifacts
@@ -2472,8 +2550,12 @@ fn configure_provider_command_with_images_and_scope(
             // La memoire automatique locale du CLI est desactivee par defaut.
             // Chaque compte conserve son store dans son CODEX_HOME ; le cwd du
             // tour permet ensuite a Codex de retrouver le contexte pertinent.
-            command.arg("--enable").arg("memories");
-            if filesystem_scope != ChatFilesystemScope::OrchestrationWorkspace {
+            if tool_scope != ChatTurnToolScope::None {
+                command.arg("--enable").arg("memories");
+            }
+            if tool_scope != ChatTurnToolScope::None
+                && filesystem_scope != ChatFilesystemScope::OrchestrationWorkspace
+            {
                 command
                     .arg("--enable")
                     .arg("multi_agent")
@@ -2528,6 +2610,9 @@ fn configure_provider_command_with_images_and_scope(
                 }
             } else if matches!(mode, ChatTurnMode::Plan | ChatTurnMode::Ask) {
                 command.arg("-c").arg("sandbox_mode=\"read-only\"");
+                if tool_scope == ChatTurnToolScope::None {
+                    command.arg("-c").arg("approval_policy=\"never\"");
+                }
             } else if account.bypass
                 && app_connectors.is_none_or(|connectors| connectors.is_empty())
             {
@@ -2562,6 +2647,13 @@ fn configure_provider_command_with_images_and_scope(
                 .arg("--output-format")
                 .arg("stream-json")
                 .arg("--verbose");
+            if tool_scope == ChatTurnToolScope::None {
+                command
+                    .arg("--safe-mode")
+                    .arg("--strict-mcp-config")
+                    .arg("--tools")
+                    .arg("Read,Glob,Grep");
+            }
             if let Some(session_id) = session_id {
                 command.arg("--resume").arg(session_id);
             }
@@ -5386,6 +5478,7 @@ mod tests {
             None,
             None,
             &[],
+            ChatTurnToolScope::Full,
             ChatFilesystemScope::ReviewProofArtifacts,
         );
 
@@ -5427,6 +5520,7 @@ mod tests {
             None,
             None,
             &[],
+            ChatTurnToolScope::Full,
             ChatFilesystemScope::OrchestrationWorkspace,
         );
 
@@ -5446,6 +5540,81 @@ mod tests {
         assert_eq!(args.first().map(String::as_str), Some("exec"));
         assert!(cd < resume, "-C doit appartenir a codex exec");
         assert!(resume < session, "la session suit la sous-commande resume");
+    }
+
+    #[test]
+    fn no_tool_scope_disables_inherited_mcp_and_keeps_read_only_provider_tools() {
+        let codex = test_account(Provider::Codex);
+        let mut codex_command = Command::new("codex");
+        configure_provider_command_with_images_and_scope(
+            &mut codex_command,
+            &codex,
+            None,
+            ChatTurnMode::Ask,
+            None,
+            None,
+            Some(&[]),
+            false,
+            Some("lecture bornee"),
+            None,
+            None,
+            &[],
+            ChatTurnToolScope::None,
+            ChatFilesystemScope::Default,
+        );
+        let codex_args = command_args(&codex_command);
+        for expected in ["--ignore-user-config", "--ephemeral"] {
+            assert!(codex_args.iter().any(|value| value == expected));
+        }
+        for expected in [
+            "sandbox_mode=\"read-only\"",
+            "approval_policy=\"never\"",
+            "mcp_servers={}",
+        ] {
+            assert!(codex_args
+                .windows(2)
+                .any(|pair| pair[0] == "-c" && pair[1] == expected));
+        }
+        assert!(codex_args
+            .windows(2)
+            .any(|pair| pair == ["--disable", "multi_agent"]));
+        assert!(!codex_args
+            .windows(2)
+            .any(|pair| pair == ["--enable", "memories"]));
+        assert!(command_env_value(&codex_command, MCP_BEARER_ENV).is_none());
+        assert!(!codex_args
+            .iter()
+            .any(|value| value.contains("mcp_servers.cst_chat")));
+
+        let claude = test_account(Provider::Claude);
+        let mut claude_command = Command::new("claude");
+        configure_provider_command_with_images_and_scope(
+            &mut claude_command,
+            &claude,
+            None,
+            ChatTurnMode::Ask,
+            None,
+            None,
+            Some(&[]),
+            false,
+            Some("lecture bornee"),
+            None,
+            None,
+            &[],
+            ChatTurnToolScope::None,
+            ChatFilesystemScope::Default,
+        );
+        let claude_args = command_args(&claude_command);
+        for expected in ["--safe-mode", "--strict-mcp-config"] {
+            assert!(claude_args.iter().any(|value| value == expected));
+        }
+        assert!(claude_args
+            .windows(2)
+            .any(|pair| pair == ["--tools", "Read,Glob,Grep"]));
+        assert!(claude_args
+            .windows(2)
+            .any(|pair| pair == ["--permission-mode", "plan"]));
+        assert!(!claude_args.iter().any(|value| value == "--mcp-config"));
     }
 
     #[test]
@@ -6099,11 +6268,53 @@ mod tests {
         assert_eq!(request.model, None);
         assert_eq!(request.reasoning_effort, None);
         assert_eq!(request.app_connectors, None);
+        assert_eq!(request.tool_scope, ChatTurnToolScope::Full);
         assert!(!request.app_write_approved);
         assert!(request.agent_tools.is_empty());
         assert!(request.agent_skills.is_empty());
         assert!(!request.question_tool);
         assert!(!request.proof_tool);
+
+        let no_tools: StartChatTurnRequest = serde_json::from_value(serde_json::json!({
+            "accountId": "account",
+            "prompt": "Inspecte",
+            "mode": "ask",
+            "toolScope": "none"
+        }))
+        .unwrap();
+        assert_eq!(no_tools.tool_scope, ChatTurnToolScope::None);
+        assert!(
+            serde_json::from_value::<StartChatTurnRequest>(serde_json::json!({
+                "accountId": "account",
+                "prompt": "Inspecte",
+                "toolScope": "unknown"
+            }))
+            .is_err()
+        );
+
+        assert!(validate_chat_turn_tool_scope(&no_tools).is_err());
+        let no_tools_with_empty_apps: StartChatTurnRequest =
+            serde_json::from_value(serde_json::json!({
+                "accountId": "account",
+                "prompt": "Inspecte",
+                "mode": "ask",
+                "toolScope": "none",
+                "appConnectors": []
+            }))
+            .unwrap();
+        assert!(validate_chat_turn_tool_scope(&no_tools_with_empty_apps).is_ok());
+        assert!(validate_chat_turn_execution_scope(
+            &no_tools_with_empty_apps,
+            true,
+            ChatFilesystemScope::Default,
+        )
+        .is_err());
+        assert!(validate_chat_turn_execution_scope(
+            &no_tools_with_empty_apps,
+            false,
+            ChatFilesystemScope::ReviewProofArtifacts,
+        )
+        .is_err());
 
         let enabled_tools: StartChatTurnRequest = serde_json::from_value(serde_json::json!({
             "accountId": "account",
@@ -6522,6 +6733,7 @@ mod tests {
             image_attachments: Vec::new(),
             project_dir: None,
             mode: ChatTurnMode::Build,
+            tool_scope: ChatTurnToolScope::Full,
             model: None,
             reasoning_effort: None,
             app_connectors: None,
@@ -6548,6 +6760,7 @@ mod tests {
             image_attachments: Vec::new(),
             project_dir: None,
             mode: ChatTurnMode::Build,
+            tool_scope: ChatTurnToolScope::Full,
             model: None,
             reasoning_effort: None,
             app_connectors: None,
@@ -6632,6 +6845,7 @@ mod tests {
             image_attachments: Vec::new(),
             project_dir: None,
             mode: ChatTurnMode::Build,
+            tool_scope: ChatTurnToolScope::Full,
             model: None,
             reasoning_effort: None,
             app_connectors: None,

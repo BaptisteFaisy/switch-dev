@@ -11,7 +11,7 @@ use crate::{
     account_usage,
     chat::{
         is_model_capacity_message, is_quota_exhaustion_message, ChatAppConnector, ChatTurnManager,
-        ChatTurnMode, ChatTurnSnapshot, ChatTurnStatus, StartChatTurnRequest,
+        ChatTurnMode, ChatTurnSnapshot, ChatTurnStatus, ChatTurnToolScope, StartChatTurnRequest,
     },
     chat_model_tools::ChatModelToolServerConfig,
     discussions, fs_util, metrics, mobile_push, settings, telegram_notifications,
@@ -3915,6 +3915,7 @@ fn start_agent_run(inner: &Arc<AutonomousAgentInner>, agent_id: &str) {
         image_attachments: Vec::new(),
         project_dir: agent.project_dir.clone(),
         mode: effective_turn_mode(&agent),
+        tool_scope: ChatTurnToolScope::Full,
         model: agent.model.clone(),
         reasoning_effort: agent.reasoning_effort.clone(),
         app_connectors: Some(agent.connectors.clone()),

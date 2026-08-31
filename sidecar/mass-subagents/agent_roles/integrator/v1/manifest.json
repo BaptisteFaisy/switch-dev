@@ -1,0 +1,19 @@
+{
+  "$schema": "../../_schemas/v1/role-manifest.schema.json",
+  "schema_version": "switch-agent-role/v1",
+  "role_id": "integrator",
+  "role_version": "1.0",
+  "execution_kind": "controlled-code",
+  "archetype_id": "CAS",
+  "archetype": "controlled-integration",
+  "model": "gpt-5.6-sol",
+  "reasoning": "low",
+  "service_tier": "priority",
+  "write_access": "integrate",
+  "tools_allowlist": ["read", "prepare_candidate", "run_tests", "compare_and_swap"],
+  "capsule": "integrator/v1/capsule.md",
+  "out_schema": "_schemas/v1/integration-record.schema.json",
+  "output_contract": "integration_record",
+  "require_review": false,
+  "second_review_rules": null
+}

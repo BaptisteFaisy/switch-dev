@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://switch.dev/schemas/agent-roles/v1/proof-or-none.schema.json",
+  "title": "Adversarial proof or bounded failure to prove",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "patch_sha256",
+    "author_agent_id",
+    "adversary_agent_id",
+    "outcome",
+    "cases_explored",
+    "proof"
+  ],
+  "properties": {
+    "schema_version": { "const": "proof-or-none/v1" },
+    "patch_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "author_agent_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"
+    },
+    "adversary_agent_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"
+    },
+    "outcome": { "enum": ["bug_proven", "no_proof"] },
+    "cases_explored": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 256,
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1, "maxLength": 2048 }
+    },
+    "proof": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["category", "file", "line", "reproduction", "expected", "observed"],
+      "properties": {
+        "category": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "file": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "line": { "type": ["integer", "null"], "minimum": 1 },
+        "reproduction": { "type": "string", "minLength": 1, "maxLength": 8192 },
+        "expected": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "observed": { "type": "string", "minLength": 1, "maxLength": 4096 }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "outcome": { "const": "bug_proven" } },
+        "required": ["outcome"]
+      },
+      "then": { "properties": { "proof": { "type": "object" } } },
+      "else": { "properties": { "proof": { "type": "null" } } }
+    }
+  ]
+}
