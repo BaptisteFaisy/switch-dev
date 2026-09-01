@@ -1207,6 +1207,8 @@ async function remoteInvoke<T>(command: string, args: Record<string, any>): Prom
       });
     case "voice_runtime_status":
       return api<T>("GET", "/api/voice/status");
+    case "start_local_voice_gpu":
+      throw new Error("Le lancement GPU direct n'est disponible que sur Switch Dev local.");
     case "creative_accounts":
       return api<T>("GET", "/api/creative/accounts");
     case "connect_creative_account":

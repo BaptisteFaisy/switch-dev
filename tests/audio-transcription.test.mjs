@@ -3,13 +3,32 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 const read = (path) => readFileSync(new URL(path, import.meta.url), "utf8");
+const readRustModule = (path) => {
+  try {
+    return read(path);
+  } catch (error) {
+    if (!path.endsWith("src-tauri/src/voice.rs")) throw error;
+    const moduleRoot = "../src-tauri/src/voice/";
+    return [
+      "mod.rs",
+      "activity.rs",
+      "audio.rs",
+      "config.rs",
+      "gpu.rs",
+      "http.rs",
+      "ollama.rs",
+      "remote.rs",
+      "whisper.rs",
+    ].map((file) => read(`${moduleRoot}${file}`)).join("\n");
+  }
+};
 const main = read("../src/main.ts");
 const view = read("../src/transcription.ts");
 const styles = read("../src/transcription.css");
 const chatView = read("../src/chat/view.ts");
 const chatVoice = read("../src/chat/voice.ts");
 const platform = read("../src/platform.ts");
-const backend = read("../src-tauri/src/voice.rs");
+const backend = readRustModule("../src-tauri/src/voice.rs");
 const server = read("../src-tauri/src/server.rs");
 const rustLib = read("../src-tauri/src/lib.rs");
 const dockerfile = read("../Dockerfile");

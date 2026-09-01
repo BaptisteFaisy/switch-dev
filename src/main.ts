@@ -6112,9 +6112,33 @@ const stopPoolPoll = () => {
   }
 };
 
+let voiceRuntimeStartInFlight = false;
+
+const startLocalGpuVoice = async () => {
+  if (voiceRuntimeStartInFlight) return;
+  voiceRuntimeStartInFlight = true;
+  patchVoiceRuntimeStatus();
+  try {
+    if (isRemoteMode()) {
+      throw new Error("Le lancement direct du modèle GPU est disponible uniquement sur Switch Dev local.");
+    }
+    await invoke("start_local_voice_gpu");
+    await refreshVoiceRuntimeStatus();
+  } catch (error) {
+    voiceRuntimeError = String(error).replace(/^Error:\s*/i, "");
+    patchVoiceRuntimeStatus();
+  } finally {
+    voiceRuntimeStartInFlight = false;
+    patchVoiceRuntimeStatus();
+  }
+};
+
 const bindVoiceRuntimeRefresh = (root: ParentNode = document) => {
   root.querySelector<HTMLButtonElement>("#voiceRuntimeRefresh")?.addEventListener("click", () => {
     void refreshVoiceRuntimeStatus();
+  });
+  root.querySelector<HTMLButtonElement>("#voiceRuntimeStartGpu")?.addEventListener("click", () => {
+    void startLocalGpuVoice();
   });
 };
 
@@ -23612,10 +23636,15 @@ const renderVoiceRuntimeStatusContent = (): string => {
         <span class="voice-runtime-eyebrow"><i data-lucide="mic"></i> Voix et GPU</span>
         <h3>Execution vocale</h3>
       </div>
-      <button type="button" id="voiceRuntimeRefresh" class="voice-runtime-refresh" title="Actualiser le statut" ${voiceRuntimeInFlight ? "disabled" : ""}>
+      <div class="voice-runtime-actions">
+      <button type="button" id="voiceRuntimeRefresh" class="voice-runtime-refresh" title="Actualiser le statut" ${voiceRuntimeInFlight || voiceRuntimeStartInFlight ? "disabled" : ""}>
         <i data-lucide="refresh-ccw" class="${voiceRuntimeInFlight ? "is-spinning" : ""}"></i>
         <span>Actualiser</span>
       </button>
+      <button type="button" id="voiceRuntimeStartGpu" class="voice-runtime-start" title="Charger Whisper sur le GPU" ${voiceRuntimeInFlight || voiceRuntimeStartInFlight ? "disabled" : ""}>
+        <i data-lucide="zap"></i><span>${voiceRuntimeStartInFlight ? "Démarrage…" : "Lancer sur le GPU"}</span>
+      </button>
+      </div>
     </div>
     <div class="voice-runtime-primary" data-state="${presentation.tone}">
       <span class="voice-runtime-dot" aria-hidden="true"></span>

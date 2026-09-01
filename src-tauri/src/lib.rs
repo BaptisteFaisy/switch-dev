@@ -245,6 +245,7 @@ pub fn run() {
             voice::process_voice_input,
             voice::transcribe_audio_file,
             voice::voice_runtime_status,
+            voice::start_local_voice_gpu,
             creative_accounts::creative_accounts,
             creative_accounts::connect_creative_account,
             creative_accounts::delete_creative_account,

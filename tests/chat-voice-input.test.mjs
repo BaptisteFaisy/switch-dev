@@ -6,7 +6,23 @@ const view = readFileSync(new URL("../src/chat/view.ts", import.meta.url), "utf8
 const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
 const voice = readFileSync(new URL("../src/chat/voice.ts", import.meta.url), "utf8");
 const platform = readFileSync(new URL("../src/platform.ts", import.meta.url), "utf8");
-const backend = readFileSync(new URL("../src-tauri/src/voice.rs", import.meta.url), "utf8");
+const backend = (() => {
+  try {
+    return readFileSync(new URL("../src-tauri/src/voice.rs", import.meta.url), "utf8");
+  } catch (error) {
+    return [
+      "mod.rs",
+      "activity.rs",
+      "audio.rs",
+      "config.rs",
+      "gpu.rs",
+      "http.rs",
+      "ollama.rs",
+      "remote.rs",
+      "whisper.rs",
+    ].map((file) => readFileSync(new URL(`../src-tauri/src/voice/${file}`, import.meta.url), "utf8")).join("\n");
+  }
+})();
 const rustLib = readFileSync(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8");
 const server = readFileSync(new URL("../src-tauri/src/server.rs", import.meta.url), "utf8");
 const styles = readFileSync(new URL("../src/style.css", import.meta.url), "utf8");
@@ -56,6 +72,10 @@ test("le client desktop connecte au VPS garde le moteur vocal local avec repli s
     /isTauriRuntime\(\)[\s\S]*?command === "process_voice_input"[\s\S]*?tauriInvoke<T>\(command, args\)[\s\S]*?remoteInvoke<T>\(command, args\)/,
   );
   assert.match(platform, /command === "voice_runtime_status"/);
+  assert.match(platform, /case "start_local_voice_gpu"/);
+  assert.match(main, /id="voiceRuntimeStartGpu"/);
+  assert.match(main, /start_local_voice_gpu/);
+  assert.match(rustLib, /voice::start_local_voice_gpu/);
   assert.match(platform, /indisponible sur ce poste[\s\S]*?et sur le VPS/);
 });
 
@@ -101,8 +121,10 @@ test("les parametres affichent le statut vocal et GPU sans charger le modele", (
 
 test("Whisper termine avant le nettoyage par le modele Ollama", () => {
   const transcription = backend.indexOf("transcribe_with_local_whisper(");
-  const summarization = backend.indexOf("post_process_with_ollama");
-  assert.ok(transcription >= 0 && summarization > transcription);
+  const summarization = backend.indexOf("post_process_with_ollama(");
+  assert.ok(transcription >= 0 && summarization >= 0);
+  assert.match(backend, /let \(transcript, model, provider/);
+  assert.match(backend, /post_process_with_ollama\(&transcript/);
   assert.match(
     backend,
     /DEFAULT_OLLAMA_MODEL: &str = "qwen3:4b-instruct-2507-q4_K_M"/,
