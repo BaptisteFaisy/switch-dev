@@ -35,7 +35,7 @@ const SESSION_COOKIE: &str = "cst_session";
 const OAUTH_STATE_COOKIE: &str = "cst_oauth_state";
 const SESSION_DURATION_SECS: i64 = 30 * 24 * 60 * 60;
 const OAUTH_STATE_DURATION_SECS: i64 = 10 * 60;
-const MAX_SESSIONS_PER_USER: usize = 12;
+const MAX_SESSIONS_PER_USER: usize = 40;
 
 #[derive(Clone)]
 pub(crate) struct AuthManager {
@@ -1283,6 +1283,25 @@ fn restrict_auth_file_permissions(_path: &std::path::Path) -> Result<(), String>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn one_user_keeps_forty_concurrent_sessions() {
+        let mut sessions = Vec::new();
+        for index in 0..MAX_SESSIONS_PER_USER {
+            issue_session(&mut sessions, "owner", 1_000 + index as i64);
+        }
+        assert_eq!(
+            sessions
+                .iter()
+                .filter(|session| session.user_id == "owner")
+                .count(),
+            40
+        );
+
+        issue_session(&mut sessions, "owner", 2_000);
+        assert_eq!(sessions.len(), 40);
+        assert!(sessions.iter().all(|session| session.created_at > 1_000));
+    }
 
     #[test]
     fn validates_and_normalizes_account_fields() {

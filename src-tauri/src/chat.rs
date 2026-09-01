@@ -172,6 +172,22 @@ fn cgroup_container_headroom_bytes() -> Option<u64> {
     Some(maximum.saturating_sub(current))
 }
 
+#[cfg(target_os = "windows")]
+fn host_available_memory_bytes() -> Option<u64> {
+    use std::mem::{size_of, zeroed};
+    use windows_sys::Win32::System::SystemInformation::{
+        GlobalMemoryStatusEx, MEMORYSTATUSEX,
+    };
+
+    let mut status = unsafe { zeroed::<MEMORYSTATUSEX>() };
+    status.dwLength = size_of::<MEMORYSTATUSEX>() as u32;
+    if unsafe { GlobalMemoryStatusEx(&mut status) } == 0 {
+        return None;
+    }
+    Some(status.ullAvailPhys)
+}
+
+#[cfg(not(target_os = "windows"))]
 fn host_available_memory_bytes() -> Option<u64> {
     std::fs::read_to_string("/proc/meminfo")
         .ok()?
@@ -4821,6 +4837,12 @@ fn display_path(path: &Path) -> String {
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_chat_admission_reads_available_host_memory() {
+        assert!(host_available_memory_bytes().is_some_and(|bytes| bytes > 0));
+    }
+
     fn test_account(provider: Provider) -> AccountProfile {
         AccountProfile {
             id: "account".to_string(),
@@ -6830,9 +6852,9 @@ mod tests {
     }
 
     #[test]
-    fn global_chat_capacity_accepts_twenty_and_rejects_the_twenty_first_atomically() {
-        let manager = ChatTurnManager::with_max_active(20);
-        for id in 1..=20 {
+    fn global_chat_capacity_accepts_forty_and_rejects_the_forty_first_atomically() {
+        let manager = ChatTurnManager::with_max_active(40);
+        for id in 1..=40 {
             let turn = test_turn();
             turn.snapshot.lock().unwrap().id = id;
             manager.turns.lock().unwrap().insert(id, turn);
@@ -6857,7 +6879,7 @@ mod tests {
             source_chat_key: None,
         };
         let error = manager.start(request).expect_err("capacity must reject");
-        assert!(error.starts_with("capacite chats atteinte: 20/20"));
+        assert!(error.starts_with("capacite chats atteinte: 40/40"));
     }
 
     #[test]
