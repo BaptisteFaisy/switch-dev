@@ -123,6 +123,7 @@ import {
 } from "./chat/agent-tools";
 import { bindVoiceComposer } from "./chat/voice";
 import {
+  MAX_CHAT_IMAGE_ATTACHMENTS,
   chatImageAttachmentPayloads,
   clipboardChatImageFiles,
   disposeChatImagePreviews,
@@ -6702,6 +6703,121 @@ const useLibraryPromptInChat = async (prompt: PromptLibraryItem): Promise<void> 
   setActiveView("chat");
   statusText = `Prompt « ${prompt.title} » ajouté au chat`;
   window.setTimeout(() => focusExpertChatPrompt(pane), 0);
+};
+
+// ---------------------------------------------------------------------------
+// Carrousel du Studio IA → chats
+// ---------------------------------------------------------------------------
+// Le Studio IA (src/video.ts, onglet Carrousel) diffuse cet événement avec la
+// data texte complète + les images en base64. On attache jusqu'à
+// MAX_CHAT_IMAGE_ATTACHMENTS images au panneau de chat actif et on pré-remplit
+// le brouillon avec la structure du carrousel : l'agent peut ainsi réécrire,
+// améliorer ou compléter le contenu des diapositives.
+const CAROUSEL_SEND_TO_CHAT_EVENT = "switch:carousel-send-to-chat";
+
+type CarouselChatPayload = {
+  id: string;
+  name: string;
+  slides: Array<{
+    name: string;
+    mimeType: string;
+    dataBase64: string;
+    title: string;
+    caption: string;
+    ctaLabel: string;
+    ctaUrl: string;
+  }>;
+};
+
+const carouselChatMimeType = (
+  value: string,
+): ChatImageAttachment["mimeType"] | null => {
+  if (value === "image/png" || value === "image/jpeg" || value === "image/webp") {
+    return value;
+  }
+  return null;
+};
+
+const carouselPromptForChat = (
+  payload: CarouselChatPayload,
+  attachedCount: number,
+): string => {
+  const lines: string[] = [
+    `Carrousel « ${payload.name} » — ${payload.slides.length} diapositive${payload.slides.length > 1 ? "s" : ""}.`,
+    "",
+  ];
+  payload.slides.forEach((slide, index) => {
+    const parts = [`Diapositive ${index + 1}`];
+    if (slide.title.trim()) parts.push(`Titre : ${slide.title.trim()}`);
+    if (slide.caption.trim()) parts.push(`Texte : ${slide.caption.trim()}`);
+    if (slide.ctaLabel.trim()) parts.push(`Bouton : ${slide.ctaLabel.trim()}`);
+    if (slide.ctaUrl.trim()) parts.push(`Lien : ${slide.ctaUrl.trim()}`);
+    lines.push(parts.join(" · "));
+  });
+  lines.push(
+    "",
+    attachedCount
+      ? `Les ${attachedCount} première${attachedCount > 1 ? "s" : ""} image${attachedCount > 1 ? "s" : ""} du carrousel ${attachedCount > 1 ? "sont jointes" : "est jointe"} à ce message. Utilise la structure et les images pour améliorer, réécrire ou compléter le contenu de ce carrousel (accroches, textes, appels à l'action), ou propose un plan de publication.`
+      : "Utilise la structure ci-dessus pour améliorer, réécrire ou compléter le contenu de ce carrousel (accroches, textes, appels à l'action), ou propose un plan de publication.",
+  );
+  return lines.join("\n");
+};
+
+const handleCarouselSendToChat = async (payload: CarouselChatPayload): Promise<void> => {
+  const attached: ChatImageAttachment[] = [];
+  payload.slides.slice(0, MAX_CHAT_IMAGE_ATTACHMENTS).forEach((slide, index) => {
+    const mimeType = carouselChatMimeType(slide.mimeType);
+    if (!mimeType || !slide.dataBase64) return;
+    attached.push({
+      id: `carousel-${payload.id}-${index}`,
+      name: slide.name.trim() || `Diapositive ${index + 1}`,
+      mimeType,
+      size: Math.floor(slide.dataBase64.length * 3 / 4),
+      dataBase64: slide.dataBase64,
+      previewUrl: `data:${mimeType};base64,${slide.dataBase64}`,
+    });
+  });
+  const prompt = carouselPromptForChat(payload, attached.length);
+
+  const pane = activeExpertChatPane();
+  if (!pane) {
+    const copied = await navigator.clipboard.writeText(prompt)
+      .then(() => true)
+      .catch(() => false);
+    statusText = copied
+      ? `Carrousel « ${payload.name} » copié · choisissez un environnement et ouvrez un chat pour l'utiliser`
+      : "Ouvrez un chat pour utiliser ce carrousel";
+    render();
+    return;
+  }
+
+  pane.imageAttachments = [...pane.imageAttachments, ...attached]
+    .slice(0, MAX_CHAT_IMAGE_ATTACHMENTS);
+  const existingDraft = pane.draft.trim();
+  pane.draft = existingDraft ? `${prompt}\n\n${existingDraft}` : prompt;
+  persistExpertChats();
+  setActiveView("chat");
+  statusText = `Carrousel « ${payload.name} » envoyé au chat · ${attached.length} image${attached.length > 1 ? "s" : ""} jointe${attached.length > 1 ? "s" : ""}`;
+  window.setTimeout(() => focusExpertChatPrompt(pane), 0);
+};
+
+let carouselSendToChatBound = false;
+
+const bindCarouselSendToChat = (): void => {
+  // bindUi() est rappelé à chaque rendu : l'écouteur est posé une seule fois.
+  if (carouselSendToChatBound) return;
+  carouselSendToChatBound = true;
+  window.addEventListener(CAROUSEL_SEND_TO_CHAT_EVENT, (event) => {
+    const detail = (event as CustomEvent<unknown>).detail;
+    if (!detail || typeof detail !== "object") return;
+    const candidate = detail as Record<string, unknown>;
+    if (
+      typeof candidate.id !== "string"
+      || typeof candidate.name !== "string"
+      || !Array.isArray(candidate.slides)
+    ) return;
+    handleCarouselSendToChat(detail as unknown as CarouselChatPayload);
+  });
 };
 
 type PromptComposerSelection = {
@@ -31745,6 +31861,7 @@ const bindUi = () => {
   vpsModule?.bindVpsPanel(render);
   maintenance.bindMaintenanceCard(render);
   videoModule?.bindVideoPanel(render, renderIcons);
+  bindCarouselSendToChat();
   transcriptionModule?.bindTranscriptionPanel(render);
   socialViewModule?.bindSocialPanel({ rerender: render });
   trackingViewModule?.bindTrackingPanel({ rerender: render, renderIcons });

@@ -150,6 +150,45 @@ type VideoDraft = {
   imageName: string;
 };
 
+// Une diapositive de carrousel : une image importée + les données texte qui
+// l'accompagnent (titre, texte, appel à l'action). Les images acceptées sont
+// celles que les chats savent joindre (PNG/JPEG/WebP).
+export type CarouselSlide = {
+  id: string;
+  name: string;
+  mimeType: string;
+  imageDataUrl: string;
+  title: string;
+  caption: string;
+  ctaLabel: string;
+  ctaUrl: string;
+};
+
+export type CarouselItem = {
+  id: string;
+  name: string;
+  slides: CarouselSlide[];
+  createdAt: number;
+  updatedAt: number;
+};
+
+// Ce que le Studio IA transmet aux chats via l'événement
+// CAROUSEL_SEND_TO_CHAT_EVENT : la data texte complète de chaque diapositive +
+// les images encodées en base64 (prêtes pour une pièce jointe de chat).
+export type CarouselChatPayload = {
+  id: string;
+  name: string;
+  slides: Array<{
+    name: string;
+    mimeType: string;
+    dataBase64: string;
+    title: string;
+    caption: string;
+    ctaLabel: string;
+    ctaUrl: string;
+  }>;
+};
+
 type ImageDraft = {
   modelId: string;
   prompt: string;
@@ -165,6 +204,13 @@ export const VIDEO_HISTORY_STORAGE_KEY = "codex-switch-terminal.video-generation
 export const VIDEO_HISTORY_LIMIT = 16;
 export const IMAGE_HISTORY_STORAGE_KEY = "codex-switch-terminal.image-generations.v1";
 export const IMAGE_HISTORY_LIMIT = 20;
+export const CAROUSEL_STORAGE_KEY = "codex-switch-terminal.carousels.v1";
+export const CAROUSEL_LIMIT = 12;
+export const CAROUSEL_SLIDE_LIMIT = 10;
+export const CAROUSEL_MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+// Événement DOM écouté par main.ts : le Studio IA lui remet un carrousel prêt
+// à être utilisé par les chats (images jointes + data texte).
+export const CAROUSEL_SEND_TO_CHAT_EVENT = "switch:carousel-send-to-chat";
 const DEFAULT_MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 const POLL_DELAY_MS = 4_000;
 
@@ -194,7 +240,7 @@ let capabilities: VideoGenerationCapabilities | null = null;
 let imageCapabilities: ImageGenerationCapabilities | null = null;
 let creativeAccounts: CreativeAccountsView | null = null;
 let selectedAccountId = "";
-let creativeKind: "video" | "image" = "video";
+let creativeKind: "video" | "image" | "carousel" = "video";
 let capabilitiesLoading = false;
 let capabilitiesError = "";
 let submitError = "";
@@ -217,6 +263,12 @@ let rerenderApp: (() => void) | null = null;
 let renderIcons: RenderIcons | null = null;
 const cancellingIds = new Set<string>();
 const cancellingImageIds = new Set<string>();
+let carousels = loadCarousels();
+let selectedCarouselId: string | null = carousels[0]?.id ?? null;
+let carouselDraft: CarouselItem | null = null;
+let carouselError = "";
+let carouselPreviewIndex = 0;
+let carouselSaving = false;
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null;
@@ -410,6 +462,84 @@ export function persistVideoHistory(
   }
 }
 
+const CAROUSEL_IMAGE_MIME_PATTERN = /^image\/(?:png|jpeg|webp)$/;
+
+const normalizeCarouselSlide = (candidate: unknown): CarouselSlide | null => {
+  if (!isRecord(candidate)) return null;
+  const id = cleanString(candidate.id, 180);
+  const imageDataUrl = cleanString(candidate.imageDataUrl, 16 * 1024 * 1024);
+  const mimeType = cleanString(candidate.mimeType, 40).toLowerCase();
+  if (!id || !imageDataUrl.startsWith("data:image/") || !CAROUSEL_IMAGE_MIME_PATTERN.test(mimeType)) {
+    return null;
+  }
+  return {
+    id,
+    name: cleanString(candidate.name, 240) || "Image",
+    mimeType,
+    imageDataUrl,
+    title: cleanString(candidate.title, 300),
+    caption: cleanString(candidate.caption, 2_000),
+    ctaLabel: cleanString(candidate.ctaLabel, 80),
+    ctaUrl: cleanString(candidate.ctaUrl, 1_000),
+  };
+};
+
+export const normalizeCarousels = (value: unknown): CarouselItem[] => {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const normalized: CarouselItem[] = [];
+  for (const candidate of value) {
+    if (!isRecord(candidate) || normalized.length >= CAROUSEL_LIMIT) continue;
+    const id = cleanString(candidate.id, 180);
+    const name = cleanString(candidate.name, 200);
+    const slides = Array.isArray(candidate.slides)
+      ? candidate.slides
+        .map(normalizeCarouselSlide)
+        .filter((slide): slide is CarouselSlide => slide !== null)
+        .slice(0, CAROUSEL_SLIDE_LIMIT)
+      : [];
+    if (!id || !name || !slides.length || seen.has(id)) continue;
+    seen.add(id);
+    const createdAt = finiteNumber(candidate.createdAt, Date.now());
+    normalized.push({
+      id,
+      name,
+      slides,
+      createdAt,
+      updatedAt: Math.max(createdAt, finiteNumber(candidate.updatedAt, createdAt)),
+    });
+  }
+  return normalized.sort((a, b) => b.updatedAt - a.updatedAt);
+};
+
+export function loadCarousels(
+  storage: Pick<Storage, "getItem"> | null = browserStorage(),
+): CarouselItem[] {
+  if (!storage) return [];
+  try {
+    const raw = storage.getItem(CAROUSEL_STORAGE_KEY);
+    return raw ? normalizeCarousels(JSON.parse(raw)) : [];
+  } catch {
+    return [];
+  }
+}
+
+export function persistCarousels(
+  items: readonly CarouselItem[],
+  storage: Pick<Storage, "setItem"> | null = browserStorage(),
+): boolean {
+  if (!storage) return false;
+  try {
+    storage.setItem(
+      CAROUSEL_STORAGE_KEY,
+      JSON.stringify(normalizeCarousels(items).slice(0, CAROUSEL_LIMIT)),
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function browserStorage(): Pick<Storage, "getItem" | "setItem"> | null {
   return typeof window === "undefined" ? null : accountScopedStorage;
 }
@@ -587,15 +717,18 @@ const renderStudioToolbar = (): string => {
     <div class="creative-kind-switch" role="tablist" aria-label="Type de création">
       <button type="button" role="tab" data-creative-kind="video" class="${creativeKind === "video" ? "is-active" : ""}" aria-selected="${creativeKind === "video"}"><i data-lucide="clapperboard"></i><span>Vidéo</span></button>
       <button type="button" role="tab" data-creative-kind="image" class="${creativeKind === "image" ? "is-active" : ""}" aria-selected="${creativeKind === "image"}"><i data-lucide="image"></i><span>Image</span></button>
+      <button type="button" role="tab" data-creative-kind="carousel" class="${creativeKind === "carousel" ? "is-active" : ""}" aria-selected="${creativeKind === "carousel"}"><i data-lucide="layout-grid"></i><span>Carrousel</span></button>
     </div>
-    <div class="creative-account-picker">
-      <label for="creativeAccountSelect"><span>Compte de génération</span>
-        <select id="creativeAccountSelect" ${accounts.length ? "" : "disabled"}>
-          ${accounts.map((item) => `<option value="${escapeHtml(item.id)}" ${item.id === account?.id ? "selected" : ""}>${escapeHtml(item.label)} · ${escapeHtml(item.keyHint)}</option>`).join("") || `<option>Aucun compte connecté</option>`}
-        </select>
-      </label>
-      <button type="button" id="creativeAccountsOpen"><i data-lucide="key-round"></i><span>Gérer les comptes</span></button>
-    </div>
+    ${creativeKind === "carousel"
+      ? `<div class="creative-carousel-hint"><i data-lucide="layout-grid"></i><span>Importe des images, ajoute la data de chaque diapositive, puis envoie le tout à un chat.</span></div>`
+      : `<div class="creative-account-picker">
+          <label for="creativeAccountSelect"><span>Compte de génération</span>
+            <select id="creativeAccountSelect" ${accounts.length ? "" : "disabled"}>
+              ${accounts.map((item) => `<option value="${escapeHtml(item.id)}" ${item.id === account?.id ? "selected" : ""}>${escapeHtml(item.label)} · ${escapeHtml(item.keyHint)}</option>`).join("") || `<option>Aucun compte connecté</option>`}
+            </select>
+          </label>
+          <button type="button" id="creativeAccountsOpen"><i data-lucide="key-round"></i><span>Gérer les comptes</span></button>
+        </div>`}
   </section>`;
 };
 
@@ -649,6 +782,7 @@ const renderSetupNotice = (): string => {
 
 export const renderVideoPanel = (): string => {
   if (creativeKind === "image") return renderImageStudioPanel();
+  if (creativeKind === "carousel") return renderCarouselStudioPanel();
   const model = selectedModel();
   const account = selectedAccount();
   const canSubmit = capabilities?.configured === true && !!account && !!model && !submitting;
@@ -807,6 +941,164 @@ const renderImageHistoryItem = (job: ImageGenerationRecord): string => {
     </span>
     <button type="button" data-image-remove="${escapeHtml(job.localId)}" aria-label="Retirer de l’historique"><i data-lucide="trash-2"></i></button>
   </article>`;
+};
+
+// ---------------------------------------------------------------------------
+// Studio Carrousel : import d'images + data par diapositive, aperçu, envoi
+// aux chats. Les carrousels sont stockés localement (compte courant), aucune
+// clé fal.ai n'est nécessaire pour cet outil.
+// ---------------------------------------------------------------------------
+
+const carouselRandomId = (): string =>
+  globalThis.crypto?.randomUUID?.()
+  ?? `carousel-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+
+const carouselSlideEditor = (slide: CarouselSlide, index: number): string => {
+  const total = carouselDraft?.slides.length ?? 0;
+  return `<article class="carousel-slide-editor" data-carousel-slide="${escapeHtml(slide.id)}">
+    <span class="carousel-slide-thumb"><img src="${escapeHtml(slide.imageDataUrl)}" alt="" /></span>
+    <div class="carousel-slide-fields">
+      <header>
+        <span><strong>Diapositive ${index + 1}</strong><small>${escapeHtml(slide.name)}</small></span>
+        <div class="carousel-slide-actions">
+          <button type="button" data-carousel-move="up" aria-label="Monter la diapositive" title="Monter" ${index === 0 ? "disabled" : ""}><i data-lucide="chevron-up"></i></button>
+          <button type="button" data-carousel-move="down" aria-label="Descendre la diapositive" title="Descendre" ${index === total - 1 ? "disabled" : ""}><i data-lucide="chevron-down"></i></button>
+          <button type="button" data-carousel-remove aria-label="Retirer la diapositive" title="Retirer"><i data-lucide="trash-2"></i></button>
+        </div>
+      </header>
+      <label class="carousel-field"><span>Titre</span><input type="text" maxlength="300" data-carousel-field="title" value="${escapeHtml(slide.title)}" placeholder="Titre court et percutant" /></label>
+      <label class="carousel-field"><span>Texte</span><textarea maxlength="2000" rows="2" data-carousel-field="caption" placeholder="Le message de cette diapositive…">${escapeHtml(slide.caption)}</textarea></label>
+      <div class="carousel-field-row">
+        <label class="carousel-field"><span>Bouton</span><input type="text" maxlength="80" data-carousel-field="ctaLabel" value="${escapeHtml(slide.ctaLabel)}" placeholder="En savoir plus" /></label>
+        <label class="carousel-field"><span>Lien</span><input type="url" maxlength="1000" data-carousel-field="ctaUrl" value="${escapeHtml(slide.ctaUrl)}" placeholder="https://…" /></label>
+      </div>
+    </div>
+  </article>`;
+};
+
+const renderCarouselPreview = (item: CarouselItem): string => {
+  const slides = item.slides;
+  const index = Math.max(0, Math.min(carouselPreviewIndex, slides.length - 1));
+  const slide = slides[index];
+  return `<section class="carousel-preview-card" aria-label="Aperçu du carrousel">
+    <div class="carousel-preview-top">
+      <span><strong>Aperçu</strong><small>${slides.length} diapositive${slides.length > 1 ? "s" : ""} · format publication</small></span>
+      <span class="carousel-preview-count">${index + 1}/${slides.length}</span>
+    </div>
+    <div class="carousel-preview-frame">
+      <div class="carousel-preview-media">
+        <img src="${escapeHtml(slide.imageDataUrl)}" alt="Diapositive ${index + 1}" />
+        ${slide.ctaLabel
+          ? `<a class="carousel-preview-cta" href="${escapeHtml(slide.ctaUrl || "#")}" ${slide.ctaUrl ? "target=\"_blank\" rel=\"noopener noreferrer\"" : "aria-disabled=\"true\""}>${escapeHtml(slide.ctaLabel)}</a>`
+          : ""}
+      </div>
+      <div class="carousel-preview-copy">
+        ${slide.title ? `<h3>${escapeHtml(slide.title)}</h3>` : ""}
+        ${slide.caption ? `<p>${escapeHtml(slide.caption)}</p>` : `<p class="is-muted">Aucun texte pour cette diapositive.</p>`}
+      </div>
+      <div class="carousel-preview-nav">
+        <button type="button" id="carouselPrev" aria-label="Diapositive précédente" ${index === 0 ? "disabled" : ""}><i data-lucide="chevron-left"></i></button>
+        <div class="carousel-preview-dots">
+          ${slides.map((_slide, dotIndex) => `<button type="button" class="${dotIndex === index ? "is-active" : ""}" data-carousel-dot="${dotIndex}" aria-label="Aller à la diapositive ${dotIndex + 1}"></button>`).join("")}
+        </div>
+        <button type="button" id="carouselNext" aria-label="Diapositive suivante" ${index === slides.length - 1 ? "disabled" : ""}><i data-lucide="chevron-right"></i></button>
+      </div>
+    </div>
+  </section>`;
+};
+
+const renderCarouselSavedItem = (item: CarouselItem): string => {
+  const selected = item.id === selectedCarouselId;
+  return `<article class="carousel-saved-item is-selected-carousel ${selected ? "is-selected" : ""}" data-carousel-select="${escapeHtml(item.id)}" tabindex="0" role="button" aria-pressed="${selected}">
+    <span class="carousel-saved-thumb">${item.slides[0]
+      ? `<img src="${escapeHtml(item.slides[0].imageDataUrl)}" alt="" loading="lazy" />`
+      : `<i data-lucide="layout-grid"></i>`}</span>
+    <span class="carousel-saved-copy">
+      <span><strong>${escapeHtml(item.name)}</strong><b>${item.slides.length} diapositive${item.slides.length > 1 ? "s" : ""}</b></span>
+      <small>${formatDate(item.updatedAt)}</small>
+    </span>
+    <span class="carousel-saved-actions">
+      <button type="button" data-carousel-send="${escapeHtml(item.id)}" title="Envoyer au chat" aria-label="Envoyer au chat"><i data-lucide="send"></i></button>
+      <button type="button" data-carousel-load="${escapeHtml(item.id)}" title="Ouvrir dans l’éditeur" aria-label="Ouvrir dans l’éditeur"><i data-lucide="folder-open"></i></button>
+      <button type="button" data-carousel-delete="${escapeHtml(item.id)}" title="Supprimer" aria-label="Supprimer"><i data-lucide="trash-2"></i></button>
+    </span>
+  </article>`;
+};
+
+const renderCarouselDropzone = (): string => `
+  <label id="carouselDropzone" class="carousel-dropzone" for="carouselImageFile">
+    <input id="carouselImageFile" type="file" accept="image/png,image/jpeg,image/webp" multiple ${carouselSaving ? "disabled" : ""} />
+    <span><i data-lucide="upload"></i></span>
+    <strong>Dépose tes images ici</strong>
+    <small>PNG, JPEG ou WebP · ${formatBytes(CAROUSEL_MAX_IMAGE_BYTES)} max. par image · ${CAROUSEL_SLIDE_LIMIT} diapositives max.</small>
+  </label>`;
+
+const renderCarouselStudioPanel = (): string => {
+  const item = carouselDraft;
+  // Un brouillon vide (ex. « Nouveau carrousel ») ne masque pas les
+  // carrousels enregistrés : l'aperçu retombe sur la sélection sauvegardée
+  // jusqu'à ce que des images soient importées.
+  const previewItem = carouselDraft && carouselDraft.slides.length
+    ? carouselDraft
+    : selectedCarouselId
+      ? carousels.find((candidate) => candidate.id === selectedCarouselId) ?? carousels[0] ?? null
+      : carousels[0] ?? null;
+  const slideCount = item?.slides.length ?? 0;
+  const savedCount = carousels.length;
+  return `<section id="videoPanel" class="video-panel creative-carousel-panel" aria-labelledby="videoPanelTitle">
+    <header class="video-hero">
+      <div class="video-hero-copy">
+        <span class="video-eyebrow"><i data-lucide="wand-sparkles"></i>Studio IA génératif</span>
+        <h1 id="videoPanelTitle">Importe. Donne la data. <em>Publie.</em></h1>
+        <p>Crée des carrousels prêts à publier : importe tes images, complète chaque diapositive, puis envoie le tout à un chat.</p>
+      </div>
+      <div class="video-provider-state is-ready"><i></i><span><strong>${savedCount ? `${savedCount} carrousel${savedCount > 1 ? "s" : ""} enregistré${savedCount > 1 ? "s" : ""}` : "Aucun carrousel"}</strong><small>stocké localement</small></span></div>
+    </header>
+
+    ${renderStudioToolbar()}
+    ${carouselError ? `<div class="video-submit-error" role="alert"><i data-lucide="circle-alert"></i><span>${escapeHtml(carouselError)}</span><button type="button" id="carouselErrorDismiss" aria-label="Fermer"><i data-lucide="x"></i></button></div>` : ""}
+
+    <div class="video-studio-layout">
+      <form id="carouselForm" class="video-composer carousel-composer">
+        <label class="carousel-name-field">
+          <span><strong>Nom du carrousel</strong><small id="carouselSlideCount">${slideCount}/${CAROUSEL_SLIDE_LIMIT} diapositive${slideCount > 1 ? "s" : ""}</small></span>
+          <input id="carouselName" type="text" maxlength="200" placeholder="Ex. Lancement produit — 5 slides" value="${escapeHtml(item?.name ?? "")}" ${carouselSaving ? "disabled" : ""} />
+        </label>
+
+        ${slideCount < CAROUSEL_SLIDE_LIMIT
+          ? renderCarouselDropzone()
+          : `<div class="carousel-limit-note"><i data-lucide="info"></i><span>Limite de ${CAROUSEL_SLIDE_LIMIT} diapositives atteinte pour ce carrousel.</span></div>`}
+
+        ${item && slideCount ? `<section class="carousel-slides-editor" aria-labelledby="carouselSlidesTitle">
+          <header><span><strong id="carouselSlidesTitle">Diapositives</strong><small>${slideCount} image${slideCount > 1 ? "s" : ""}</small></span></header>
+          <div>${item.slides.map((slide, index) => carouselSlideEditor(slide, index)).join("")}</div>
+        </section>` : ""}
+
+        <div class="carousel-composer-actions">
+          <button type="button" id="carouselNew" class="carousel-new-button" ${carouselSaving ? "disabled" : ""}><i data-lucide="plus"></i><span>Nouveau carrousel</span></button>
+          <button type="submit" id="carouselSave" class="video-generate-button" ${item && slideCount && !carouselSaving ? "" : "disabled"}>
+            <span><i data-lucide="${carouselSaving ? "loader-circle" : "save"}"></i>${carouselSaving ? "Enregistrement…" : "Enregistrer le carrousel"}</span>
+            <small>${item && slideCount ? `${slideCount} diapositive${slideCount > 1 ? "s" : ""} · ${item.name.trim() || "sans nom"}` : "Importe des images pour commencer"}</small>
+          </button>
+        </div>
+        <p class="carousel-chat-note"><i data-lucide="message-square"></i>Une fois enregistré, envoie le carrousel à un chat : les images et la data partent avec le message.</p>
+      </form>
+
+      <aside class="video-output-column">
+        ${previewItem && previewItem.slides.length
+          ? renderCarouselPreview(previewItem)
+          : `<section class="video-preview-card is-empty" aria-label="Aperçu carrousel">
+              <div class="video-empty-reel"><span></span><span></span><i data-lucide="layout-grid"></i></div>
+              <strong>Ton carrousel apparaîtra ici</strong>
+              <p>Importe des images puis remplis la data de chaque diapositive pour l’apercevoir.</p>
+            </section>`}
+        <section class="video-history" aria-labelledby="carouselSavedTitle">
+          <header><span><strong id="carouselSavedTitle">Carrousels enregistrés</strong><small>${savedCount ? `${savedCount} carrousel${savedCount > 1 ? "s" : ""}` : "Aucun carrousel"}</small></span></header>
+          <div>${carousels.map(renderCarouselSavedItem).join("") || `<p class="video-history-empty">Les carrousels enregistrés restent disponibles ici, même si tu changes d’onglet.</p>`}</div>
+        </section>
+      </aside>
+    </div>
+  </section>`;
 };
 
 const renderImageStudioPanel = (): string => {
@@ -1292,6 +1584,197 @@ const reuseImageJob = (localId: string): void => {
   document.querySelector<HTMLTextAreaElement>("#imagePrompt")?.focus();
 };
 
+// ---------------------------------------------------------------------------
+// Logique Carrousel
+// ---------------------------------------------------------------------------
+
+const syncCarouselDraftFromForm = (): void => {
+  if (!carouselDraft) return;
+  const name = document.querySelector<HTMLInputElement>("#carouselName");
+  if (name) carouselDraft.name = name.value;
+  const fields = document.querySelectorAll<HTMLElement>("[data-carousel-field]");
+  fields.forEach((field) => {
+    const slideElement = field.closest<HTMLElement>("[data-carousel-slide]");
+    const slideId = slideElement?.dataset.carouselSlide;
+    const kind = field.dataset.carouselField;
+    const slide = slideId ? carouselDraft?.slides.find((candidate) => candidate.id === slideId) : null;
+    if (!slide || !kind || !(kind === "title" || kind === "caption" || kind === "ctaLabel" || kind === "ctaUrl")) return;
+    const value = field instanceof HTMLTextAreaElement || field instanceof HTMLInputElement ? field.value : "";
+    if (kind === "title") slide.title = value;
+    else if (kind === "caption") slide.caption = value;
+    else if (kind === "ctaLabel") slide.ctaLabel = value;
+    else slide.ctaUrl = value.trim();
+  });
+};
+
+// Met à jour le texte de l'aperçu sans redessiner le panneau : les champs
+// d'édition gardent le focus pendant la saisie.
+const refreshCarouselPreviewText = (): void => {
+  const preview = document.querySelector<HTMLElement>(".carousel-preview-frame");
+  if (!preview || !carouselDraft || !carouselDraft.slides.length) return;
+  const index = Math.max(0, Math.min(carouselPreviewIndex, carouselDraft.slides.length - 1));
+  const slide = carouselDraft.slides[index];
+  if (!slide) return;
+  const title = preview.querySelector<HTMLElement>(".carousel-preview-copy h3");
+  const caption = preview.querySelector<HTMLElement>(".carousel-preview-copy p");
+  if (title) {
+    title.textContent = slide.title;
+    title.hidden = !slide.title.trim();
+  }
+  if (caption) {
+    caption.textContent = slide.caption.trim() || "Aucun texte pour cette diapositive.";
+    caption.classList.toggle("is-muted", !slide.caption.trim());
+  }
+};
+
+const newCarouselDraft = (): void => {
+  carouselDraft = {
+    id: carouselRandomId(),
+    name: "",
+    slides: [],
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+  };
+  carouselError = "";
+  carouselPreviewIndex = 0;
+  redrawPanel();
+};
+
+const carouselFilesToSlides = async (files: readonly File[]): Promise<CarouselSlide[]> => {
+  const slides: CarouselSlide[] = [];
+  for (const file of files) {
+    if (!/^image\/(?:png|jpeg|webp)$/.test(file.type)) {
+      throw new Error("Utilise des images PNG, JPEG ou WebP.");
+    }
+    if (file.size > CAROUSEL_MAX_IMAGE_BYTES) {
+      throw new Error(`Chaque image doit peser ${formatBytes(CAROUSEL_MAX_IMAGE_BYTES)} ou moins.`);
+    }
+    slides.push({
+      id: carouselRandomId(),
+      name: file.name.trim().slice(0, 240) || "Image",
+      mimeType: file.type,
+      imageDataUrl: await fileDataUrl(file),
+      title: "",
+      caption: "",
+      ctaLabel: "",
+      ctaUrl: "",
+    });
+  }
+  return slides;
+};
+
+const addCarouselSlideFiles = async (files: readonly File[]): Promise<void> => {
+  if (!files.length) return;
+  if (!carouselDraft) newCarouselDraft();
+  if (!carouselDraft) return;
+  const remaining = CAROUSEL_SLIDE_LIMIT - carouselDraft.slides.length;
+  if (remaining <= 0) {
+    carouselError = `Ce carrousel contient déjà ${CAROUSEL_SLIDE_LIMIT} diapositives.`;
+    redrawPanel();
+    return;
+  }
+  try {
+    const additions = await carouselFilesToSlides(files.slice(0, remaining));
+    if (!additions.length) return;
+    carouselDraft.slides = [...carouselDraft.slides, ...additions];
+    carouselPreviewIndex = Math.max(0, carouselDraft.slides.length - additions.length);
+    carouselError = "";
+  } catch (error) {
+    carouselError = String(error instanceof Error ? error.message : error);
+  }
+  redrawPanel();
+};
+
+const saveCarousel = (): void => {
+  if (!carouselDraft || carouselSaving) return;
+  syncCarouselDraftFromForm();
+  const name = carouselDraft.name.trim();
+  if (!name) {
+    carouselError = "Donne un nom à ce carrousel.";
+    redrawPanel();
+    document.querySelector<HTMLInputElement>("#carouselName")?.focus();
+    return;
+  }
+  if (!carouselDraft.slides.length) {
+    carouselError = "Importe au moins une image avant d’enregistrer.";
+    redrawPanel();
+    return;
+  }
+  const now = Date.now();
+  const existing = carousels.find((candidate) => candidate.id === carouselDraft?.id);
+  const item: CarouselItem = {
+    ...carouselDraft,
+    name,
+    slides: carouselDraft.slides.slice(0, CAROUSEL_SLIDE_LIMIT),
+    createdAt: existing?.createdAt ?? now,
+    updatedAt: now,
+  };
+  carousels = existing
+    ? carousels.map((candidate) => candidate.id === existing.id ? item : candidate)
+    : [item, ...carousels].slice(0, CAROUSEL_LIMIT);
+  carousels = normalizeCarousels(carousels);
+  selectedCarouselId = item.id;
+  persistCarousels(carousels);
+  carouselError = "";
+  carouselSaving = true;
+  redrawPanel();
+  window.setTimeout(() => {
+    carouselSaving = false;
+    if (panelActive && creativeKind === "carousel") redrawPanel();
+  }, 450);
+};
+
+const loadCarouselIntoEditor = (id: string): void => {
+  const item = carousels.find((candidate) => candidate.id === id);
+  if (!item) return;
+  carouselDraft = {
+    ...item,
+    slides: item.slides.map((slide) => ({ ...slide })),
+  };
+  selectedCarouselId = item.id;
+  carouselPreviewIndex = 0;
+  carouselError = "";
+  redrawPanel();
+  document.querySelector<HTMLInputElement>("#carouselName")?.focus();
+};
+
+const deleteCarousel = (id: string): void => {
+  const item = carousels.find((candidate) => candidate.id === id);
+  if (!item) return;
+  if (!window.confirm(`Supprimer le carrousel « ${item.name} » ?`)) return;
+  carousels = carousels.filter((candidate) => candidate.id !== id);
+  if (selectedCarouselId === id) selectedCarouselId = carousels[0]?.id ?? null;
+  if (carouselDraft?.id === id) carouselDraft = null;
+  carouselPreviewIndex = 0;
+  persistCarousels(carousels);
+  carouselError = "";
+  redrawPanel();
+};
+
+const sendCarouselToChat = (id: string): void => {
+  const item = carousels.find((candidate) => candidate.id === id);
+  if (!item || !item.slides.length) return;
+  const payload: CarouselChatPayload = {
+    id: item.id,
+    name: item.name,
+    slides: item.slides.map((slide) => {
+      const comma = slide.imageDataUrl.indexOf(",");
+      return {
+        name: slide.name,
+        mimeType: slide.mimeType,
+        dataBase64: comma >= 0 ? slide.imageDataUrl.slice(comma + 1) : "",
+        title: slide.title,
+        caption: slide.caption,
+        ctaLabel: slide.ctaLabel,
+        ctaUrl: slide.ctaUrl,
+      };
+    }),
+  };
+  window.dispatchEvent(new CustomEvent<CarouselChatPayload>(CAROUSEL_SEND_TO_CHAT_EVENT, {
+    detail: payload,
+  }));
+};
+
 const applyCreativeAccounts = (view: CreativeAccountsView, preferredId = selectedAccountId): void => {
   creativeAccounts = view;
   selectedAccountId = view.accounts.some((account) => account.id === preferredId)
@@ -1447,9 +1930,12 @@ export const bindVideoPanel = (
   root.querySelectorAll<HTMLButtonElement>("[data-creative-kind]").forEach((button) => {
     button.addEventListener("click", () => {
       if (creativeKind === "video") syncDraftFromForm();
-      else syncImageDraftFromForm();
-      creativeKind = button.dataset.creativeKind === "image" ? "image" : "video";
+      else if (creativeKind === "image") syncImageDraftFromForm();
+      else syncCarouselDraftFromForm();
+      const next = button.dataset.creativeKind;
+      creativeKind = next === "image" || next === "carousel" ? next : "video";
       submitError = "";
+      carouselError = "";
       redrawPanel();
     });
   });
@@ -1498,6 +1984,131 @@ export const bindVideoPanel = (
   root.querySelector<HTMLButtonElement>("#videoCapabilitiesRefresh")?.addEventListener("click", () => {
     void refreshVideoPanel(rerender);
   });
+
+  if (creativeKind === "carousel") {
+    root.querySelector<HTMLFormElement>("#carouselForm")?.addEventListener("submit", (event) => {
+      event.preventDefault();
+      saveCarousel();
+    });
+    root.querySelector<HTMLButtonElement>("#carouselNew")?.addEventListener("click", () => newCarouselDraft());
+    root.querySelector<HTMLButtonElement>("#carouselErrorDismiss")?.addEventListener("click", () => {
+      carouselError = "";
+      redrawPanel();
+    });
+    root.querySelector<HTMLInputElement>("#carouselName")?.addEventListener("input", (event) => {
+      if (!carouselDraft) return;
+      carouselDraft.name = (event.currentTarget as HTMLInputElement).value;
+    });
+    const imageFile = root.querySelector<HTMLInputElement>("#carouselImageFile");
+    imageFile?.addEventListener("change", () => {
+      const files = Array.from(imageFile.files ?? []);
+      void addCarouselSlideFiles(files);
+    });
+    const dropzone = root.querySelector<HTMLElement>("#carouselDropzone");
+    dropzone?.addEventListener("dragover", (event) => {
+      event.preventDefault();
+      dropzone.classList.add("is-dragging");
+    });
+    dropzone?.addEventListener("dragleave", () => dropzone.classList.remove("is-dragging"));
+    dropzone?.addEventListener("drop", (event) => {
+      event.preventDefault();
+      dropzone.classList.remove("is-dragging");
+      void addCarouselSlideFiles(Array.from(event.dataTransfer?.files ?? []));
+    });
+    root.querySelectorAll<HTMLElement>("[data-carousel-field]").forEach((field) => {
+      field.addEventListener("input", () => {
+        syncCarouselDraftFromForm();
+        refreshCarouselPreviewText();
+      });
+    });
+    root.querySelectorAll<HTMLButtonElement>("[data-carousel-move]").forEach((button) => {
+      button.addEventListener("click", () => {
+        syncCarouselDraftFromForm();
+        if (!carouselDraft) return;
+        const slideElement = button.closest<HTMLElement>("[data-carousel-slide]");
+        const slideId = slideElement?.dataset.carouselSlide;
+        const index = slideId
+          ? carouselDraft.slides.findIndex((candidate) => candidate.id === slideId)
+          : -1;
+        const direction = button.dataset.carouselMove === "up" ? -1 : 1;
+        const target = index + direction;
+        if (index < 0 || target < 0 || target >= carouselDraft.slides.length) return;
+        const slides = [...carouselDraft.slides];
+        [slides[index], slides[target]] = [slides[target], slides[index]];
+        carouselDraft.slides = slides;
+        carouselPreviewIndex = Math.max(0, Math.min(carouselPreviewIndex, carouselDraft.slides.length - 1));
+        redrawPanel();
+      });
+    });
+    root.querySelectorAll<HTMLButtonElement>("[data-carousel-remove]").forEach((button) => {
+      button.addEventListener("click", () => {
+        syncCarouselDraftFromForm();
+        if (!carouselDraft) return;
+        const slideElement = button.closest<HTMLElement>("[data-carousel-slide]");
+        const slideId = slideElement?.dataset.carouselSlide;
+        if (!slideId) return;
+        carouselDraft.slides = carouselDraft.slides.filter((candidate) => candidate.id !== slideId);
+        carouselPreviewIndex = Math.max(0, Math.min(carouselPreviewIndex, carouselDraft.slides.length - 1));
+        carouselError = "";
+        redrawPanel();
+      });
+    });
+    root.querySelectorAll<HTMLElement>("[data-carousel-select]").forEach((item) => {
+      const activate = (): void => {
+        const id = item.dataset.carouselSelect;
+        if (!id) return;
+        selectedCarouselId = id;
+        carouselPreviewIndex = 0;
+        redrawPanel();
+      };
+      item.addEventListener("click", (event) => {
+        if ((event.target as Element | null)?.closest("[data-carousel-send], [data-carousel-load], [data-carousel-delete]")) return;
+        activate();
+      });
+      item.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter" && event.key !== " ") return;
+        event.preventDefault();
+        activate();
+      });
+    });
+    root.querySelectorAll<HTMLButtonElement>("[data-carousel-send]").forEach((button) => {
+      button.addEventListener("click", (event) => {
+        event.stopPropagation();
+        const id = button.dataset.carouselSend;
+        if (id) sendCarouselToChat(id);
+      });
+    });
+    root.querySelectorAll<HTMLButtonElement>("[data-carousel-load]").forEach((button) => {
+      button.addEventListener("click", (event) => {
+        event.stopPropagation();
+        const id = button.dataset.carouselLoad;
+        if (id) loadCarouselIntoEditor(id);
+      });
+    });
+    root.querySelectorAll<HTMLButtonElement>("[data-carousel-delete]").forEach((button) => {
+      button.addEventListener("click", (event) => {
+        event.stopPropagation();
+        const id = button.dataset.carouselDelete;
+        if (id) deleteCarousel(id);
+      });
+    });
+    root.querySelector<HTMLButtonElement>("#carouselPrev")?.addEventListener("click", () => {
+      carouselPreviewIndex = Math.max(0, carouselPreviewIndex - 1);
+      redrawPanel();
+    });
+    root.querySelector<HTMLButtonElement>("#carouselNext")?.addEventListener("click", () => {
+      const count = carouselDraft?.slides.length ?? carousels.find((candidate) => candidate.id === selectedCarouselId)?.slides.length ?? 0;
+      carouselPreviewIndex = Math.min(Math.max(0, count - 1), carouselPreviewIndex + 1);
+      redrawPanel();
+    });
+    root.querySelectorAll<HTMLButtonElement>("[data-carousel-dot]").forEach((button) => {
+      button.addEventListener("click", () => {
+        carouselPreviewIndex = Math.max(0, Number(button.dataset.carouselDot ?? 0));
+        redrawPanel();
+      });
+    });
+    return;
+  }
 
   if (creativeKind === "image") {
     root.querySelector<HTMLFormElement>("#imageGenerationForm")?.addEventListener("submit", (event) => {

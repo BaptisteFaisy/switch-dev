@@ -1,6 +1,21 @@
 {
   "skills": [
     {
+      "id": "carrousel",
+      "file": "carrousel/SKILL.md",
+      "name": "carrousel",
+      "buttonLabel": "Carrousel",
+      "icon": "layout-grid",
+      "description": "Compose, review or improve the content of an image carousel (multi-image post) — hooks, per-slide titles, captions, calls to action and publication order. Use when the user shares carousel images or data from the Studio IA Carrousel tab, or asks to write carousel copy.",
+      "tags": [
+        "carrousel",
+        "contenu",
+        "instagram",
+        "publication",
+        "studio-ia"
+      ]
+    },
+    {
       "id": "switch-tiktok-assisted-navigation",
       "file": "switch-tiktok-assisted-navigation/SKILL.md",
       "name": "Navigation assistée TikTok",
@@ -13,6 +28,25 @@
         "usb",
         "navigation-assistee",
         "controle-manuel"
+      ]
+    },
+    {
+      "id": "publier-video-reseaux",
+      "file": "publier-video-reseaux/SKILL.md",
+      "name": "Publier une vidéo sur les réseaux",
+      "buttonLabel": "Publier vidéo",
+      "icon": "upload",
+      "description": "Publier une vidéo (mp4) générée par le Studio IA ou fournie par l'utilisateur sur TikTok, Instagram (Reels/publication) ou YouTube, en pilotant l'application du téléphone Android branché en USB à Switch et en laissant l'utilisateur choisir le compte et l'audience dans l'app. Use when the user asks to post, publish, upload, partager, publier, poster ou mettre en ligne une vidéo sur les réseaux sociaux, including across multiple platforms. Télécommande assistée : chaque action est proposée à partir d'une capture d'écran fraîche et confirmée par l'utilisateur.",
+      "tags": [
+        "publication",
+        "video",
+        "tiktok",
+        "instagram",
+        "youtube",
+        "reseau-social",
+        "usb",
+        "android",
+        "studio-ia"
       ]
     },
     {

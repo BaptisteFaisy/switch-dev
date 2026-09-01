@@ -252,3 +252,68 @@ test("le skill TikTok suit les contrats Freebuff et MCP réellement exposés", (
   assert.doesNotMatch(content, /\b(?:input-text|launch-app|open-screen|stop-app)\b/);
   assert.doesNotMatch(content, /node\s+["']?\$env?:?CST_/i);
 });
+
+test("le skill Publier vidéo couvre un flux USB borné sur les trois plateformes", () => {
+  const manifest = JSON.parse(readFileSync(
+    new URL("../public/skills/index.json", import.meta.url),
+    "utf8",
+  ));
+  const entry = manifest.skills.find(({ id }) => id === "publier-video-reseaux");
+  assert.ok(entry, "le skill doit être déclaré sous son identifiant stable");
+  assert.equal(entry.buttonLabel, "Publier vidéo");
+  const content = readFileSync(
+    new URL(`../public/skills/${entry.file}`, import.meta.url),
+    "utf8",
+  );
+
+  assert.match(content, /^---\s*\nname: publier-video-reseaux\s*$/m);
+  assert.match(content, /CST_DEVICE_API_URL/);
+  assert.match(content, /CST_DEVICE_TOKEN/);
+  assert.match(content, /CST_DEVICE_HELPER=cst-device/);
+  assert.match(content, /CST_SERVER_BIN/);
+  assert.match(content, /(?:exact path|chemin exact) `\/api\/device-fleet`/);
+  assert.match(content, /cst-device list/);
+  assert.match(content, /cst-device action DEVICE_ID ACTION \[ARGS_JSON\] \[--confirm\]/);
+  assert.match(content, /cst-device status ACTION_ID/);
+  assert.match(content, /list_control_devices/);
+  assert.match(content, /control_device/);
+  assert.match(content, /get_control_device_action/);
+  for (const action of [
+    "info",
+    "screenshot",
+    "open_screen",
+    "tap",
+    "swipe",
+    "type_text",
+    "key_event",
+    "open_app",
+    "shell",
+    "push_file",
+  ]) {
+    assert.match(content, new RegExp(`\\b${action}\\b`));
+  }
+  for (const platform of [
+    "TikTok",
+    "Instagram",
+    "YouTube",
+    "com.zhiliaoapp.musically",
+    "com.instagram.android",
+    "com.google.android.youtube",
+    "com.google.android.apps.youtube.creator",
+  ]) {
+    assert.match(content, new RegExp(platform));
+  }
+  assert.match(content, /localPath/);
+  assert.match(content, /remotePath/);
+  assert.match(content, /\/sdcard\/Pictures|\/sdcard\/Download/);
+  assert.match(content, /curl -L/);
+  assert.match(content, /Ce skill ne doit jamais invoquer `shell`/);
+  assert.match(content, /jamais deviner/);
+  assert.match(content, /ne s[eé]lectionne jamais un compte/);
+  assert.match(content, /Publier|Partager|T[eé]l[eé]verser/);
+  assert.match(content, /CAPTCHA/);
+  assert.match(content, /journal d'actions minimal en m[eé]moire/);
+  assert.match(content, /alias al[eé]atoire opaque/);
+  assert.doesNotMatch(content, /\b(?:input-text|launch-app|open-screen|stop-app)\b/);
+  assert.doesNotMatch(content, /node\s+["']?\$env?:?CST_/i);
+});
