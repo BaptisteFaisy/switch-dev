@@ -29,7 +29,9 @@ export const requestAgentBrowser = (payload) => new Promise((resolveRequest, rej
     socket.destroy();
     rejectRequest(new Error(message));
   };
-  socket.setTimeout(52_000, () => fail("Le navigateur Switch a mis trop de temps a repondre."));
+  // Depasse le delai d'action du controller (90s) : le premier appel apres le
+  // demarrage du broker peut inclure le lancement de Chrome + du proxy.
+  socket.setTimeout(100_000, () => fail("Le navigateur Switch a mis trop de temps a repondre."));
   socket.once("error", () => fail());
   socket.on("data", (chunk) => {
     if (settled) return;

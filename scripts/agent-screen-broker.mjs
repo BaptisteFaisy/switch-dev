@@ -21,7 +21,10 @@ export const createAgentScreenBroker = ({ controller = new AgentScreenController
     let request = "";
     let handled = false;
     socket.setEncoding("utf8");
-    socket.setTimeout(52_000, () => socket.destroy());
+    // Depasse le delai de requete du controller (90s) : le relais persistant
+    // paie le demarrage PowerShell une seule fois, en arriere-plan au demarrage
+    // du broker — les actions suivantes repondent en quelques secondes.
+    socket.setTimeout(100_000, () => socket.destroy());
     socket.on("data", (chunk) => {
       if (handled) return;
       request += chunk;
@@ -96,7 +99,12 @@ export const runAgentScreenBroker = ({ logFile } = {}) => {
     log(`erreur serveur: ${String(error?.message || error)}`);
     process.exit(1);
   });
-  server.listen(AGENT_SCREEN_PIPE, () => log("broker pret"));
+  server.listen(AGENT_SCREEN_PIPE, () => {
+    log("broker pret");
+    // Pre-chauffe du relais PowerShell persistant : la compilation C# du
+    // script (cout principal) se fait pendant que le client ne demande rien.
+    void controller.warmUp().catch(() => undefined);
+  });
 };
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {

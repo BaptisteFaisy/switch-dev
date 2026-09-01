@@ -375,6 +375,7 @@ export class AgentBrowserController {
     confirmAction = confirmWindowsBrowserAction,
     maxSessions = 24,
     idleMilliseconds = 30 * 60 * 1000,
+    requestTimeoutMilliseconds = 90_000,
   } = {}) {
     this.importPlaywright = importPlaywright;
     this.executablePath = executablePath;
@@ -383,6 +384,7 @@ export class AgentBrowserController {
     this.confirmAction = confirmAction;
     this.maxSessions = maxSessions;
     this.idleMilliseconds = idleMilliseconds;
+    this.requestTimeoutMilliseconds = requestTimeoutMilliseconds;
     this.contextPromise = null;
     this.proxy = null;
     this.sessions = new Map();
@@ -664,9 +666,36 @@ export class AgentBrowserController {
         if (session && !session.page.isClosed()) await session.page.close().catch(() => undefined);
         return { ok: true, closed: true };
       }
+      // Chien de garde : une action qui depasse le delai (page lente, CDP
+      // bloque) est interrompue et la session liberee, au lieu de bloquer la
+      // file pour toujours — meme mecanique que le relais ecran persistant.
+      let timedOut = false;
+      let timer;
+      const watchdog = new Promise((_resolve, rejectTimeout) => {
+        timer = setTimeout(() => {
+          timedOut = true;
+          rejectTimeout(new Error("Le navigateur Switch a mis trop de temps a repondre."));
+        }, this.requestTimeoutMilliseconds);
+      });
+      timer.unref?.();
+      try {
+        return await Promise.race([this.operate(request), watchdog]);
+      } catch (error) {
+        if (timedOut) {
+          const session = this.sessions.get(request.sessionId);
+          this.sessions.delete(request.sessionId);
+          if (session && !session.page.isClosed()) await session.page.close().catch(() => undefined);
+        }
+        throw error;
+      } finally {
+        clearTimeout(timer);
+      }
+    });
+  }
 
-      const session = await this.pageFor(request.sessionId);
-      session.lastAccess = Date.now();
+  async operate(request) {
+    const session = await this.pageFor(request.sessionId);
+    session.lastAccess = Date.now();
       switch (request.action) {
         case "open":
           await session.page.goto(request.url, { waitUntil: "domcontentloaded", timeout: 40_000 });
@@ -750,7 +779,12 @@ export class AgentBrowserController {
         default:
           throw new Error("Action navigateur non prise en charge.");
       }
-    });
+  }
+
+  // Pre-chauffe : lance Chrome et le proxy en arriere-plan (broker demarre)
+  // pour que la premiere action de l'agent ne paie pas le lancement a froid.
+  async warmUp() {
+    await this.context().catch(() => undefined);
   }
 
   async close() {

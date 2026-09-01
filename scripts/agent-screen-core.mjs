@@ -920,15 +920,30 @@ public static class ScreenAgent
 '@
 Add-Type -AssemblyName System.Drawing
 
-$raw = [Console]::In.ReadToEnd()
-if (-not $raw) { throw 'Requete ecran vide' }
-$json = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String(($raw.Trim())))
-$request = $json | ConvertFrom-Json
+# Relais persistant : le processus PowerShell reste vivant entre les requetes.
+# Chaque requete arrive en base64 sur une seule ligne de stdin, chaque reponse
+# sort en JSON sur une seule ligne de stdout (Write-Result termine par un retour
+# ligne + flush explicite). La compilation C# (Add-Type) n'a ainsi lieu qu'une
+# seule fois par processus : plus aucun delai de demarrage par action de l'agent.
+$script:relayIn = New-Object IO.StreamReader([Console]::OpenStandardInput())
+$script:relayOut = [Console]::OpenStandardOutput()
 
 function Write-Result([hashtable]$value) {
     $payload = $value | ConvertTo-Json -Compress -Depth 8
-    [Console]::Out.Write($payload)
+    $bytes = [Text.Encoding]::UTF8.GetBytes($payload)
+    $script:relayOut.Write($bytes, 0, $bytes.Length)
+    $script:relayOut.WriteByte(10)
+    $script:relayOut.Flush()
 }
+
+while ($true) {
+    $line = $script:relayIn.ReadLine()
+    if ($null -eq $line) { break }
+    $line = $line.Trim()
+    if (-not $line) { continue }
+    $json = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($line))
+    $request = $json | ConvertFrom-Json
+
 
 function Convert-Bitmap([Drawing.Bitmap]$sourceBitmap, [int]$sourceWidth, [int]$sourceHeight) {
     $maxDimension = 1600
@@ -1750,11 +1765,12 @@ try {
             throw 'Action ecran non prise en charge.'
         }
     }
-} catch {
-    $ex = $_.Exception
-    while ($ex -is [System.AggregateException] -and $ex.InnerException) { $ex = $ex.InnerException }
-    $message = $ex.Message
-    Write-Result @{ ok = $false; error = $message }
+    } catch {
+        $ex = $_.Exception
+        while ($ex -is [System.AggregateException] -and $ex.InnerException) { $ex = $ex.InnerException }
+        $message = $ex.Message
+        Write-Result @{ ok = $false; error = $message }
+    }
 }
 `;
 
@@ -1796,6 +1812,7 @@ export class AgentScreenController {
     responseCap = MAX_AGENT_SCREEN_RESPONSE_BYTES,
     nowImpl = Date.now,
     executeImpl = null,
+    requestTimeoutMilliseconds = 90_000,
   } = {}) {
     this.importPowershell = importPowershell;
     this.confirmAction = confirmAction;
@@ -1805,11 +1822,18 @@ export class AgentScreenController {
     this.responseCap = responseCap;
     this.now = nowImpl;
     this.executeImpl = executeImpl;
+    this.requestTimeoutMilliseconds = requestTimeoutMilliseconds;
     this.powershellPath = null;
     this.scriptFile = null;
     this.sessions = new Map();
     this.queues = new Map();
     this.script = buildAgentScreenPowerShellScriptWithKeys();
+    // Relais persistant : un seul processus PowerShell sert toutes les requetes
+    // (compilation C# unique, plus de demarrage par action). Les requetes sont
+    // serialisees sur ce relais, puisqu'elles partagent le meme stdin/stdout.
+    this.relay = null;
+    this.relayExitCode = null;
+    this.relayQueue = Promise.resolve();
     this.cleanupTimer = setInterval(() => this.pruneIdleSessions(), 60_000);
     this.cleanupTimer.unref?.();
   }
@@ -1834,47 +1858,108 @@ export class AgentScreenController {
     return this.scriptFile;
   }
 
-  async execute(request) {
+  // Lance le relais PowerShell persistant s'il n'est pas deja vivant. Le
+  // demarrage couteux (powershell.exe + compilation du bloc C#) n'a lieu
+  // qu'ici, une seule fois pour toute la vie du controller.
+  async ensureRelay() {
+    if (this.relay && this.relayExitCode === null) return this.relay;
     const powershellPath = await this.powershell();
     const scriptFile = await this.scriptPath();
-    const payload = Buffer.from(JSON.stringify(request), "utf8").toString("base64");
     const child = this.spawnImpl(powershellPath, powershellCommandFor(scriptFile), {
-      stdio: ["pipe", "pipe", "ignore"],
+      stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
     });
+    this.relay = child;
+    this.relayExitCode = null;
+    let settled = false;
+    const markDead = (code) => {
+      if (settled) return;
+      settled = true;
+      this.relayExitCode = code;
+    };
+    child.once("error", () => markDead(1));
+    child.once("close", () => markDead(0));
+    return child;
+  }
+
+  // Pre-chauffe : demarre le relais en arriere-plan (broker demarre) pour que
+  // la premiere action de l'agent ne paie pas le demarrage PowerShell + la
+  // compilation du script. Inactif quand un executeur de test est injecte.
+  async warmUp() {
+    if (this.executeImpl) return;
+    await this.ensureRelay().catch(() => undefined);
+  }
+
+  async execute(request) {
+    await this.ensureRelay();
+    const payload = Buffer.from(JSON.stringify(request), "utf8").toString("base64");
+    // Les requetes partagent le meme relais (stdin/stdout) : elles sont
+    // serialisees, et chaque echec laisse la place a la suivante.
+    const previous = this.relayQueue;
+    const next = previous.catch(() => undefined).then(() => this.relayRoundTrip(payload));
+    this.relayQueue = next.catch(() => undefined);
+    return next;
+  }
+
+  // Envoie une requete au relais persistant et attend sa reponse sur une
+  // seule ligne de stdout (Write-Result termine chaque reponse par \n + flush).
+  relayRoundTrip(payload) {
     return new Promise((resolveExecute, rejectExecute) => {
-      let stdout = "";
+      const child = this.relay;
+      if (!child || this.relayExitCode !== null) {
+        rejectExecute(new Error("Le relais PowerShell du poste Windows est indisponible."));
+        return;
+      }
+      let buffer = "";
       let settled = false;
+      const cleanup = () => {
+        clearTimeout(timer);
+        child.stdout.removeListener("data", onData);
+        child.removeListener("close", onClose);
+        child.removeListener("error", onError);
+      };
       const finishError = (message) => {
         if (settled) return;
         settled = true;
+        cleanup();
+        // L'etat du relais est inconnu apres un blocage : on le tue, la
+        // prochaine requete en demarrera un neuf.
         child.kill?.();
         rejectExecute(new Error(message));
       };
-      const timer = setTimeout(() => finishError("Le poste Windows a mis trop de temps a repondre."), 45_000);
-      child.once("error", () => finishError("Le relais PowerShell du poste Windows est indisponible."));
-      child.stdout.on("data", (chunk) => {
+      const onData = (chunk) => {
         if (settled) return;
-        stdout += chunk.toString("utf8");
-        if (Buffer.byteLength(stdout, "utf8") > this.responseCap) {
+        buffer += chunk.toString("utf8");
+        if (Buffer.byteLength(buffer, "utf8") > this.responseCap) {
           finishError("La capture d'ecran est trop volumineuse.");
+          return;
         }
-      });
-      child.once("close", () => {
-        if (settled) return;
+        const newline = buffer.indexOf("\n");
+        if (newline === -1) return;
+        const line = buffer.slice(0, newline).trim();
+        buffer = buffer.slice(newline + 1);
         settled = true;
-        clearTimeout(timer);
-        if (!stdout.trim()) {
+        cleanup();
+        if (!line) {
           rejectExecute(new Error("Le poste Windows n'a pas repondu."));
           return;
         }
         try {
-          resolveExecute(JSON.parse(stdout.trim()));
+          resolveExecute(JSON.parse(line));
         } catch {
           rejectExecute(new Error("Le poste Windows a renvoye une reponse invalide."));
         }
-      });
-      child.stdin.end(`${payload}\n`);
+      };
+      const onClose = () => finishError("Le relais PowerShell du poste Windows s'est arrete.");
+      const onError = () => finishError("Le relais PowerShell du poste Windows est indisponible.");
+      const timer = setTimeout(
+        () => finishError("Le poste Windows a mis trop de temps a repondre."),
+        this.requestTimeoutMilliseconds
+      );
+      child.stdout.on("data", onData);
+      child.once("close", onClose);
+      child.once("error", onError);
+      child.stdin.write(`${payload}\n`);
     });
   }
 
@@ -1957,5 +2042,15 @@ export class AgentScreenController {
   async close() {
     clearInterval(this.cleanupTimer);
     this.sessions.clear();
+    if (this.relay) {
+      try {
+        this.relay.stdin?.end();
+      } catch {
+        // Le relais peut deja etre mort : rien d'autre a fermer.
+      }
+      this.relay.kill?.();
+      this.relay = null;
+      this.relayExitCode = null;
+    }
   }
 }

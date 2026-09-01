@@ -152,7 +152,10 @@ const requestInteractiveBroker = (payload) => new Promise((resolveRequest, rejec
   const socket = createConnection(ACCOUNT_BROWSER_PIPE);
   let response = "";
   const fail = () => rejectRequest(new Error("Le relais graphique Switch est indisponible."));
-  socket.setTimeout(75_000, () => {
+  // Depasse le delai d'action du broker interactif (120s) : le lancement a
+  // froid de Chrome et la navigation proxy (60s) doivent tenir au premier
+  // appel, meme sur un poste charge.
+  socket.setTimeout(130_000, () => {
     socket.destroy();
     fail();
   });

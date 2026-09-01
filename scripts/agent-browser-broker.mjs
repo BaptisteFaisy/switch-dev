@@ -21,7 +21,10 @@ export const createAgentBrowserBroker = ({ controller = new AgentBrowserControll
     let request = "";
     let handled = false;
     socket.setEncoding("utf8");
-    socket.setTimeout(52_000, () => socket.destroy());
+    // Depasse le delai d'action du controller (90s) : le lancement a froid de
+    // Chrome + du proxy local se fait en arriere-plan au demarrage du broker,
+    // la premiere action de l'agent repond donc sans depasser le delai.
+    socket.setTimeout(100_000, () => socket.destroy());
     socket.on("data", (chunk) => {
       if (handled) return;
       request += chunk;
@@ -94,7 +97,12 @@ export const runAgentBrowserBroker = ({ profileDirectory, logFile } = {}) => {
     log(`erreur serveur: ${String(error?.message || error)}`);
     process.exit(1);
   });
-  server.listen(AGENT_BROWSER_PIPE, () => log("broker pret"));
+  server.listen(AGENT_BROWSER_PIPE, () => {
+    log("broker pret");
+    // Pre-chauffe du navigateur : Chrome et le proxy demarrent pendant que le
+    // client ne demande encore rien — plus de delai au premier snapshot.
+    void controller.warmUp().catch(() => undefined);
+  });
 };
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
