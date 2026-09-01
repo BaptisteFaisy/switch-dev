@@ -29,6 +29,11 @@ $ErrorActionPreference = "Stop"
 
 $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $appRoot = Split-Path -Parent $scriptRoot
+$distInventoryModule = Join-Path $scriptRoot "switch-development-dist-inventory.psm1"
+if (-not (Test-Path -LiteralPath $distInventoryModule -PathType Leaf)) {
+  throw "SWITCH_DEVELOPMENT_RELEASE_GATE_REFUSED reason=dist_inventory_module_missing:$distInventoryModule"
+}
+Import-Module -Name $distInventoryModule -Force -Scope Local
 if ([string]::IsNullOrWhiteSpace($DeploymentRoot)) {
   $DeploymentRoot = Split-Path -Parent $appRoot
 }
@@ -110,6 +115,20 @@ function Get-State {
   $state = Read-Json -Path $statePath
   if ([int]$state.schemaVersion -ne 1) {
     Refuse -Reason "state_schema_invalid"
+  }
+  if (-not (Test-PackageHasDistInventory -Package $state.acceptedPackage)) {
+    if ([string]::IsNullOrWhiteSpace([string]$state.acceptedRuntimeRelease)) {
+      Refuse -Reason "accepted_package_dist_inventory_missing"
+    }
+    $runtimePath = Get-ValidatedRuntimeReleasePath -Path ([string]$state.acceptedRuntimeRelease)
+    $runtimePackage = Get-PackageRecord -Root $runtimePath
+    if (-not (Test-LegacyPackageEqual -Left $state.acceptedPackage -Right $runtimePackage)) {
+      Refuse -Reason "accepted_package_legacy_fields_mismatch"
+    }
+    foreach ($property in @("distTreeSha256", "distFileCount", "distFiles")) {
+      Add-Member -InputObject $state.acceptedPackage -MemberType NoteProperty `
+        -Name $property -Value $runtimePackage.$property -Force
+    }
   }
   return $state
 }
@@ -194,6 +213,7 @@ function Get-PackageRecord {
   }
   $serverSha = Get-Sha256 -Path $serverPath
   $indexSha = Get-Sha256 -Path $indexPath
+  $distInventory = Get-SwitchDevelopmentDistInventory -DistRoot (Join-Path $rootFull "dist")
   $versionOutput = @(& $serverPath --version 2>&1)
   if ($LASTEXITCODE -ne 0 -or $versionOutput.Count -ne 1) {
     Refuse -Reason "server_version_unavailable"
@@ -206,11 +226,25 @@ function Get-PackageRecord {
     serviceWorkerSha256 = Get-Sha256 -Path $workerPath
     entryAsset = $entryAsset
     entrySha256 = Get-Sha256 -Path $entryPath
+    distTreeSha256 = [string]$distInventory.treeSha256
+    distFileCount = [int]$distInventory.fileCount
+    distFiles = @($distInventory.files)
     serverVersion = ([string]$versionOutput[0]).Trim()
   }
 }
 
-function Test-PackageEqual {
+function Test-PackageHasDistInventory {
+  param([Parameter(Mandatory = $true)]$Package)
+
+  foreach ($property in @("distTreeSha256", "distFileCount", "distFiles")) {
+    if ($null -eq $Package.PSObject.Properties[$property]) {
+      return $false
+    }
+  }
+  return $true
+}
+
+function Test-LegacyPackageEqual {
   param(
     [Parameter(Mandatory = $true)]$Left,
     [Parameter(Mandatory = $true)]$Right
@@ -232,15 +266,55 @@ function Test-PackageEqual {
   return $true
 }
 
+function Get-PackageDistInventory {
+  param([Parameter(Mandatory = $true)]$Package)
+
+  return [pscustomobject][ordered]@{
+    treeSha256 = [string]$Package.distTreeSha256
+    fileCount = [int]$Package.distFileCount
+    files = @($Package.distFiles)
+  }
+}
+
+function Test-PackageEqual {
+  param(
+    [Parameter(Mandatory = $true)]$Left,
+    [Parameter(Mandatory = $true)]$Right
+  )
+
+  if (-not (Test-LegacyPackageEqual -Left $Left -Right $Right)) {
+    return $false
+  }
+  $leftHasInventory = Test-PackageHasDistInventory -Package $Left
+  $rightHasInventory = Test-PackageHasDistInventory -Package $Right
+  if (-not $leftHasInventory -and -not $rightHasInventory) {
+    return $true
+  }
+  if (-not $leftHasInventory -or -not $rightHasInventory) {
+    return $false
+  }
+  return Test-SwitchDevelopmentDistInventoryEqual `
+    -Left (Get-PackageDistInventory -Package $Left) `
+    -Right (Get-PackageDistInventory -Package $Right)
+}
+
 function Assert-PackageEqual {
   param(
     [Parameter(Mandatory = $true)]$Expected,
     [Parameter(Mandatory = $true)]$Actual,
-    [Parameter(Mandatory = $true)][string]$Reason
+    [Parameter(Mandatory = $true)][string]$Reason,
+    [switch]$AllowLegacyExpected
   )
-  if (-not (Test-PackageEqual -Left $Expected -Right $Actual)) {
-    Refuse -Reason $Reason
+  if (Test-PackageEqual -Left $Expected -Right $Actual) {
+    return
   }
+  if ($AllowLegacyExpected -and
+      -not (Test-PackageHasDistInventory -Package $Expected) -and
+      (Test-PackageHasDistInventory -Package $Actual) -and
+      (Test-LegacyPackageEqual -Left $Expected -Right $Actual)) {
+    return
+  }
+  Refuse -Reason $Reason
 }
 
 function Get-PolicySha256 {
@@ -280,28 +354,28 @@ function Assert-CandidateManifest {
   Assert-PackageEqual -Expected $Manifest.package -Actual $Package -Reason "candidate_package_hash_mismatch"
 
   $serverChanged = [string]$Package.serverSha256 -ne [string]$State.acceptedPackage.serverSha256
-  $indexChanged = [string]$Package.indexSha256 -ne [string]$State.acceptedPackage.indexSha256
+  $distChanged = [string]$Package.distTreeSha256 -ne [string]$State.acceptedPackage.distTreeSha256
   switch ([string]$Manifest.changeKind) {
     "frontend" {
-      if ($serverChanged -or -not $indexChanged) {
+      if ($serverChanged -or -not $distChanged) {
         Refuse -Reason "frontend_candidate_change_set_invalid"
       }
     }
     "backend" {
-      if (-not $serverChanged -or $indexChanged) {
+      if (-not $serverChanged -or $distChanged) {
         Refuse -Reason "backend_candidate_change_set_invalid"
       }
     }
     "mixed" {
-      if (-not $serverChanged -or -not $indexChanged) {
+      if (-not $serverChanged -or -not $distChanged) {
         Refuse -Reason "mixed_candidate_change_set_invalid"
       }
     }
   }
-  if ($indexChanged -and [string]$Package.buildId -eq [string]$State.acceptedPackage.buildId) {
+  if ($distChanged -and [string]$Package.buildId -eq [string]$State.acceptedPackage.buildId) {
     Refuse -Reason "frontend_build_id_not_advanced"
   }
-  if ($indexChanged) {
+  if ($distChanged) {
     $generationSuffix = $generationValue.ToString([Globalization.CultureInfo]::InvariantCulture)
     if (-not ([string]$Package.buildId).EndsWith($generationSuffix, [StringComparison]::Ordinal)) {
       Refuse -Reason "frontend_build_id_must_end_with_generation:$generationSuffix"
@@ -438,7 +512,8 @@ try {
         Refuse -Reason "baseline_source_commit_mismatch:$head"
       }
       $package = Get-PackageRecord -Root $candidateRootFull
-      Assert-PackageEqual -Expected $policy.baselinePackage -Actual $package -Reason "baseline_package_mismatch"
+      Assert-PackageEqual -Expected $policy.baselinePackage -Actual $package `
+        -Reason "baseline_package_mismatch" -AllowLegacyExpected
       $initialRuntimePath = Join-Path $runtimeReleasesRoot ([string]$package.releaseId)
       Assert-ActiveRuntime -ExpectedPackage $package -ExpectedRuntimePath $initialRuntimePath
       $state = [ordered]@{

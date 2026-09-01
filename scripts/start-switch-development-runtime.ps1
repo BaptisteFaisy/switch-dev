@@ -12,6 +12,7 @@ $configPath = Join-Path $deploymentRoot "config\server.local.env.ps1"
 $sourceServerPath = Join-Path $deploymentRoot "app\cst-server.exe"
 $sourceStaticPath = Join-Path $deploymentRoot "app\dist"
 $releaseGate = Join-Path $deploymentRoot "app\scripts\switch-development-release-gate.ps1"
+$distInventoryModule = Join-Path $deploymentRoot "app\scripts\switch-development-dist-inventory.psm1"
 $dataPath = Join-Path $deploymentRoot "data"
 $deploymentRunPath = Join-Path $deploymentRoot "run"
 $launchMutex = [Threading.Mutex]::new($false, "Local\SwitchDevelopmentLaunch-18082")
@@ -30,6 +31,7 @@ try {
 foreach ($requiredPath in @(
   $configPath,
   $releaseGate,
+  $distInventoryModule,
   $sourceServerPath,
   (Join-Path $sourceStaticPath "index.html")
 )) {
@@ -37,6 +39,8 @@ foreach ($requiredPath in @(
     throw "Deploiement Switch developpement incomplet : $requiredPath est absent. Aucun backup ancien ne sera charge."
   }
 }
+
+Import-Module -Name $distInventoryModule -Force -Scope Local
 
 . $configPath
 if (-not $env:CST_ADMIN_TOKEN) {
@@ -86,9 +90,8 @@ try {
 & $releaseGate -Operation AuditPackage -DeploymentRoot $deploymentRoot -CandidateRoot (Join-Path $deploymentRoot "app")
 
 $sourceServerHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $sourceServerPath).Hash
-$sourceIndexPath = Join-Path $sourceStaticPath "index.html"
-$sourceIndexHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $sourceIndexPath).Hash
-$releaseId = $sourceServerHash.Substring(0, 16) + "-" + $sourceIndexHash.Substring(0, 16)
+$sourceDistInventory = Get-SwitchDevelopmentDistInventory -DistRoot $sourceStaticPath
+$releaseId = $sourceServerHash.Substring(0, 16) + "-" + $sourceDistInventory.treeSha256.Substring(0, 16)
 $runtimeReleasePath = Join-Path $runtimeReleasesPath $releaseId
 $runtimeServerPath = Join-Path $runtimeReleasePath "cst-server.exe"
 $runtimeStaticPath = Join-Path $runtimeReleasePath "dist"
@@ -104,17 +107,16 @@ if (
   Copy-Item -LiteralPath $sourceStaticPath -Destination $stagePath -Recurse
 
   $stagedServerPath = Join-Path $stagePath "cst-server.exe"
-  $stagedIndexPath = Join-Path $stagePath "dist\index.html"
   $stagedServerHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $stagedServerPath).Hash
-  $stagedIndexHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $stagedIndexPath).Hash
+  $stagedDistInventory = Get-SwitchDevelopmentDistInventory -DistRoot (Join-Path $stagePath "dist")
   $sourceServerHashAfterCopy = (Get-FileHash -Algorithm SHA256 -LiteralPath $sourceServerPath).Hash
-  $sourceIndexHashAfterCopy = (Get-FileHash -Algorithm SHA256 -LiteralPath $sourceIndexPath).Hash
+  $sourceDistInventoryAfterCopy = Get-SwitchDevelopmentDistInventory -DistRoot $sourceStaticPath
 
   if (
     $stagedServerHash -ne $sourceServerHash -or
-    $stagedIndexHash -ne $sourceIndexHash -or
     $sourceServerHashAfterCopy -ne $sourceServerHash -or
-    $sourceIndexHashAfterCopy -ne $sourceIndexHash
+    -not (Test-SwitchDevelopmentDistInventoryEqual -Left $sourceDistInventory -Right $stagedDistInventory) -or
+    -not (Test-SwitchDevelopmentDistInventoryEqual -Left $sourceDistInventory -Right $sourceDistInventoryAfterCopy)
   ) {
     throw "Le paquet Switch a change pendant sa mise en cache ; demarrage annule sans toucher au serveur existant."
   }
@@ -134,7 +136,9 @@ foreach ($runtimeRequiredPath in @($runtimeServerPath, $runtimeIndexPath)) {
 }
 if (
   (Get-FileHash -Algorithm SHA256 -LiteralPath $runtimeServerPath).Hash -ne $sourceServerHash -or
-  (Get-FileHash -Algorithm SHA256 -LiteralPath $runtimeIndexPath).Hash -ne $sourceIndexHash
+  -not (Test-SwitchDevelopmentDistInventoryEqual `
+    -Left $sourceDistInventory `
+    -Right (Get-SwitchDevelopmentDistInventory -DistRoot $runtimeStaticPath))
 ) {
   throw "Runtime Switch developpement incoherent ; demarrage annule."
 }
