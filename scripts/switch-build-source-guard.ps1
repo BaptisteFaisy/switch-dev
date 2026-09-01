@@ -22,6 +22,9 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+# PSModulePath : remet les modules Windows PowerShell en tete (Get-FileHash introuvable sinon dans le sandbox).
+& (Join-Path $PSScriptRoot 'switch-development-ensure-system-module-path.ps1')
+
 $excludedDirectoryNames = @(
     '.git',
     '.freebuff',

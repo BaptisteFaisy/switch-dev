@@ -44,6 +44,9 @@ param(
 #          + jonction 'current'. Donnees separees dans %APPDATA%\codex-switch-terminal-server.
 
 $ErrorActionPreference = "Stop"
+
+# PSModulePath : remet les modules Windows PowerShell en tete (Get-FileHash introuvable sinon dans le sandbox).
+& (Join-Path $PSScriptRoot 'switch-development-ensure-system-module-path.ps1')
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 $IsReleaseMode = [bool]$ReleaseTag
 

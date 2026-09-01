@@ -8,6 +8,9 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+# PSModulePath : remet les modules Windows PowerShell en tete (Get-FileHash introuvable sinon dans le sandbox).
+& (Join-Path $PSScriptRoot 'switch-development-ensure-system-module-path.ps1')
 $ProgressPreference = "SilentlyContinue"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 

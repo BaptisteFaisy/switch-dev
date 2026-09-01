@@ -20,6 +20,9 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# PSModulePath : remet les modules Windows PowerShell en tete (Get-FileHash introuvable sinon dans le sandbox).
+& (Join-Path $PSScriptRoot 'switch-development-ensure-system-module-path.ps1')
+
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Root = Split-Path -Parent $ScriptDir
 $AndroidDir = Join-Path $Root "android"
