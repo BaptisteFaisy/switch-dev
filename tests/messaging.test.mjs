@@ -16,6 +16,7 @@ const server = readFileSync(new URL("../src-tauri/src/server.rs", import.meta.ur
 const desktop = readFileSync(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8");
 const platform = readFileSync(new URL("../src/platform.ts", import.meta.url), "utf8");
 const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
+const types = readFileSync(new URL("../src/types.ts", import.meta.url), "utf8");
 const messaging = readFileSync(new URL("../src/messaging.ts", import.meta.url), "utf8");
 const styles = readFileSync(new URL("../src/messaging.css", import.meta.url), "utf8");
 
@@ -97,7 +98,7 @@ test("les API derivent toujours l'expediteur de la session et n'exposent pas les
 });
 
 test("l'onglet Messagerie et son icone enveloppe existent sur desktop et mobile", () => {
-  assert.match(main, /\| "messaging"/);
+  assert.match(types, /\| "messaging"/);
   assert.match(main, /id="messagingToggle"[\s\S]*?data-lucide="mail"[\s\S]*?<span>Messagerie<\/span>/);
   assert.match(main, /class="m-tab" type="button" data-view="messaging"[\s\S]*?data-lucide="mail"[\s\S]*?<span>Messages<\/span>/);
   assert.match(main, /type MessagingModule = typeof import\("\.\/messaging"\)/);

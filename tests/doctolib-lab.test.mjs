@@ -12,6 +12,7 @@ import {
 } from "../src/doctolib-lab.ts";
 
 const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
+const types = readFileSync(new URL("../src/types.ts", import.meta.url), "utf8");
 const platform = readFileSync(new URL("../src/platform.ts", import.meta.url), "utf8");
 const backend = readFileSync(new URL("../src-tauri/src/doctolib_lab.rs", import.meta.url), "utf8");
 const lib = readFileSync(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8");
@@ -118,7 +119,7 @@ test("le site :8080 utilise le moteur de la machine serveur", () => {
 });
 
 test("la vue est séparée des chats et raccordée aux cinq commandes desktop", () => {
-  assert.match(main, /\| "doctolib-lab"/);
+  assert.match(types, /\| "doctolib-lab"/);
   assert.doesNotMatch(main, /doctolibLabToggle/);
   assert.doesNotMatch(main, /data-view="doctolib-lab"/);
   assert.match(main, /type DoctolibLabModule = typeof import\("\.\/doctolib-lab-view"\)/);

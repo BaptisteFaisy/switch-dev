@@ -439,7 +439,7 @@ test("échappe les champs du connecteur dans la page multi-cartes", async () => 
 });
 
 test("branche la page lazy, ses cycles de vie et les routes plateforme", () => {
-  const main = read("src/main.ts");
+  const main = read("src/main.ts"); const types = read("src/types.ts");
   const platform = read("src/platform.ts");
   const view = read("src/device-fleet.ts");
   const integration = read("src/usb-devices.ts");
@@ -450,7 +450,7 @@ test("branche la page lazy, ses cycles de vie et les routes plateforme", () => {
 
   assert.match(main, /type DeviceFleetModule = typeof import\("\.\/device-fleet"\)/);
   assert.match(main, /import\("\.\/device-fleet\.css"\)/);
-  assert.match(main, /\| "devices"/);
+  assert.match(types, /\| "devices"/);
   assert.match(main, /if \(view === "devices" && !deviceFleetModule\)/);
   assert.match(main, /data-view="devices"/);
   assert.match(main, /id="devicesToggle"/);

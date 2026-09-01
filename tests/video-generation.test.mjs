@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
+const types = readFileSync(new URL("../src/types.ts", import.meta.url), "utf8");
 const panel = readFileSync(new URL("../src/video.ts", import.meta.url), "utf8");
 const styles = readFileSync(new URL("../src/video.css", import.meta.url), "utf8");
 const platform = readFileSync(new URL("../src/platform.ts", import.meta.url), "utf8");
@@ -13,7 +14,7 @@ const imageBackend = readFileSync(new URL("../src-tauri/src/image_generation.rs"
 const accountsBackend = readFileSync(new URL("../src-tauri/src/creative_accounts.rs", import.meta.url), "utf8");
 
 test("le studio video est charge a la demande sur bureau et mobile", () => {
-  assert.match(main, /\| "video"/);
+  assert.match(types, /\| "video"/);
   assert.match(main, /id="videoToggle"/);
   assert.match(main, /data-view="video"/);
   assert.match(main, /type VideoModule = typeof import\("\.\/video"\)/);

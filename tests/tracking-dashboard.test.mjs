@@ -10,8 +10,9 @@ async function source(path) {
 
 test("the Duello shell exposes the tracking view", async () => {
   const main = await source("src/main.ts");
+const types = await source("src/types.ts");
 
-  assert.match(main, /type AppView =[\s\S]*\| "tracking"/);
+  assert.match(types, /type AppView =[\s\S]*\| "tracking"/);
   assert.match(main, /data-view="tracking"/);
   assert.match(main, /id="trackingToggle"/);
   assert.match(main, /renderTrackingPanel/);

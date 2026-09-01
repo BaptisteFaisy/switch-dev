@@ -202,12 +202,13 @@ test("échappe le contenu saisi dans le panneau", () => {
 
 test("la vue Tâches est reliée aux navigations desktop et mobile", () => {
   const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
+const types = readFileSync(new URL("../src/types.ts", import.meta.url), "utf8");
   const style = readFileSync(new URL("../src/style.css", import.meta.url), "utf8");
   const taskModel = readFileSync(new URL("../src/tasks.ts", import.meta.url), "utf8");
   const taskView = readFileSync(new URL("../src/tasks-view.ts", import.meta.url), "utf8");
   const taskStyle = readFileSync(new URL("../src/tasks-view.css", import.meta.url), "utf8");
 
-  assert.match(main, /\| "tasks"/);
+  assert.match(types, /\| "tasks"/);
   assert.match(main, /id="tasksToggle"/);
   assert.match(main, /role="menuitem" data-view="tasks"/);
   assert.match(main, /import\("\.\/tasks-view"\)/);

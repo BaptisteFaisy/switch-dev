@@ -232,7 +232,7 @@ test("un home de compte ne peut pas devenir un environnement projet", () => {
   );
 });
 
-test("un environnement distant accepte les chemins absolus Unix et Windows", () => {
+test("un noeud distant accepte les chemins absolus de son systeme", () => {
   assert.equal(
     remoteEnvironmentPath("C:\\Users\\jeanp\\projet"),
     "C:\\Users\\jeanp\\projet",

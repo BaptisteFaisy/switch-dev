@@ -3,12 +3,13 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
+const types = readFileSync(new URL("../src/types.ts", import.meta.url), "utf8");
 const tutorial = readFileSync(new URL("../src/tutorial.ts", import.meta.url), "utf8");
 const styles = readFileSync(new URL("../src/tutorial.css", import.meta.url), "utf8");
 const mainStyles = readFileSync(new URL("../src/style.css", import.meta.url), "utf8");
 
 test("le Tuto est une vue accessible sur ordinateur et mobile", () => {
-  assert.match(main, /\| "tutorial"/);
+  assert.match(types, /\| "tutorial"/);
   assert.match(main, /id="proxyToggle"[^>]*title="Gérer les proxys des comptes"/);
   assert.match(main, /data-act="proxies"[^>]*>[\s\S]*?<span>Proxy<\/span>/);
   assert.match(main, /type TutorialModule = typeof import\("\.\/tutorial"\)/);

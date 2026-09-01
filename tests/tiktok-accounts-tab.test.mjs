@@ -4,13 +4,14 @@ import test from "node:test";
 
 const read = (path) => readFileSync(new URL(path, import.meta.url), "utf8");
 const main = read("../src/main.ts");
+const types = read("../src/types.ts");
 const view = read("../src/tiktok-accounts.ts");
 const styles = read("../src/tiktok-accounts.css");
 const platform = read("../src/platform.ts");
 const server = read("../src-tauri/src/server.rs");
 
 test("un onglet TikTok est chargé à la demande sur ordinateur et mobile", () => {
-  assert.match(main, /\| "tiktok"/);
+  assert.match(types, /\| "tiktok"/);
   assert.match(main, /type TikTokAccountsModule = typeof import\("\.\/tiktok-accounts"\)/);
   assert.match(main, /tiktokAccountsModulePromise = import\("\.\/tiktok-accounts"\)/);
   assert.match(main, /if \(view === "tiktok" && !tiktokAccountsModule\)/);
