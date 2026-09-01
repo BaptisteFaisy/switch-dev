@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
-const types = readFileSync(new URL("../src/types.ts", import.meta.url), "utf8");
+const types = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
 const tutorial = readFileSync(new URL("../src/tutorial.ts", import.meta.url), "utf8");
 const styles = readFileSync(new URL("../src/tutorial.css", import.meta.url), "utf8");
 const mainStyles = readFileSync(new URL("../src/style.css", import.meta.url), "utf8");

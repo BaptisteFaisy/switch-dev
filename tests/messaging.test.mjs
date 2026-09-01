@@ -16,7 +16,7 @@ const server = readFileSync(new URL("../src-tauri/src/server.rs", import.meta.ur
 const desktop = readFileSync(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8");
 const platform = readFileSync(new URL("../src/platform.ts", import.meta.url), "utf8");
 const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
-const types = readFileSync(new URL("../src/types.ts", import.meta.url), "utf8");
+const types = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
 const messaging = readFileSync(new URL("../src/messaging.ts", import.meta.url), "utf8");
 const styles = readFileSync(new URL("../src/messaging.css", import.meta.url), "utf8");
 

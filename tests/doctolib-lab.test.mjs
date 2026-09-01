@@ -12,7 +12,7 @@ import {
 } from "../src/doctolib-lab.ts";
 
 const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
-const types = readFileSync(new URL("../src/types.ts", import.meta.url), "utf8");
+const types = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
 const platform = readFileSync(new URL("../src/platform.ts", import.meta.url), "utf8");
 const backend = readFileSync(new URL("../src-tauri/src/doctolib_lab.rs", import.meta.url), "utf8");
 const lib = readFileSync(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8");

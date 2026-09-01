@@ -4,7 +4,7 @@ import test from "node:test";
 
 const read = (path) => readFileSync(new URL(path, import.meta.url), "utf8");
 const main = read("../src/main.ts");
-const types = read("../src/types.ts");
+const types = read("../src/main.ts");
 const view = read("../src/tiktok-accounts.ts");
 const styles = read("../src/tiktok-accounts.css");
 const platform = read("../src/platform.ts");

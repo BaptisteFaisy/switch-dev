@@ -23,7 +23,7 @@ const readRustModule = (path) => {
   }
 };
 const main = read("../src/main.ts");
-const types = read("../src/types.ts");
+const types = read("../src/main.ts");
 const view = read("../src/transcription.ts");
 const styles = read("../src/transcription.css");
 const chatView = read("../src/chat/view.ts");

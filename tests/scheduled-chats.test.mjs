@@ -173,7 +173,7 @@ test("rend un panneau échappé avec l'heure, l'environnement et les actions", (
 
 test("la vue Chat planifié est reliée aux navigations et au runtime", () => {
   const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
-const types = readFileSync(new URL("../src/types.ts", import.meta.url), "utf8");
+const types = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
   const initialStyles = ["style.css", "theme.css"]
     .map((file) => readFileSync(new URL(`../src/${file}`, import.meta.url), "utf8"))
     .join("\n");

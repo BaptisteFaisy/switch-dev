@@ -25,7 +25,7 @@ import {
 } from "../src/chat/orchestration.ts";
 
 const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
-const types = readFileSync(new URL("../src/types.ts", import.meta.url), "utf8");
+const types = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
 const chatView = readFileSync(new URL("../src/chat/view.ts", import.meta.url), "utf8");
 const platform = readFileSync(new URL("../src/platform.ts", import.meta.url), "utf8");
 const backendRoot = readFileSync(new URL("../src-tauri/src/orchestration.rs", import.meta.url), "utf8");

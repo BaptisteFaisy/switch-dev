@@ -13,7 +13,7 @@ import {
 } from "../src/bug-report.ts";
 
 const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
-const types = readFileSync(new URL("../src/types.ts", import.meta.url), "utf8");
+const types = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
 const style = readFileSync(new URL("../src/style.css", import.meta.url), "utf8");
 
 test("un signalement est identifié durablement parmi les agents autonomes", () => {

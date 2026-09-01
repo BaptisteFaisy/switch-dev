@@ -10,7 +10,7 @@ async function source(path) {
 
 test("the Switch shell exposes a lazy Banque Duello tab", async () => {
   const main = await source("src/main.ts");
-const types = await source("src/types.ts");
+const types = await source("src/main.ts");
 
   assert.match(types, /type AppView =[^;]*\| "duello-bank"/s);
   assert.match(main, /import\("\.\/duello-bank"\)/);

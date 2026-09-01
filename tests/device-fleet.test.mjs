@@ -439,7 +439,7 @@ test("échappe les champs du connecteur dans la page multi-cartes", async () => 
 });
 
 test("branche la page lazy, ses cycles de vie et les routes plateforme", () => {
-  const main = read("src/main.ts"); const types = read("src/types.ts");
+  const main = read("src/main.ts"); const types = read("src/main.ts");
   const platform = read("src/platform.ts");
   const view = read("src/device-fleet.ts");
   const integration = read("src/usb-devices.ts");
