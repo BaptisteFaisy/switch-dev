@@ -44,9 +44,14 @@ type AndroidControlFeedback = {
 };
 
 type AndroidEmbedState = "closed" | "loading" | "ready" | "error";
+type AndroidEmbedSession = {
+  state: Exclude<AndroidEmbedState, "closed">;
+  error: string;
+};
 type WsScrcpyServiceState = "idle" | "starting" | "online" | "error";
 
 const POLL_INTERVAL_MS = 4_000;
+const MAX_ANDROID_LIVE_SCREENS = 40;
 const SCRCPY_EMBED_ORIGIN = "http://127.0.0.1:8000";
 const SCRCPY_EMBED_PATH = "/embed.html";
 const SCRCPY_EMBED_URL_PREFIX = "http://127.0.0.1:8000/embed.html?device=";
@@ -69,10 +74,8 @@ let visible = false;
 let pollTimer: number | null = null;
 let panelRerender: (() => void) | null = null;
 let panelSetStatus: ((message: string) => void) | null = null;
-let androidEmbedState: AndroidEmbedState = "closed";
-let androidEmbedDevice = "";
-let androidEmbedError = "";
-let androidEmbedLoadTimer: number | null = null;
+const androidEmbedSessions = new Map<string, AndroidEmbedSession>();
+const androidEmbedLoadTimers = new Map<string, number>();
 let androidEmbedMessageBound = false;
 
 const escapeHtml = (value: string): string =>
@@ -116,10 +119,15 @@ const buildScrcpyEmbedUrl = (deviceSerial: string): string | null => {
   return url.href;
 };
 
-const clearAndroidEmbedLoadTimer = (): void => {
-  if (androidEmbedLoadTimer === null) return;
-  window.clearTimeout(androidEmbedLoadTimer);
-  androidEmbedLoadTimer = null;
+const clearAndroidEmbedLoadTimer = (deviceSerial?: string): void => {
+  if (deviceSerial) {
+    const timer = androidEmbedLoadTimers.get(deviceSerial);
+    if (timer !== undefined) window.clearTimeout(timer);
+    androidEmbedLoadTimers.delete(deviceSerial);
+    return;
+  }
+  for (const timer of androidEmbedLoadTimers.values()) window.clearTimeout(timer);
+  androidEmbedLoadTimers.clear();
 };
 
 const clearWsScrcpyStartTimer = (): void => {
@@ -134,27 +142,64 @@ const stopPolling = (): void => {
   pollTimer = null;
 };
 
-const resetAndroidEmbed = (): void => {
+const resetAndroidEmbed = (deviceSerial?: string): void => {
+  if (deviceSerial) {
+    clearAndroidEmbedLoadTimer(deviceSerial);
+    androidEmbedSessions.delete(deviceSerial);
+    return;
+  }
   clearAndroidEmbedLoadTimer();
-  androidEmbedState = "closed";
-  androidEmbedDevice = "";
-  androidEmbedError = "";
+  androidEmbedSessions.clear();
+};
+
+const overallAndroidEmbedState = (): AndroidEmbedState => {
+  const sessions = [...androidEmbedSessions.values()];
+  if (!sessions.length) return "closed";
+  if (sessions.some((session) => session.state === "error")) return "error";
+  if (sessions.some((session) => session.state === "loading")) return "loading";
+  return "ready";
+};
+
+const androidEmbedSummary = (): string => {
+  const sessions = [...androidEmbedSessions.values()];
+  const ready = sessions.filter((session) => session.state === "ready").length;
+  const loading = sessions.filter((session) => session.state === "loading").length;
+  const failed = sessions.filter((session) => session.state === "error").length;
+  if (!sessions.length) return `0/${MAX_ANDROID_LIVE_SCREENS} écran actif`;
+  const details = [
+    `${ready} en direct`,
+    loading ? `${loading} en connexion` : "",
+    failed ? `${failed} en erreur` : "",
+  ].filter(Boolean).join(" · ");
+  return `${sessions.length}/${MAX_ANDROID_LIVE_SCREENS} écrans · ${details}`;
+};
+
+const updateAndroidEmbedSummaryDom = (): void => {
+  const panel = document.querySelector<HTMLElement>("[data-android-control-embed]");
+  if (panel) panel.dataset.state = overallAndroidEmbedState();
+  const summary = document.querySelector<HTMLElement>("[data-android-embed-summary]");
+  if (summary) summary.textContent = androidEmbedSummary();
 };
 
 const setAndroidEmbedState = (
+  deviceSerial: string,
   state: Exclude<AndroidEmbedState, "closed">,
   nextError = "",
 ): void => {
-  if (state !== "loading") clearAndroidEmbedLoadTimer();
-  androidEmbedState = state;
-  androidEmbedError = nextError;
+  const session = androidEmbedSessions.get(deviceSerial);
+  if (!session) return;
+  if (state !== "loading") clearAndroidEmbedLoadTimer(deviceSerial);
+  session.state = state;
+  session.error = nextError;
 
-  const panel = document.querySelector<HTMLElement>("[data-android-control-embed]");
-  if (!panel || panel.dataset.device !== androidEmbedDevice) return;
-  panel.dataset.state = state;
-  panel.setAttribute("aria-busy", state === "loading" ? "true" : "false");
-  const errorCopy = panel.querySelector<HTMLElement>("[data-android-control-embed-error]");
+  const screen = [...document.querySelectorAll<HTMLElement>("[data-android-screen]")]
+    .find((candidate) => candidate.dataset.device === deviceSerial);
+  if (!screen) return;
+  screen.dataset.state = state;
+  screen.setAttribute("aria-busy", state === "loading" ? "true" : "false");
+  const errorCopy = screen.querySelector<HTMLElement>("[data-android-control-embed-error]");
   if (errorCopy) errorCopy.textContent = nextError;
+  updateAndroidEmbedSummaryDom();
 };
 
 const androidEmbedTheme = (): "dark" | "light" =>
@@ -162,11 +207,13 @@ const androidEmbedTheme = (): "dark" | "light" =>
 
 const handleAndroidEmbedMessage = (event: MessageEvent): void => {
   if (event.origin !== SCRCPY_EMBED_ORIGIN) return;
-  const frame = document.querySelector<HTMLIFrameElement>("#androidControlEmbedFrame");
+  const frame = [...document.querySelectorAll<HTMLIFrameElement>("[data-android-embed-frame]")]
+    .find((candidate) => event.source === candidate.contentWindow);
+  const deviceSerial = frame?.dataset.device ?? "";
   if (
     !frame
-    || event.source !== frame.contentWindow
-    || frame.dataset.device !== androidEmbedDevice
+    || !deviceSerial
+    || !androidEmbedSessions.has(deviceSerial)
     || !event.data
     || typeof event.data !== "object"
     || (event.data as { type?: unknown }).type !== "ws-scrcpy-web:theme-ready"
@@ -178,7 +225,7 @@ const handleAndroidEmbedMessage = (event: MessageEvent): void => {
     { type: "ws-scrcpy-web:theme", theme: androidEmbedTheme() },
     SCRCPY_EMBED_ORIGIN,
   );
-  setAndroidEmbedState("ready");
+  setAndroidEmbedState(deviceSerial, "ready");
 };
 
 const bindAndroidEmbedMessages = (): void => {
@@ -221,11 +268,15 @@ const syncSelectedDevice = (): void => {
 };
 
 const reconcileAndroidEmbedDevice = (): void => {
-  if (!androidEmbedDevice || readyDeviceSerials().includes(androidEmbedDevice)) return;
-  clearAndroidEmbedLoadTimer();
-  androidEmbedState = "error";
-  androidEmbedError =
-    `L’appareil ${androidEmbedDevice} n’est plus disponible. Fermez cet écran et choisissez un appareil Android prêt.`;
+  const ready = new Set(readyDeviceSerials());
+  for (const deviceSerial of androidEmbedSessions.keys()) {
+    if (ready.has(deviceSerial)) continue;
+    setAndroidEmbedState(
+      deviceSerial,
+      "error",
+      `L’appareil ${deviceSerial} n’est plus disponible. Fermez cet écran ou reconnectez le téléphone.`,
+    );
+  }
 };
 
 const reconcileWsScrcpyService = (next: AndroidDevicesSnapshot): void => {
@@ -261,10 +312,11 @@ const reconcileWsScrcpyService = (next: AndroidDevicesSnapshot): void => {
       message: "ws-scrcpy-web ne répond plus sur le PC Windows.",
     };
     panelSetStatus?.("ws-scrcpy-web est hors ligne");
-    if (androidEmbedState !== "closed") {
+    for (const deviceSerial of androidEmbedSessions.keys()) {
       setAndroidEmbedState(
+        deviceSerial,
         "error",
-        "Le service local ws-scrcpy-web ne répond plus. Redémarrez-le puis rechargez l’écran.",
+        "Le service local ws-scrcpy-web ne répond plus. Redémarrez-le puis rechargez cet écran.",
       );
     }
   }
@@ -397,52 +449,113 @@ const renderWsScrcpyServiceButton = (): string => {
   </button>`;
 };
 
+const androidEmbedStateLabel = (state: Exclude<AndroidEmbedState, "closed">): string => ({
+  loading: "Connexion…",
+  ready: "En direct",
+  error: "À vérifier",
+})[state];
+
+const androidEmbedStateIcon = (state: Exclude<AndroidEmbedState, "closed">): string => ({
+  loading: "loader-circle",
+  ready: "badge-check",
+  error: "circle-alert",
+})[state];
+
+const renderAndroidScreen = (deviceSerial: string, session: AndroidEmbedSession): string => {
+  const details = deviceDetails().find((device) => device.serial === deviceSerial);
+  const embedUrl = readyDeviceSerials().includes(deviceSerial)
+    ? buildScrcpyEmbedUrl(deviceSerial)
+    : null;
+  const renderedState = embedUrl ? session.state : "error";
+  const renderedError = session.error
+    || "L’URL locale de ws-scrcpy-web a été refusée ou l’appareil Android n’est plus disponible.";
+  const label = details ? deviceLabel(details) : deviceSerial;
+
+  return `<article class="android-control-screen" data-android-screen data-state="${renderedState}" data-device="${escapeAttr(deviceSerial)}" aria-busy="${renderedState === "loading" ? "true" : "false"}">
+    <header class="android-control-screen-header">
+      <span class="android-control-screen-copy">
+        <strong title="${escapeAttr(label)}">${escapeHtml(label)}</strong>
+        <small title="${escapeAttr(deviceSerial)}">${escapeHtml(deviceSerial)}</small>
+      </span>
+      <span class="android-control-screen-state">
+        <i data-lucide="${androidEmbedStateIcon(renderedState)}" class="${renderedState === "loading" ? "is-spinning" : ""}"></i>
+        ${androidEmbedStateLabel(renderedState)}
+      </span>
+      <span class="android-control-screen-actions">
+        <button type="button" class="icon-button" data-android-reload-screen data-device="${escapeAttr(deviceSerial)}" title="Recharger ${escapeAttr(label)}" aria-label="Recharger l’écran ${escapeAttr(label)}">
+          <i data-lucide="refresh-cw"></i>
+        </button>
+        <button type="button" class="icon-button" data-android-close-screen data-device="${escapeAttr(deviceSerial)}" title="Fermer ${escapeAttr(label)}" aria-label="Fermer l’écran ${escapeAttr(label)}">
+          <i data-lucide="x"></i>
+        </button>
+      </span>
+    </header>
+    ${embedUrl
+      ? `<div class="android-control-frame-shell">
+          <iframe
+            class="android-control-embed-frame"
+            data-android-embed-frame
+            data-device="${escapeAttr(deviceSerial)}"
+            src="${escapeAttr(embedUrl)}"
+            title="Écran Android ${escapeAttr(label)}"
+            sandbox="allow-scripts allow-same-origin"
+            allow="fullscreen"
+            referrerpolicy="no-referrer"
+          ></iframe>
+          <div class="android-control-frame-loading" role="status">
+            <i data-lucide="loader-circle" class="is-spinning"></i>
+            <strong>Connexion au flux…</strong>
+            <small>Service local : 127.0.0.1:8000</small>
+          </div>
+          <div class="android-control-frame-error" role="alert">
+            <i data-lucide="circle-alert"></i>
+            <strong>Flux indisponible</strong>
+            <p data-android-control-embed-error>${escapeHtml(renderedError)}</p>
+            <small>Rechargez cet écran ou utilisez le bouton scrcpy externe de secours.</small>
+          </div>
+        </div>`
+      : `<div class="android-control-frame-unavailable" role="alert">
+          <i data-lucide="circle-alert"></i>
+          <strong>Appareil Android indisponible</strong>
+          <p data-android-control-embed-error>${escapeHtml(renderedError)}</p>
+        </div>`}
+  </article>`;
+};
+
 const renderAndroidEmbed = (): string => {
   const selectedSerial = effectiveDevice();
-  const selectedDetails = deviceDetails().find((device) => device.serial === selectedSerial);
-  const isOpen = androidEmbedState !== "closed" && !!androidEmbedDevice;
-  const embedDeviceReady = readyDeviceSerials().includes(androidEmbedDevice);
-  const embedUrl = isOpen && embedDeviceReady
-    ? buildScrcpyEmbedUrl(androidEmbedDevice)
-    : null;
-  const renderedState: AndroidEmbedState = !isOpen
-    ? "closed"
-    : embedUrl
-      ? androidEmbedState
-      : "error";
-  const renderedError = androidEmbedError
-    || "L’URL locale de ws-scrcpy-web a été refusée ou l’appareil Android n’est plus disponible.";
   const serviceState = effectiveWsScrcpyServiceState();
-  const canOpen = serviceState === "online"
+  const sessions = [...androidEmbedSessions.entries()];
+  const remainingSlots = Math.max(0, MAX_ANDROID_LIVE_SCREENS - sessions.length);
+  const readyUnopened = readyDeviceSerials()
+    .filter((deviceSerial) => !androidEmbedSessions.has(deviceSerial));
+  const canOpenSelected = serviceState === "online"
     && !!selectedSerial
+    && !androidEmbedSessions.has(selectedSerial)
+    && remainingSlots > 0
     && buildScrcpyEmbedUrl(selectedSerial) !== null;
-  const activeLabel = androidEmbedDevice || selectedSerial;
+  const canOpenAll = serviceState === "online" && readyUnopened.length > 0 && remainingSlots > 0;
+  const renderedState = overallAndroidEmbedState();
 
-  return `<section class="android-control-embed" data-android-control-embed data-state="${renderedState}" data-service-state="${serviceState}" data-device="${escapeAttr(androidEmbedDevice)}" aria-busy="${renderedState === "loading" ? "true" : "false"}">
+  return `<section class="android-control-embed" data-android-control-embed data-state="${renderedState}" data-service-state="${serviceState}">
     <header class="android-control-embed-header">
       <span class="android-control-embed-copy">
-        <small>ws-scrcpy-web local</small>
-        <strong>Écran Android intégré</strong>
-        <p>L’iframe est limitée à <code>http://127.0.0.1:8000</code>.</p>
+        <small>ws-scrcpy-web local · supervision</small>
+        <strong>Mur d’écrans Android</strong>
+        <p>Jusqu’à ${MAX_ANDROID_LIVE_SCREENS} flux simultanés, limités à <code>http://127.0.0.1:8000</code>.</p>
       </span>
-      <span class="android-control-embed-status" aria-live="polite">
-        <span data-android-embed-status="closed"><i data-lucide="wifi-off"></i>Écran fermé</span>
-        <span data-android-embed-status="loading"><i data-lucide="loader-circle" class="is-spinning"></i>Connexion locale…</span>
-        <span data-android-embed-status="ready"><i data-lucide="badge-check"></i>Service local chargé</span>
-        <span data-android-embed-status="error"><i data-lucide="circle-alert"></i>Service indisponible</span>
-      </span>
+      <span class="android-control-embed-status" data-android-embed-summary aria-live="polite">${escapeHtml(androidEmbedSummary())}</span>
       <span class="android-control-embed-actions">
         ${renderWsScrcpyServiceButton()}
-        ${isOpen
-          ? `<button type="button" id="androidControlReloadEmbed" class="tool-button">
-              <i data-lucide="refresh-cw"></i><span>Recharger</span>
-            </button>
-            <button type="button" id="androidControlCloseEmbed" class="tool-button">
-              <i data-lucide="wifi-off"></i><span>Fermer</span>
-            </button>`
-          : `<button type="button" id="androidControlOpenEmbed" class="tool-button primary" ${canOpen ? "" : "disabled"}>
-              <i data-lucide="smartphone"></i><span>Afficher dans Switch</span>
-            </button>`}
+        <button type="button" id="androidControlOpenEmbed" class="tool-button" ${canOpenSelected ? "" : "disabled"}>
+          <i data-lucide="monitor-up"></i><span>Ajouter la sélection</span>
+        </button>
+        <button type="button" id="androidControlOpenAllEmbeds" class="tool-button primary" ${canOpenAll ? "" : "disabled"}>
+          <i data-lucide="panels-top-left"></i><span>Afficher tous (${Math.min(readyUnopened.length, remainingSlots)})</span>
+        </button>
+        <button type="button" id="androidControlCloseAllEmbeds" class="tool-button" ${sessions.length ? "" : "disabled"}>
+          <i data-lucide="monitor-off"></i><span>Tout fermer</span>
+        </button>
       </span>
     </header>
     ${serviceState === "error" && wsScrcpyServiceError
@@ -451,46 +564,22 @@ const renderAndroidEmbed = (): string => {
     ${snapshot && !snapshot.wsScrcpyAvailable && serviceState !== "online"
       ? `<div class="android-control-service-help" role="note"><i data-lucide="info"></i><span>ws-scrcpy-web n’est pas encore installé — il sera téléchargé et installé automatiquement au premier démarrage du service.</span></div>`
       : ""}
-    ${!isOpen
-      ? `<div class="android-control-embed-empty">
-          <i data-lucide="smartphone"></i>
-          <span>
-            <strong>${selectedDetails ? escapeHtml(deviceLabel(selectedDetails)) : "Choisissez un appareil Android prêt"}</strong>
-            <small>${selectedSerial
-              ? serviceState === "online"
-                ? escapeHtml(selectedSerial)
-                : "Démarrez ws-scrcpy-web pour activer l’affichage intégré."
-              : "Le bouton s’activera dès qu’un appareil ADB sera sélectionné et que le service sera en ligne."}</small>
-          </span>
+    ${readyDeviceSerials().length > MAX_ANDROID_LIVE_SCREENS
+      ? `<div class="android-control-service-help" role="note"><i data-lucide="info"></i><span>${readyDeviceSerials().length} appareils sont prêts ; les ${MAX_ANDROID_LIVE_SCREENS} premiers sont affichés et les autres restent disponibles après fermeture d’un flux.</span></div>`
+      : ""}
+    ${sessions.length
+      ? `<div class="android-control-screen-grid" data-android-screen-grid>
+          ${sessions.map(([deviceSerial, session]) => renderAndroidScreen(deviceSerial, session)).join("")}
         </div>`
-      : embedUrl
-        ? `<div class="android-control-frame-shell">
-            <iframe
-              id="androidControlEmbedFrame"
-              data-device="${escapeAttr(androidEmbedDevice)}"
-              src="${escapeAttr(embedUrl)}"
-              title="Écran Android ${escapeAttr(activeLabel)}"
-              sandbox="allow-scripts allow-same-origin"
-              allow="fullscreen"
-              referrerpolicy="no-referrer"
-            ></iframe>
-            <div class="android-control-frame-loading" role="status">
-              <i data-lucide="loader-circle" class="is-spinning"></i>
-              <strong>Connexion à ws-scrcpy-web…</strong>
-              <small>Service local : 127.0.0.1:8000</small>
-            </div>
-            <div class="android-control-frame-error" role="alert">
-              <i data-lucide="circle-alert"></i>
-              <strong>Impossible d’afficher l’appareil</strong>
-              <p data-android-control-embed-error>${escapeHtml(renderedError)}</p>
-              <small>Rechargez le panneau ou utilisez le bouton scrcpy externe de secours.</small>
-            </div>
-          </div>`
-        : `<div class="android-control-frame-unavailable" role="alert">
-            <i data-lucide="circle-alert"></i>
-            <strong>Appareil Android indisponible</strong>
-            <p data-android-control-embed-error>${escapeHtml(renderedError)}</p>
-          </div>`}
+      : `<div class="android-control-embed-empty">
+          <i data-lucide="panels-top-left"></i>
+          <span>
+            <strong>Aucun écran ouvert</strong>
+            <small>${serviceState === "online"
+              ? "Ajoutez l’appareil sélectionné ou affichez tous les appareils ADB prêts, jusqu’à 40."
+              : "Démarrez ws-scrcpy-web pour activer le mur d’écrans supervisé."}</small>
+          </span>
+        </div>`}
   </section>`;
 };
 
@@ -639,12 +728,14 @@ const startWsScrcpyService = async (options: AndroidControlUiOptions): Promise<v
   }
 };
 
-const openAndroidEmbed = (options: AndroidControlUiOptions): void => {
-  const deviceSerial = effectiveDevice();
-  if (!deviceSerial) {
+const openAndroidEmbeds = (
+  deviceSerials: string[],
+  options: AndroidControlUiOptions,
+): void => {
+  if (!deviceSerials.length) {
     feedback = {
       tone: "warning",
-      message: "Choisissez d’abord un appareil Android prêt à afficher dans Switch.",
+      message: "Aucun nouvel appareil Android prêt ne peut être ajouté au mur d’écrans.",
     };
     options.rerender();
     return;
@@ -657,21 +748,77 @@ const openAndroidEmbed = (options: AndroidControlUiOptions): void => {
     options.rerender();
     return;
   }
-  if (!buildScrcpyEmbedUrl(deviceSerial)) {
+  const availableSlots = Math.max(0, MAX_ANDROID_LIVE_SCREENS - androidEmbedSessions.size);
+  if (!availableSlots) {
     feedback = {
-      tone: "error",
-      message: "L’URL locale ws-scrcpy-web a été refusée pour des raisons de sécurité.",
+      tone: "warning",
+      message: `Le mur supervise déjà ${MAX_ANDROID_LIVE_SCREENS} écrans, sa capacité maximale.`,
+    };
+    options.rerender();
+    return;
+  }
+  const ready = new Set(readyDeviceSerials());
+  const candidates = [...new Set(deviceSerials)]
+    .filter((deviceSerial) => ready.has(deviceSerial))
+    .filter((deviceSerial) => !androidEmbedSessions.has(deviceSerial))
+    .filter((deviceSerial) => buildScrcpyEmbedUrl(deviceSerial) !== null)
+    .slice(0, availableSlots);
+  if (!candidates.length) {
+    feedback = {
+      tone: "warning",
+      message: "Les appareils demandés sont déjà affichés, indisponibles ou refusés par la règle d’URL locale.",
     };
     options.rerender();
     return;
   }
 
-  clearAndroidEmbedLoadTimer();
-  androidEmbedDevice = deviceSerial;
-  androidEmbedState = "loading";
-  androidEmbedError = "";
+  for (const deviceSerial of candidates) {
+    clearAndroidEmbedLoadTimer(deviceSerial);
+    androidEmbedSessions.set(deviceSerial, { state: "loading", error: "" });
+  }
   feedback = null;
+  options.setStatus?.(
+    candidates.length === 1
+      ? `Écran Android ${candidates[0]} ajouté`
+      : `${candidates.length} écrans Android ajoutés`,
+  );
   options.rerender();
+};
+
+const openAndroidEmbed = (options: AndroidControlUiOptions): void => {
+  const deviceSerial = effectiveDevice();
+  if (!deviceSerial) {
+    feedback = {
+      tone: "warning",
+      message: "Choisissez d’abord un appareil Android prêt à afficher dans Switch.",
+    };
+    options.rerender();
+    return;
+  }
+  openAndroidEmbeds([deviceSerial], options);
+};
+
+const openAllAndroidEmbeds = (options: AndroidControlUiOptions): void => {
+  openAndroidEmbeds(readyDeviceSerials(), options);
+};
+
+const reloadAndroidEmbed = (
+  deviceSerial: string,
+  options: AndroidControlUiOptions,
+): void => {
+  if (!androidEmbedSessions.has(deviceSerial)) return;
+  clearAndroidEmbedLoadTimer(deviceSerial);
+  androidEmbedSessions.set(deviceSerial, { state: "loading", error: "" });
+  const frame = [...document.querySelectorAll<HTMLIFrameElement>("[data-android-embed-frame]")]
+    .find((candidate) => candidate.dataset.device === deviceSerial);
+  const embedUrl = buildScrcpyEmbedUrl(deviceSerial);
+  if (!frame || !embedUrl) {
+    options.rerender();
+    return;
+  }
+  setAndroidEmbedState(deviceSerial, "loading");
+  bindAndroidEmbedFrame(frame);
+  frame.src = embedUrl;
 };
 
 const openExternalScrcpy = async (options: AndroidControlUiOptions): Promise<void> => {
@@ -708,15 +855,13 @@ const openExternalScrcpy = async (options: AndroidControlUiOptions): Promise<voi
   }
 };
 
-const bindAndroidEmbedFrame = (): void => {
-  const frame = document.querySelector<HTMLIFrameElement>("#androidControlEmbedFrame");
-  if (!frame) return;
-  bindAndroidEmbedMessages();
-
+const bindAndroidEmbedFrame = (frame: HTMLIFrameElement): void => {
   const frameDevice = frame.dataset.device ?? "";
+  if (!frameDevice || !androidEmbedSessions.has(frameDevice)) return;
   const ownsCurrentFrame = (): boolean =>
-    frameDevice === androidEmbedDevice
-    && document.querySelector("#androidControlEmbedFrame") === frame;
+    androidEmbedSessions.has(frameDevice)
+    && [...document.querySelectorAll<HTMLIFrameElement>("[data-android-embed-frame]")]
+      .some((candidate) => candidate === frame);
   const requestHandshake = (): void => {
     if (!ownsCurrentFrame()) return;
     frame.contentWindow?.postMessage(
@@ -725,20 +870,24 @@ const bindAndroidEmbedFrame = (): void => {
     );
   };
 
-  clearAndroidEmbedLoadTimer();
-  setAndroidEmbedState("loading");
-  androidEmbedLoadTimer = window.setTimeout(() => {
+  clearAndroidEmbedLoadTimer(frameDevice);
+  setAndroidEmbedState(frameDevice, "loading");
+  const timer = window.setTimeout(() => {
+    androidEmbedLoadTimers.delete(frameDevice);
     if (!ownsCurrentFrame()) return;
     setAndroidEmbedState(
+      frameDevice,
       "error",
       "Le service local ne répond pas. Démarrez ws-scrcpy-web sur 127.0.0.1:8000, puis rechargez.",
     );
   }, SCRCPY_EMBED_LOAD_TIMEOUT_MS);
+  androidEmbedLoadTimers.set(frameDevice, timer);
 
   frame.addEventListener("load", requestHandshake, { once: true });
   frame.addEventListener("error", () => {
     if (!ownsCurrentFrame()) return;
     setAndroidEmbedState(
+      frameDevice,
       "error",
       "Le chargement de ws-scrcpy-web a échoué. Vérifiez le service local, puis rechargez.",
     );
@@ -747,13 +896,59 @@ const bindAndroidEmbedFrame = (): void => {
   requestHandshake();
 };
 
+const bindAndroidEmbedFrames = (): void => {
+  const frames = [...document.querySelectorAll<HTMLIFrameElement>("[data-android-embed-frame]")];
+  if (!frames.length) return;
+  bindAndroidEmbedMessages();
+  for (const frame of frames) bindAndroidEmbedFrame(frame);
+};
+
+const updateSelectedDeviceControls = (): void => {
+  const selectedSerial = effectiveDevice();
+  const bridgeReady = snapshot?.bridgeOnline === true || snapshot?.connectorOnline === true;
+  const externalScrcpy = document.querySelector<HTMLButtonElement>("#androidControlOpenScrcpy");
+  if (externalScrcpy) {
+    externalScrcpy.disabled =
+      !bridgeReady
+      || !selectedSerial
+      || snapshot?.scrcpyAvailable !== true
+      || openingExternalScrcpy;
+  }
+  const addSelected = document.querySelector<HTMLButtonElement>("#androidControlOpenEmbed");
+  if (addSelected) {
+    addSelected.disabled =
+      effectiveWsScrcpyServiceState() !== "online"
+      || !selectedSerial
+      || androidEmbedSessions.has(selectedSerial)
+      || androidEmbedSessions.size >= MAX_ANDROID_LIVE_SCREENS
+      || buildScrcpyEmbedUrl(selectedSerial) === null;
+  }
+};
+
+const updateAndroidEmbedActionControls = (): void => {
+  updateSelectedDeviceControls();
+  const remainingSlots = Math.max(0, MAX_ANDROID_LIVE_SCREENS - androidEmbedSessions.size);
+  const readyUnopened = readyDeviceSerials()
+    .filter((deviceSerial) => !androidEmbedSessions.has(deviceSerial));
+  const openAll = document.querySelector<HTMLButtonElement>("#androidControlOpenAllEmbeds");
+  if (openAll) {
+    openAll.disabled =
+      effectiveWsScrcpyServiceState() !== "online"
+      || !readyUnopened.length
+      || !remainingSlots;
+    const label = openAll.querySelector("span");
+    if (label) label.textContent = `Afficher tous (${Math.min(readyUnopened.length, remainingSlots)})`;
+  }
+  const closeAll = document.querySelector<HTMLButtonElement>("#androidControlCloseAllEmbeds");
+  if (closeAll) closeAll.disabled = androidEmbedSessions.size === 0;
+};
+
 export const bindAndroidControlUi = (options: AndroidControlUiOptions): void => {
   panelSetStatus = options.setStatus ?? null;
   document.querySelector<HTMLSelectElement>("#androidControlDevice")?.addEventListener("change", (event) => {
     selectedDevice = (event.currentTarget as HTMLSelectElement).value;
-    if (androidEmbedDevice && androidEmbedDevice !== selectedDevice) resetAndroidEmbed();
     feedback = null;
-    options.rerender();
+    updateAndroidEmbedActionControls();
   });
   document.querySelector<HTMLButtonElement>("#androidControlRefresh")?.addEventListener("click", () => {
     void refreshAndroidDevices(options.rerender);
@@ -761,20 +956,40 @@ export const bindAndroidControlUi = (options: AndroidControlUiOptions): void => 
   document.querySelector<HTMLButtonElement>("#androidControlOpenEmbed")?.addEventListener("click", () => {
     openAndroidEmbed(options);
   });
-  document.querySelector<HTMLButtonElement>("#androidControlReloadEmbed")?.addEventListener("click", () => {
-    openAndroidEmbed(options);
+  document.querySelector<HTMLButtonElement>("#androidControlOpenAllEmbeds")?.addEventListener("click", () => {
+    openAllAndroidEmbeds(options);
   });
-  document.querySelector<HTMLButtonElement>("#androidControlCloseEmbed")?.addEventListener("click", () => {
+  document.querySelector<HTMLButtonElement>("#androidControlCloseAllEmbeds")?.addEventListener("click", () => {
     resetAndroidEmbed();
     options.rerender();
   });
+  for (const button of document.querySelectorAll<HTMLButtonElement>("[data-android-reload-screen]")) {
+    button.addEventListener("click", () => {
+      reloadAndroidEmbed(button.dataset.device ?? "", options);
+    });
+  }
+  for (const button of document.querySelectorAll<HTMLButtonElement>("[data-android-close-screen]")) {
+    button.addEventListener("click", () => {
+      const deviceSerial = button.dataset.device ?? "";
+      resetAndroidEmbed(deviceSerial);
+      const screen = [...document.querySelectorAll<HTMLElement>("[data-android-screen]")]
+        .find((candidate) => candidate.dataset.device === deviceSerial);
+      screen?.remove();
+      if (!androidEmbedSessions.size) {
+        options.rerender();
+        return;
+      }
+      updateAndroidEmbedSummaryDom();
+      updateAndroidEmbedActionControls();
+    });
+  }
   document.querySelector<HTMLButtonElement>("#androidControlOpenScrcpy")?.addEventListener("click", () => {
     void openExternalScrcpy(options);
   });
   document.querySelector<HTMLButtonElement>("#androidControlStartWebScrcpy")?.addEventListener("click", () => {
     void startWsScrcpyService(options);
   });
-  bindAndroidEmbedFrame();
+  bindAndroidEmbedFrames();
 };
 
 export const activateAndroidControlPanel = (

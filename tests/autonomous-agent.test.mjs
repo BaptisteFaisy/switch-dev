@@ -734,7 +734,7 @@ test("le modele d'un chat web cree et modifie lui-meme l'agent avec des outils n
   assert.match(platform, /sourceChatKey: args\.sourceChatKey \?\? null/);
   assert.match(backend, /pub source_chat_key: Option<String>/);
   assert.match(server, /"\/mcp\/chat-tools"/);
-  assert.match(server, /start_with_model_tools\(request, Some\(tool_server\)\)/);
+  assert.match(server, /start_with_model_tools\(request, tool_server\)/);
   assert.match(server, /chat_tool_capabilities\.claim_call\(token\)/);
   assert.match(chatBackend, /fn autonomous_agent_tool_instructions\(\)/);
   assert.match(chatBackend, /configure_codex_model_tool\(command, model_tool_server\)/);

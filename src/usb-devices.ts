@@ -84,6 +84,14 @@ export const requestManualUsbDeviceAction = (
       throw new Error("La commande shell exacte doit être confirmée sans modification.");
     }
   }
+  if (request.action === "push_file") {
+    const localPath = typeof request.args?.localPath === "string" ? request.args.localPath : "";
+    const remotePath = typeof request.args?.remotePath === "string" ? request.args.remotePath : "";
+    const command = localPath && remotePath ? `adb push ${localPath} ${remotePath}` : "";
+    if (!command || request.exactConfirmation !== command) {
+      throw new Error("Le transfert de fichier exact doit être confirmé sans modification.");
+    }
+  }
   if (!manualUsbDeviceActionHandler) {
     throw new Error("Le contrôleur de la page Appareils n’est pas actif.");
   }

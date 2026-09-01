@@ -20,22 +20,36 @@ use tokio::sync::Notify;
 use uuid::Uuid;
 
 pub const DEFAULT_CONNECTOR_TTL_SECONDS: i64 = 60;
-pub const ACTION_CLAIM_LEASE_SECONDS: i64 = 120;
+pub const ACTION_CLAIM_LEASE_SECONDS: i64 = 300;
 pub const MAX_ACTION_OUTPUT_BYTES: usize = 64 * 1024;
 pub const MAX_SCREENSHOT_BYTES: usize = 8 * 1024 * 1024;
+pub(crate) const DEFAULT_DEVICE_ACTION_CONCURRENCY: usize = 8;
+pub(crate) const MAX_DEVICE_ACTION_CONCURRENCY: usize = 128;
 
 const MAX_DEVICES: usize = 128;
 const MAX_METADATA_PROBES: usize = 16;
 const MAX_QUEUED_ACTIONS: usize = 500;
 const MAX_ACTIONS_PER_DEVICE: usize = 50;
-const QUEUED_ACTION_TTL_SECONDS: i64 = 120;
+const QUEUED_ACTION_TTL_SECONDS: i64 = 300;
 const COMPLETED_ACTION_RETENTION_SECONDS: i64 = 24 * 60 * 60;
+const TOOL_STATUS_CACHE_TTL: Duration = Duration::from_secs(5);
 const REVOKED_ORIGIN_RETENTION_SECONDS: i64 = 24 * 60 * 60;
 const ACTION_STORE_SCHEMA: u32 = 1;
 const ACTION_STORE_DIRECTORY: &str = "device-fleet-actions";
 const ACTION_STORE_FILE_PREFIX: &str = "actions-";
 const ACTION_STORE_FILE_SUFFIX: &str = ".json";
 const ACTION_STORE_GENERATIONS_TO_KEEP: usize = 2;
+
+fn parse_device_action_concurrency(value: Option<&str>) -> usize {
+    value
+        .and_then(|raw| raw.trim().parse::<usize>().ok())
+        .filter(|capacity| (1..=MAX_DEVICE_ACTION_CONCURRENCY).contains(capacity))
+        .unwrap_or(DEFAULT_DEVICE_ACTION_CONCURRENCY)
+}
+
+pub(crate) fn configured_device_action_concurrency() -> usize {
+    parse_device_action_concurrency(env::var("CST_DEVICE_ACTION_CONCURRENCY").ok().as_deref())
+}
 
 fn bounded_parallel_map_ordered<T, R, F>(items: Vec<T>, limit: usize, operation: F) -> Vec<R>
 where
@@ -122,6 +136,7 @@ pub enum DeviceActionKind {
     KeyEvent,
     OpenApp,
     Shell,
+    PushFile,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -298,6 +313,10 @@ pub struct DeviceActionArgs {
     #[serde(default)]
     pub command: Option<String>,
     #[serde(default)]
+    pub local_path: Option<String>,
+    #[serde(default)]
+    pub remote_path: Option<String>,
+    #[serde(default)]
     pub timeout_ms: Option<u64>,
 }
 
@@ -315,6 +334,8 @@ impl Default for DeviceActionArgs {
             key: None,
             app_id: None,
             command: None,
+            local_path: None,
+            remote_path: None,
             timeout_ms: None,
         }
     }
@@ -527,6 +548,8 @@ struct PersistedActionArgs {
     key: Option<String>,
     app_id: Option<String>,
     command: Option<String>,
+    local_path: Option<String>,
+    remote_path: Option<String>,
     timeout_ms: Option<u64>,
 }
 
@@ -618,6 +641,8 @@ impl From<&DeviceActionArgs> for PersistedActionArgs {
             key: value.key.clone(),
             app_id: value.app_id.clone(),
             command: value.command.clone(),
+            local_path: value.local_path.clone(),
+            remote_path: value.remote_path.clone(),
             timeout_ms: value.timeout_ms,
         }
     }
@@ -637,6 +662,8 @@ impl From<PersistedActionArgs> for DeviceActionArgs {
             key: value.key,
             app_id: value.app_id,
             command: value.command,
+            local_path: value.local_path,
+            remote_path: value.remote_path,
             timeout_ms: value.timeout_ms,
         }
     }
@@ -1889,7 +1916,9 @@ pub async fn run_device_fleet_connector() {
     };
 
     let worker_loop = async move {
-        let capacity = Arc::new(tokio::sync::Semaphore::new(8));
+        let capacity = Arc::new(tokio::sync::Semaphore::new(
+            configured_device_action_concurrency(),
+        ));
         loop {
             let permit = match capacity.clone().acquire_owned().await {
                 Ok(permit) => permit,
@@ -1987,7 +2016,32 @@ async fn post_connector_json<T: serde::de::DeserializeOwned>(
     serde_json::from_slice(&bytes).map_err(|error| error.to_string())
 }
 
+#[derive(Clone)]
+struct CachedDeviceFleetTools {
+    checked_at: Instant,
+    tools: DeviceFleetTools,
+}
+
 fn inspect_tools() -> DeviceFleetTools {
+    static CACHE: OnceLock<Mutex<Option<CachedDeviceFleetTools>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(None));
+    let Ok(mut cached) = cache.lock() else {
+        return inspect_tools_uncached();
+    };
+    if let Some(entry) = cached.as_ref() {
+        if entry.checked_at.elapsed() < TOOL_STATUS_CACHE_TTL {
+            return entry.tools.clone();
+        }
+    }
+    let tools = inspect_tools_uncached();
+    *cached = Some(CachedDeviceFleetTools {
+        checked_at: Instant::now(),
+        tools: tools.clone(),
+    });
+    tools
+}
+
+fn inspect_tools_uncached() -> DeviceFleetTools {
     let adb = tool_status(&tool_program("CST_ADB_PATH", "adb"), &["version"]);
     let scrcpy = tool_status(&tool_program("CST_SCRCPY_PATH", "scrcpy"), &["--version"]);
     let idevice_id = tool_status(
@@ -2451,6 +2505,7 @@ fn android_capabilities(ready: bool, scrcpy_available: bool) -> Vec<DeviceAction
         DeviceActionKind::KeyEvent,
         DeviceActionKind::OpenApp,
         DeviceActionKind::Shell,
+        DeviceActionKind::PushFile,
     ];
     if scrcpy_available {
         capabilities.push(DeviceActionKind::OpenScreen);
@@ -2677,7 +2732,47 @@ fn execute_android_action(
             timeout,
             "Commande executee sur Android",
         ),
+        DeviceActionKind::PushFile => run_android_push_file(&adb, device, request, timeout),
     }
+}
+
+fn run_android_push_file(
+    adb: &str,
+    device: &ControlDevice,
+    request: &DeviceActionRequest,
+    timeout: Duration,
+) -> Result<DeviceActionResult, DeviceFleetError> {
+    let local_path = request.args.local_path.as_deref().unwrap_or("");
+    let remote_path = request.args.remote_path.as_deref().unwrap_or("");
+    if local_path.is_empty() {
+        return Err(DeviceFleetError::Validation(
+            "localPath est requis pour pousser un fichier".to_string(),
+        ));
+    }
+    if remote_path.is_empty() || !remote_path.starts_with('/') {
+        return Err(DeviceFleetError::Validation(
+            "remotePath doit etre un chemin absolu sur l'appareil (commencant par /)".to_string(),
+        ));
+    }
+    if !Path::new(local_path).is_file() {
+        return Err(DeviceFleetError::Validation(format!(
+            "Le fichier local n'existe pas ou n'est pas lisible : {local_path}"
+        )));
+    }
+    let output = run_capped_command(
+        adb,
+        vec![
+            "-s".into(),
+            device.serial.clone(),
+            "push".into(),
+            local_path.to_string(),
+            remote_path.to_string(),
+        ],
+        timeout,
+        MAX_ACTION_OUTPUT_BYTES,
+    )
+    .map_err(DeviceFleetError::Unavailable)?;
+    command_result(output, "Fichier pousse sur l'appareil")
 }
 
 fn run_android_text_action(
@@ -2721,6 +2816,9 @@ fn execute_ios_action(
             timeout,
             "Commande executee sur iOS",
         ),
+        DeviceActionKind::PushFile => Err(DeviceFleetError::Unavailable(
+            "Le transfert de fichier n'est pas pris en charge sur iOS".to_string(),
+        )),
         DeviceActionKind::OpenScreen => Err(DeviceFleetError::Unavailable(
             "Aucun outil de mirroring iOS jailbreak n'est configure".to_string(),
         )),
@@ -2794,7 +2892,10 @@ fn ios_wda_action_for_request(
                 .ok_or_else(|| DeviceFleetError::Validation("appId est requis".to_string()))?,
         }),
         DeviceActionKind::Screenshot => Some(IosWdaAction::Screenshot),
-        DeviceActionKind::Info | DeviceActionKind::OpenScreen | DeviceActionKind::Shell => None,
+        DeviceActionKind::Info
+        | DeviceActionKind::OpenScreen
+        | DeviceActionKind::Shell
+        | DeviceActionKind::PushFile => None,
     };
     Ok(action)
 }
@@ -3388,6 +3489,29 @@ fn validate_action_request(request: &DeviceActionRequest) -> Result<(), DeviceFl
                 ));
             }
         }
+        DeviceActionKind::PushFile => {
+            let local_path = request.args.local_path.as_deref().unwrap_or("");
+            let remote_path = request.args.remote_path.as_deref().unwrap_or("");
+            if local_path.is_empty()
+                || local_path.len() > 4096
+                || local_path.chars().any(char::is_control)
+            {
+                return Err(DeviceFleetError::Validation(
+                    "localPath doit contenir 1 a 4096 caracteres sans caractere de controle"
+                        .to_string(),
+                ));
+            }
+            if remote_path.is_empty()
+                || !remote_path.starts_with('/')
+                || remote_path.len() > 4096
+                || remote_path.chars().any(char::is_control)
+            {
+                return Err(DeviceFleetError::Validation(
+                    "remotePath doit etre un chemin absolu de 1 a 4096 caracteres sans controle"
+                        .to_string(),
+                ));
+            }
+        }
         DeviceActionKind::Info | DeviceActionKind::Screenshot | DeviceActionKind::OpenScreen => {}
     }
     Ok(())
@@ -3614,6 +3738,7 @@ fn action_timeout(request: &DeviceActionRequest) -> Duration {
         DeviceActionKind::Screenshot => 15_000,
         DeviceActionKind::OpenScreen => 5_000,
         DeviceActionKind::Shell => 30_000,
+        DeviceActionKind::PushFile => 180_000,
         _ => 10_000,
     }))
 }
@@ -3928,6 +4053,28 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn device_action_concurrency_is_bounded_and_accepts_forty_workers() {
+        assert_eq!(parse_device_action_concurrency(Some("40")), 40);
+        assert_eq!(parse_device_action_concurrency(Some(" 40 ")), 40);
+        assert_eq!(
+            parse_device_action_concurrency(Some("0")),
+            DEFAULT_DEVICE_ACTION_CONCURRENCY
+        );
+        assert_eq!(
+            parse_device_action_concurrency(Some("129")),
+            DEFAULT_DEVICE_ACTION_CONCURRENCY
+        );
+        assert_eq!(
+            parse_device_action_concurrency(Some("invalid")),
+            DEFAULT_DEVICE_ACTION_CONCURRENCY
+        );
+        assert_eq!(
+            parse_device_action_concurrency(None),
+            DEFAULT_DEVICE_ACTION_CONCURRENCY
+        );
     }
 
     fn final_snapshot_paths(data_dir: &TestDataDir) -> Vec<(u64, PathBuf)> {
@@ -4329,6 +4476,44 @@ mod tests {
     }
 
     #[test]
+    fn manager_claims_forty_distinct_devices_concurrently() {
+        let manager = DeviceFleetManager::new(Duration::from_secs(15));
+        let serials = (1..=40)
+            .map(|index| format!("PHONE-{index:02}"))
+            .collect::<Vec<_>>();
+        manager
+            .heartbeat_at(
+                DeviceConnectorHeartbeatRequest {
+                    connector_id: "usb-test".to_string(),
+                    devices: serials.iter().map(|serial| ready_android(serial)).collect(),
+                    tools: DeviceFleetTools::default(),
+                    error: None,
+                },
+                100,
+            )
+            .unwrap();
+        for serial in &serials {
+            manager
+                .queue_action_at("owner-a", info_request(serial), 101)
+                .unwrap();
+        }
+        manager
+            .queue_action_at("owner-a", info_request(&serials[0]), 101)
+            .unwrap();
+
+        let mut claimed_devices = HashSet::new();
+        for _ in 0..40 {
+            let job = manager
+                .claim_next_at("usb-test", 102)
+                .unwrap()
+                .expect("une action par telephone doit pouvoir etre reclamee");
+            assert!(claimed_devices.insert(job.device_id));
+        }
+        assert_eq!(claimed_devices.len(), 40);
+        assert!(manager.claim_next_at("usb-test", 102).unwrap().is_none());
+    }
+
+    #[test]
     fn manager_enforces_owner_and_connector_lease() {
         let manager = DeviceFleetManager::new(Duration::from_secs(15));
         manager.heartbeat_at(heartbeat("ABC123"), 100).unwrap();
@@ -4420,22 +4605,36 @@ mod tests {
             .claim_next_at("usb-test", 102)
             .unwrap()
             .expect("premiere lease");
-        manager.heartbeat_at(heartbeat("ABC123"), 223).unwrap();
-        assert!(manager.claim_next_at("usb-test", 223).unwrap().is_none());
+        let mutation_expired_at = 102 + ACTION_CLAIM_LEASE_SECONDS + 1;
+        manager
+            .heartbeat_at(heartbeat("ABC123"), mutation_expired_at)
+            .unwrap();
+        assert!(manager
+            .claim_next_at("usb-test", mutation_expired_at)
+            .unwrap()
+            .is_none());
         assert_eq!(
             manager.action_status("owner", &queued.id).unwrap().status,
             DeviceActionStatus::Expired
         );
 
+        let read_created_at = mutation_expired_at + 1;
+        let read_claimed_at = read_created_at + 1;
         let read = manager
-            .queue_action_at("owner", info_request("ABC123"), 224)
+            .queue_action_at("owner", info_request("ABC123"), read_created_at)
             .unwrap();
         manager
-            .claim_next_at("usb-test", 225)
+            .claim_next_at("usb-test", read_claimed_at)
             .unwrap()
             .expect("premiere lecture");
-        manager.heartbeat_at(heartbeat("ABC123"), 346).unwrap();
-        assert!(manager.claim_next_at("usb-test", 346).unwrap().is_none());
+        let read_expired_at = read_claimed_at + ACTION_CLAIM_LEASE_SECONDS + 1;
+        manager
+            .heartbeat_at(heartbeat("ABC123"), read_expired_at)
+            .unwrap();
+        assert!(manager
+            .claim_next_at("usb-test", read_expired_at)
+            .unwrap()
+            .is_none());
         let expired_read = manager.action_status("owner", &read.id).unwrap();
         assert_eq!(expired_read.status, DeviceActionStatus::Expired);
         assert!(expired_read
@@ -4451,8 +4650,14 @@ mod tests {
         let queued = manager
             .queue_action_at("owner", info_request("ABC123"), 101)
             .unwrap();
-        manager.heartbeat_at(heartbeat("ABC123"), 222).unwrap();
-        assert!(manager.claim_next_at("usb-test", 222).unwrap().is_none());
+        let expired_at = 101 + QUEUED_ACTION_TTL_SECONDS + 1;
+        manager
+            .heartbeat_at(heartbeat("ABC123"), expired_at)
+            .unwrap();
+        assert!(manager
+            .claim_next_at("usb-test", expired_at)
+            .unwrap()
+            .is_none());
         let expired = manager.action_status("owner", &queued.id).unwrap();
         assert_eq!(expired.status, DeviceActionStatus::Expired);
         assert!(expired
@@ -4881,5 +5086,32 @@ mod tests {
         assert_eq!(action["args"]["startX"], 1);
         assert_eq!(action["args"]["endY"], 4);
         assert!(action["args"].get("toX").is_none());
+    }
+
+    #[test]
+    fn push_file_requires_local_path_and_absolute_remote_path() {
+        let mut request = info_request("ABC123");
+        request.action = DeviceActionKind::PushFile;
+        request.confirmed = true;
+        request.args.local_path = Some("C:/Videos/ma-video.mp4".to_string());
+        request.args.remote_path = Some("/sdcard/Pictures/ma-video.mp4".to_string());
+        assert!(validate_action_request(&request).is_ok());
+
+        let mut missing_local = request.clone();
+        missing_local.args.local_path = None;
+        assert!(validate_action_request(&missing_local).is_err());
+
+        let mut relative_remote = request.clone();
+        relative_remote.args.remote_path = Some("sdcard/ma-video.mp4".to_string());
+        assert!(validate_action_request(&relative_remote).is_err());
+
+        let mut control_char = request.clone();
+        control_char.args.remote_path = Some("/sdcard/ma-video\u{0007}.mp4".to_string());
+        assert!(validate_action_request(&control_char).is_err());
+
+        let serialized = serde_json::to_value(&request).unwrap();
+        assert_eq!(serialized["args"]["localPath"], "C:/Videos/ma-video.mp4");
+        assert_eq!(serialized["args"]["remotePath"], "/sdcard/Pictures/ma-video.mp4");
+        assert_eq!(serialized["action"], "push_file");
     }
 }

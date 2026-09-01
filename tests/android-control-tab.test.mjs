@@ -80,7 +80,7 @@ test("le démarrage est mis en file puis confirmé par le heartbeat réel", () =
 });
 
 test("l'affichage intégré attend le service et un appareil mais le démarrage n'attend pas le téléphone", () => {
-  assert.match(view, /const canOpen = serviceState === "online"[\s\S]*?!!selectedSerial/);
+  assert.match(view, /const canOpenSelected = serviceState === "online"[\s\S]*?!!selectedSerial/);
   assert.match(view, /Démarrez d’abord ws-scrcpy-web et attendez que le service soit détecté/);
   assert.match(view, /action: "start_ws_scrcpy",\s*\}\)/);
   assert.doesNotMatch(view, /action: "start_ws_scrcpy",\s*deviceSerial/);
@@ -142,7 +142,8 @@ test("l'iframe n'accepte que l'URL ws-scrcpy-web locale attendue", () => {
   assert.match(view, /url\.pathname !== SCRCPY_EMBED_PATH/);
   assert.match(view, /queryKeys\.length !== 1/);
   assert.match(view, /!url\.href\.startsWith\(SCRCPY_EMBED_URL_PREFIX\)/);
-  assert.match(view, /id="androidControlEmbedFrame"/);
+  assert.match(view, /class="android-control-embed-frame"/);
+  assert.match(view, /data-android-embed-frame/);
   assert.match(view, /sandbox="allow-scripts allow-same-origin"/);
   assert.match(view, /allow="fullscreen"/);
   assert.match(view, /referrerpolicy="no-referrer"/);
@@ -152,8 +153,8 @@ test("l'iframe n'accepte que l'URL ws-scrcpy-web locale attendue", () => {
 
 test("le handshake vérifie strictement l'origine et la fenêtre source", () => {
   assert.match(view, /event\.origin !== SCRCPY_EMBED_ORIGIN/);
-  assert.match(view, /event\.source !== frame\.contentWindow/);
-  assert.match(view, /frame\.dataset\.device !== androidEmbedDevice/);
+  assert.match(view, /find\(\(candidate\) => event\.source === candidate\.contentWindow\)/);
+  assert.match(view, /!androidEmbedSessions\.has\(deviceSerial\)/);
   assert.match(view, /ws-scrcpy-web:theme-ready/);
   assert.match(view, /ws-scrcpy-web:theme-request/);
   assert.match(view, /ws-scrcpy-web:theme/);
@@ -162,15 +163,32 @@ test("le handshake vérifie strictement l'origine et la fenêtre source", () => 
 
 test("le panneau représente les quatre états et garde une erreur actionnable", () => {
   assert.match(view, /type AndroidEmbedState = "closed" \| "loading" \| "ready" \| "error"/);
+  assert.match(view, /const overallAndroidEmbedState/);
   assert.match(view, /SCRCPY_EMBED_LOAD_TIMEOUT_MS = 12_000/);
   assert.match(view, /frame\.addEventListener\("load"/);
   assert.match(view, /frame\.addEventListener\("error"/);
   assert.match(view, /Le service local ne répond pas/);
   assert.match(view, /bouton scrcpy externe de secours/);
-  assert.match(styles, /\.android-control-embed\[data-state="closed"\]/);
-  assert.match(styles, /\.android-control-embed\[data-state="loading"\]/);
-  assert.match(styles, /\.android-control-embed\[data-state="ready"\]/);
-  assert.match(styles, /\.android-control-embed\[data-state="error"\]/);
+  assert.match(styles, /\.android-control-screen\[data-state="loading"\]/);
+  assert.match(styles, /\.android-control-screen\[data-state="ready"\]/);
+  assert.match(styles, /\.android-control-screen\[data-state="error"\]/);
+});
+
+test("le mur supervise jusqu'à quarante écrans Android indépendants", () => {
+  assert.match(view, /const MAX_ANDROID_LIVE_SCREENS = 40/);
+  assert.match(view, /const androidEmbedSessions = new Map<string, AndroidEmbedSession>\(\)/);
+  assert.match(view, /const androidEmbedLoadTimers = new Map<string, number>\(\)/);
+  assert.match(view, /\.slice\(0, availableSlots\)/);
+  assert.match(view, /id="androidControlOpenAllEmbeds"/);
+  assert.match(view, /id="androidControlCloseAllEmbeds"/);
+  assert.match(view, /data-android-screen-grid/);
+  assert.match(view, /data-android-reload-screen/);
+  assert.match(view, /data-android-close-screen/);
+  assert.match(view, /for \(const frame of frames\)/);
+  assert.match(styles, /\.android-control-screen-grid\s*\{/);
+  assert.match(styles, /repeat\(auto-fit, minmax\(min\(100%, 260px\), 1fr\)\)/);
+  assert.match(styles, /content-visibility: auto/);
+  assert.match(styles, /contain-intrinsic-size: 52px 540px/);
 });
 
 test("le polling existe uniquement pendant que la vue Android est active", () => {
@@ -186,8 +204,8 @@ test("le polling existe uniquement pendant que la vue Android est active", () =>
 test("la vue précise le rôle du PC Windows et reste responsive", () => {
   assert.match(view, /Le contrôle USB local est disponible depuis le PC Windows connecté au VPS/);
   assert.match(styles, /\.android-control-panel\s*\{/);
-  assert.match(styles, /#androidControlEmbedFrame\s*\{/);
+  assert.match(styles, /\.android-control-embed-frame\s*\{/);
   assert.match(styles, /@media \(max-width: 900px\)/);
   assert.match(styles, /@media \(max-width: 640px\)/);
-  assert.match(styles, /height: min\(68dvh, 620px\)/);
+  assert.match(styles, /height: min\(62dvh, 520px\)/);
 });

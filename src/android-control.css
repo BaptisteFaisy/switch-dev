@@ -176,11 +176,10 @@
 .android-control-embed-copy > p { margin: 0; color: #85858c; font-size: 9px; line-height: 1.45; }
 .android-control-embed-copy code { color: #a7d8f5; font: 9px var(--font-mono); }
 
-.android-control-embed-status > span {
-  display: none;
+.android-control-embed-status {
+  display: inline-flex;
   min-height: 30px;
   align-items: center;
-  gap: 6px;
   padding: 0 10px;
   border: 1px solid rgba(255, 255, 255, .11);
   border-radius: 999px;
@@ -190,14 +189,9 @@
   font-weight: 700;
   white-space: nowrap;
 }
-.android-control-embed-status svg { width: 13px; height: 13px; }
-.android-control-embed[data-state="closed"] [data-android-embed-status="closed"],
-.android-control-embed[data-state="loading"] [data-android-embed-status="loading"],
-.android-control-embed[data-state="ready"] [data-android-embed-status="ready"],
-.android-control-embed[data-state="error"] [data-android-embed-status="error"] { display: inline-flex; }
-.android-control-embed[data-state="loading"] [data-android-embed-status="loading"] { color: #e5bd7a; }
-.android-control-embed[data-state="ready"] [data-android-embed-status="ready"] { color: #71dcb1; }
-.android-control-embed[data-state="error"] [data-android-embed-status="error"] { color: #efa0ae; }
+.android-control-embed[data-state="loading"] .android-control-embed-status { color: #e5bd7a; }
+.android-control-embed[data-state="ready"] .android-control-embed-status { color: #71dcb1; }
+.android-control-embed[data-state="error"] .android-control-embed-status { color: #efa0ae; }
 
 .android-control-embed-actions { display: flex; align-items: center; gap: 7px; }
 .android-control-embed-actions { flex-wrap: wrap; justify-content: flex-end; }
@@ -256,6 +250,63 @@
 .android-control-frame-unavailable strong { color: #d4d4d8; font-size: 11px; }
 .android-control-embed-empty small { color: #77777e; font-size: 9px; }
 
+.android-control-screen-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr));
+  align-items: start;
+  gap: 12px;
+}
+
+.android-control-screen {
+  min-width: 0;
+  overflow: hidden;
+  content-visibility: auto;
+  contain: layout paint style;
+  contain-intrinsic-size: 52px 540px;
+  border: 1px solid rgba(255, 255, 255, .1);
+  border-radius: 13px;
+  background: #08080a;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, .18);
+}
+.android-control-screen[data-state="ready"] { border-color: rgba(75, 201, 145, .24); }
+.android-control-screen[data-state="error"] { border-color: rgba(218, 91, 111, .28); }
+
+.android-control-screen-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 8px;
+  min-height: 52px;
+  padding: 8px 9px 8px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, .08);
+  background: rgba(255, 255, 255, .018);
+}
+.android-control-screen-copy { display: grid; min-width: 0; gap: 2px; }
+.android-control-screen-copy strong,
+.android-control-screen-copy small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.android-control-screen-copy strong { color: #e2e2e5; font-size: 10px; }
+.android-control-screen-copy small { color: #73737b; font: 8px var(--font-mono); }
+.android-control-screen-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: #aaaab0;
+  font-size: 8px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.android-control-screen-state svg { width: 12px; height: 12px; }
+.android-control-screen[data-state="loading"] .android-control-screen-state { color: #e5bd7a; }
+.android-control-screen[data-state="ready"] .android-control-screen-state { color: #71dcb1; }
+.android-control-screen[data-state="error"] .android-control-screen-state { color: #efa0ae; }
+.android-control-screen-actions { display: flex; align-items: center; gap: 3px; }
+.android-control-screen-actions .icon-button { width: 28px; height: 28px; }
+.android-control-screen-actions .icon-button svg { width: 13px; height: 13px; }
+
 .android-control-frame-shell {
   position: relative;
   width: 100%;
@@ -267,17 +318,24 @@
   background: #050506;
 }
 
-#androidControlEmbedFrame {
+.android-control-embed-frame {
   width: 100%;
   height: 100%;
   border: 0;
   background: #050506;
   transition: opacity .18s ease;
 }
-.android-control-embed[data-state="loading"] #androidControlEmbedFrame,
-.android-control-embed[data-state="error"] #androidControlEmbedFrame {
+.android-control-screen[data-state="loading"] .android-control-embed-frame,
+.android-control-screen[data-state="error"] .android-control-embed-frame {
   opacity: .12;
   pointer-events: none;
+}
+
+.android-control-screen .android-control-frame-shell {
+  height: clamp(340px, 54vh, 600px);
+  min-height: 340px;
+  border: 0;
+  border-radius: 0;
 }
 
 .android-control-frame-loading,
@@ -293,8 +351,8 @@
   background: rgba(5, 5, 6, .86);
   text-align: center;
 }
-.android-control-embed[data-state="loading"] .android-control-frame-loading,
-.android-control-embed[data-state="error"] .android-control-frame-error { display: grid; }
+.android-control-screen[data-state="loading"] .android-control-frame-loading,
+.android-control-screen[data-state="error"] .android-control-frame-error { display: grid; }
 .android-control-frame-loading > svg,
 .android-control-frame-error > svg { width: 25px; height: 25px; }
 .android-control-frame-loading > strong,
@@ -340,6 +398,7 @@
 @media (max-width: 900px) {
   .android-control-embed-header { grid-template-columns: minmax(0, 1fr) auto; }
   .android-control-embed-actions { grid-column: 1 / -1; justify-content: flex-end; }
+  .android-control-screen-grid { grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr)); }
 }
 
 @media (max-width: 640px) {
@@ -357,5 +416,9 @@
   .android-control-embed-actions .tool-button { min-width: 0; flex: 1; }
   .android-control-service-button { flex-basis: 100% !important; }
   .android-control-frame-shell { height: min(68dvh, 620px); min-height: 360px; }
+  .android-control-screen .android-control-frame-shell { height: min(62dvh, 520px); min-height: 320px; }
+  .android-control-screen-header { grid-template-columns: minmax(0, 1fr) auto; }
+  .android-control-screen-state { grid-row: 2; justify-self: start; }
+  .android-control-screen-actions { grid-column: 2; grid-row: 1 / span 2; }
   .android-control-embed-empty { min-height: 140px; padding: 18px; }
 }

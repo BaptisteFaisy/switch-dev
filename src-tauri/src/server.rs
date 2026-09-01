@@ -2552,7 +2552,9 @@ async fn run_embedded_device_connector(manager: DeviceFleetManager) {
     };
 
     let workers = async move {
-        let permits = Arc::new(tokio::sync::Semaphore::new(8));
+        let permits = Arc::new(tokio::sync::Semaphore::new(
+            device_fleet::configured_device_action_concurrency(),
+        ));
         loop {
             let permit = match permits.clone().acquire_owned().await {
                 Ok(permit) => permit,
@@ -2847,6 +2849,7 @@ fn parse_device_terminal_action(
             | "key_event"
             | "open_app"
             | "shell"
+            | "push_file"
     );
     if device_id.is_empty() || !supported {
         return Err(device_terminal_cli_usage());
@@ -5549,12 +5552,12 @@ async fn api_start_chat_turn(
     let owner_id = actor.user().map(|identity| identity.id.clone());
     let (token, tool_server) = match requested_chat_tool_scope(&request) {
         None => (None, None),
-        Some(scope) => {
+        Some(_) => {
             let token = match state
                 .chat_tool_capabilities
                 .issue(AutonomousAgentToolContext {
                     account_id: request.account_id.clone(),
-                    scope,
+                    scope: ChatToolScope::Full,
                     user_id: owner_id.clone(),
                     source_chat_key: request.source_chat_key.clone(),
                     project_dir: request.project_dir.clone(),

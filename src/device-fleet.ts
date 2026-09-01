@@ -16,6 +16,7 @@ export const DEVICE_CONTROL_ACTIONS = [
   "key_event",
   "open_app",
   "shell",
+  "push_file",
 ] as const;
 
 export type DeviceControlAction = (typeof DEVICE_CONTROL_ACTIONS)[number];
@@ -91,6 +92,8 @@ type DeviceDraft = {
   key: string;
   appId: string;
   shell: string;
+  localPath: string;
+  remotePath: string;
 };
 type DeviceFleetBindings = {
   rerender: () => void;
@@ -103,6 +106,7 @@ type DeviceFleetRenderOptions = {
 const DEVICE_FLEET_POLL_MS = 4_000;
 const MAX_TEXT_LENGTH = 4_000;
 const MAX_COMMAND_LENGTH = 4_096;
+const MAX_PATH_LENGTH = 4_096;
 const MAX_RESULT_TEXT_LENGTH = 12_000;
 const MAX_DATA_IMAGE_LENGTH = 20_000_000;
 const DEVICE_ACTION_SET = new Set<string>(DEVICE_CONTROL_ACTIONS);
@@ -129,6 +133,8 @@ const DEFAULT_DRAFT: DeviceDraft = {
   key: "HOME",
   appId: "",
   shell: "",
+  localPath: "",
+  remotePath: "",
 };
 
 let snapshot: DeviceFleetSnapshot | null = null;
@@ -146,6 +152,11 @@ const actionFeedback = new Map<string, DeviceActionFeedback>();
 const deviceMedia = new Map<string, DeviceMedia>();
 const drafts = new Map<string, DeviceDraft>();
 const pendingShellConfirmations = new Map<string, string>();
+type PendingPushFileConfirmation = {
+  localPath: string;
+  remotePath: string;
+};
+const pendingPushFileConfirmations = new Map<string, PendingPushFileConfirmation>();
 const expandedControls = new Set<string>();
 
 const asRecord = (value: unknown): Record<string, unknown> | null =>
@@ -446,7 +457,7 @@ const draftFor = (key: string): DeviceDraft => {
 
 const cleanupRemovedDeviceState = (devices: readonly DeviceFleetDevice[]) => {
   const keys = new Set(devices.map((device) => device.key));
-  [actionFeedback, deviceMedia, drafts, pendingShellConfirmations].forEach((state) => {
+  [actionFeedback, deviceMedia, drafts, pendingShellConfirmations, pendingPushFileConfirmations].forEach((state) => {
     [...state.keys()].forEach((key) => {
       if (!keys.has(key)) state.delete(key);
     });
@@ -524,6 +535,7 @@ const responseMessage = (value: unknown, action: DeviceControlAction): string =>
     key_event: "Touche envoyée.",
     open_app: "Ouverture de l’application demandée.",
     shell: "Commande shell exécutée.",
+    push_file: "Transfert du fichier demandé.",
   })[action];
 };
 
@@ -737,6 +749,7 @@ const actionLabel = (action: DeviceControlAction): string => ({
   key_event: "Touche système",
   open_app: "Ouvrir une app",
   shell: "Shell",
+  push_file: "Pousser un fichier",
 })[action];
 
 const actionIcon = (action: DeviceControlAction): string => ({
@@ -749,6 +762,7 @@ const actionIcon = (action: DeviceControlAction): string => ({
   key_event: "keyboard",
   open_app: "app-window",
   shell: "square-terminal",
+  push_file: "upload",
 })[action];
 
 const formatUpdatedAt = (value: number | null): string => {
@@ -806,6 +820,7 @@ const formDisabled = (device: DeviceFleetDevice, action: DeviceControlAction): b
 const renderDeviceControls = (device: DeviceFleetDevice): string => {
   const draft = draftFor(device.key);
   const pendingShell = pendingShellConfirmations.get(device.key);
+  const pendingPush = pendingPushFileConfirmations.get(device.key);
   const open = expandedControls.has(device.key);
   const fieldAttrs = `data-device-key="${escapeAttr(device.key)}" data-device-draft`;
   return `<details class="device-fleet-controls" data-device-controls="${escapeAttr(device.key)}" ${open ? "open" : ""}>
@@ -860,6 +875,18 @@ const renderDeviceControls = (device: DeviceFleetDevice): string => {
           <span><i data-lucide="triangle-alert"></i><strong>Confirmer sur ${escapeHtml(device.name)}</strong><small>Cette commande peut modifier l’appareil.</small></span>
           <code>${escapeHtml(pendingShell)}</code>
           <div><button type="button" class="tool-button" data-device-shell-cancel="${escapeAttr(device.key)}"><i data-lucide="circle-x"></i><span>Annuler</span></button><button type="button" class="tool-button danger" data-device-shell-confirm="${escapeAttr(device.key)}"><i data-lucide="square-terminal"></i><span>Confirmer l’exécution</span></button></div>
+        </div>` : ""}
+      </form>
+
+      <form class="device-fleet-shell-form" data-device-action-form="push_file" data-device-key="${escapeAttr(device.key)}">
+        <header><i data-lucide="upload"></i><strong>Pousser un fichier (PC → appareil)</strong><span><i data-lucide="lock-keyhole"></i>Confirmation obligatoire</span></header>
+        <label><span>Fichier local (ce poste)</span><input ${fieldAttrs} data-device-draft-field="localPath" name="localPath" type="text" maxlength="${MAX_PATH_LENGTH}" autocomplete="off" spellcheck="false" placeholder="C:\\Videos\\ma-video.mp4" value="${escapeAttr(draft.localPath)}" required /></label>
+        <label><span>Destination sur l’appareil</span><input ${fieldAttrs} data-device-draft-field="remotePath" name="remotePath" type="text" maxlength="${MAX_PATH_LENGTH}" autocomplete="off" spellcheck="false" placeholder="/sdcard/Download/ma-video.mp4" value="${escapeAttr(draft.remotePath)}" required /></label>
+        <button type="submit" class="tool-button" ${formDisabled(device, "push_file") ? "disabled" : ""}><i data-lucide="shield-question"></i><span>Vérifier avant exécution</span></button>
+        ${pendingPush ? `<div class="device-fleet-shell-confirm" role="alertdialog" aria-label="Confirmer le transfert de fichier">
+          <span><i data-lucide="triangle-alert"></i><strong>Confirmer sur ${escapeHtml(device.name)}</strong><small>Le fichier sera copié depuis ce poste vers l’appareil.</small></span>
+          <code>adb push ${escapeHtml(pendingPush.localPath)} ${escapeHtml(pendingPush.remotePath)}</code>
+          <div><button type="button" class="tool-button" data-device-push-cancel="${escapeAttr(device.key)}"><i data-lucide="circle-x"></i><span>Annuler</span></button><button type="button" class="tool-button danger" data-device-push-confirm="${escapeAttr(device.key)}"><i data-lucide="upload"></i><span>Confirmer le transfert</span></button></div>
         </div>` : ""}
       </form>
     </div>
@@ -1022,6 +1049,16 @@ const formActionArgs = (
     if (command.length > MAX_COMMAND_LENGTH) throw new Error("La commande shell est trop longue.");
     return { command };
   }
+  if (action === "push_file") {
+    const localPath = (form.elements.namedItem("localPath") as HTMLInputElement | null)?.value.trim() ?? "";
+    const remotePath = (form.elements.namedItem("remotePath") as HTMLInputElement | null)?.value.trim() ?? "";
+    if (!localPath) throw new Error("Le chemin du fichier local est vide.");
+    if (!remotePath) throw new Error("La destination sur l’appareil est vide.");
+    if (localPath.length > MAX_PATH_LENGTH || remotePath.length > MAX_PATH_LENGTH) {
+      throw new Error("Un chemin est trop long.");
+    }
+    return { localPath, remotePath };
+  }
   return {};
 };
 
@@ -1087,6 +1124,15 @@ export const bindDeviceFleetUi = (nextBindings: DeviceFleetBindings): void => {
           nextBindings.rerender();
           return;
         }
+        if (action === "push_file") {
+          const localPath = String(args.localPath ?? "");
+          const remotePath = String(args.remotePath ?? "");
+          if (!localPath || !remotePath) return;
+          pendingPushFileConfirmations.set(key, { localPath, remotePath });
+          actionFeedback.delete(key);
+          nextBindings.rerender();
+          return;
+        }
         void performDeviceAction(key, action as DeviceControlAction, args, true);
       } catch (error) {
         setValidationError(key, action as DeviceControlAction, error);
@@ -1108,6 +1154,28 @@ export const bindDeviceFleetUi = (nextBindings: DeviceFleetBindings): void => {
       if (!key || !command) return;
       pendingShellConfirmations.delete(key);
       void performDeviceAction(key, "shell", { command }, true);
+    });
+  });
+  root.querySelectorAll<HTMLButtonElement>("[data-device-push-cancel]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const key = button.dataset.devicePushCancel;
+      if (!key) return;
+      pendingPushFileConfirmations.delete(key);
+      nextBindings.rerender();
+    });
+  });
+  root.querySelectorAll<HTMLButtonElement>("[data-device-push-confirm]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const key = button.dataset.devicePushConfirm;
+      const pending = key ? pendingPushFileConfirmations.get(key) : null;
+      if (!key || !pending) return;
+      pendingPushFileConfirmations.delete(key);
+      void performDeviceAction(
+        key,
+        "push_file",
+        { localPath: pending.localPath, remotePath: pending.remotePath },
+        true,
+      );
     });
   });
   root.querySelectorAll<HTMLButtonElement>("[data-device-close-media]").forEach((button) => {

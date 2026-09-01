@@ -1645,11 +1645,11 @@ fn all_tools_response(id: Value) -> Value {
                             },
                             "action": {
                                 "type": "string",
-                                "enum": ["info", "screenshot", "open_screen", "tap", "swipe", "type_text", "key_event", "open_app", "shell"]
+                                "enum": ["info", "screenshot", "open_screen", "tap", "swipe", "type_text", "key_event", "open_app", "shell", "push_file"]
                             },
                             "args": {
                                 "type": "object",
-                                "description": "Arguments propres a l'action. N'ajoute aucun argument qui n'a pas ete demande ou necessaire a l'action selectionnee."
+                                "description": "Arguments propres a l'action. N'ajoute aucun argument qui n'a pas ete demande ou necessaire a l'action selectionnee. Pour push_file : localPath (chemin absolu du fichier sur ce poste) et remotePath (chemin absolu de destination sur l'appareil, commencant par /)."
                             },
                             "confirmed": {
                                 "type": "boolean",
@@ -3273,7 +3273,8 @@ mod tests {
                 "type_text",
                 "key_event",
                 "open_app",
-                "shell"
+                "shell",
+                "push_file"
             ])
         );
         let description = control["description"].as_str().unwrap();
