@@ -31,6 +31,10 @@ const state = {
   oauthPending: false,
   oauthRequestId: 0,
   syncPending: false,
+  topVideos: null,
+  topError: null,
+  topPlatform: "all",
+  topRequestId: 0,
 };
 
 const elements = {
@@ -68,6 +72,9 @@ const elements = {
   chartSummary: document.querySelector("#chartSummary"),
   chartLegend: document.querySelector("#chartLegend"),
   lastUpdated: document.querySelector("#lastUpdated"),
+  topSummary: document.querySelector("#topSummary"),
+  topGrid: document.querySelector("#topGrid"),
+  topPlatformFilter: document.querySelector("#topPlatformFilter"),
   accountsGrid: document.querySelector("#accountsGrid"),
   connectModal: document.querySelector("#connectModal"),
   modalCloseButton: document.querySelector("#modalCloseButton"),
@@ -141,11 +148,15 @@ function escapeHtml(value) {
 }
 
 function accountPlatformLabel(platform) {
-  return platform === "instagram" ? "Instagram" : "TikTok";
+  if (platform === "instagram") return "Instagram";
+  if (platform === "youtube") return "YouTube";
+  return "TikTok";
 }
 
 function accountPlatformShort(platform) {
-  return platform === "instagram" ? "IG" : "TT";
+  if (platform === "instagram") return "IG";
+  if (platform === "youtube") return "YT";
+  return "TT";
 }
 
 function seriesColourClass(colour) {
@@ -225,9 +236,17 @@ function safeProviderUrl(value, platform) {
     const url = new URL(value);
     if (url.protocol !== "https:") return null;
     const hostname = url.hostname.toLowerCase();
-    const allowed = platform === "instagram"
-      ? hostname === "instagram.com" || hostname.endsWith(".instagram.com")
-      : hostname === "tiktok.com" || hostname.endsWith(".tiktok.com");
+    let allowed = false;
+    if (platform === "instagram") {
+      allowed = hostname === "instagram.com" || hostname.endsWith(".instagram.com");
+    } else if (platform === "tiktok") {
+      allowed = hostname === "tiktok.com" || hostname.endsWith(".tiktok.com");
+    } else if (platform === "youtube") {
+      allowed = hostname === "youtube.com"
+        || hostname.endsWith(".youtube.com")
+        || hostname === "youtu.be"
+        || hostname.endsWith(".youtu.be");
+    }
     return allowed ? url.href : null;
   } catch {
     return null;
@@ -287,6 +306,65 @@ function renderMedia() {
       <footer><span>Publié le ${escapeHtml(published)}</span>${providerUrl ? `<a href="${escapeHtml(providerUrl)}" target="_blank" rel="noopener noreferrer" aria-label="${escapeHtml(`Voir ${title} sur ${accountPlatformLabel(item.platform)}`)}">Voir le contenu</a>` : ""}</footer>
     </article>`;
   }).join("");
+}
+
+function renderTopVideos() {
+  const items = state.topVideos?.items ?? [];
+  if (!state.topVideos && !state.topError) {
+    elements.topSummary.textContent = "Chargement des meilleures vidéos…";
+    elements.topGrid.innerHTML = `<div class="accounts-empty">Lecture des meilleurs compteurs en cours…</div>`;
+    return;
+  }
+  if (state.topError) {
+    elements.topSummary.textContent = "Données temporairement indisponibles";
+    elements.topGrid.innerHTML = `<div class="accounts-empty">${escapeHtml(state.topError)}</div>`;
+    return;
+  }
+  elements.topSummary.textContent = items.length
+    ? `${items.length} vidéo${items.length > 1 ? "s" : ""} classée${items.length > 1 ? "s" : ""} · compteurs les plus récents`
+    : "Aucune vidéo avec compteur de vues";
+  if (!items.length) {
+    elements.topGrid.innerHTML = `<div class="accounts-empty">Aucune vidéo avec compteur de vues pour cette sélection. Connectez un compte officiel, ou alimentez le pont local (youtube-scraper / tiktok-views-api) puis Actualiser.</div>`;
+    return;
+  }
+  elements.topGrid.innerHTML = items.map((item, index) => {
+    const rank = index + 1;
+    const title = String(item.title || (item.platform === "youtube" ? "Vidéo YouTube" : "Vidéo sans titre"));
+    const providerUrl = safeProviderUrl(item.permalink, item.platform);
+    const published = item.publishedAt && Number.isFinite(Date.parse(item.publishedAt))
+      ? new Intl.DateTimeFormat("fr-FR", { day: "numeric", month: "short", year: "numeric" }).format(new Date(item.publishedAt))
+      : "Date inconnue";
+    const rankClass = rank <= 3 ? `rank-${rank}` : "rank-rest";
+    return `<article class="top-card ${rankClass}">
+      <span class="top-rank">${rank}</span>
+      ${item.thumbnailUrl
+        ? `<img class="top-thumb" src="${escapeHtml(item.thumbnailUrl)}" alt="" loading="lazy" referrerpolicy="no-referrer">`
+        : `<span class="top-thumb top-thumb-fallback" aria-hidden="true">▶</span>`}
+      <div class="top-copy">
+        <span class="top-platform"><i class="provider-logo ${escapeHtml(item.platform)}">${accountPlatformShort(item.platform)}</i><small>${accountPlatformLabel(item.platform)}${item.accountHandle ? ` · @${escapeHtml(item.accountHandle)}` : ""}</small></span>
+        <strong title="${escapeHtml(title)}">${escapeHtml(title)}</strong>
+        <span class="top-views">${numberFormatter.format(item.views)} <small>vues</small></span>
+        <span class="top-meta"><small>Publié le ${escapeHtml(published)}</small>${providerUrl ? `<a href="${escapeHtml(providerUrl)}" target="_blank" rel="noopener noreferrer" aria-label="${escapeHtml(`Voir ${title}`)}">Voir le contenu</a>` : ""}</span>
+      </div>
+    </article>`;
+  }).join("");
+}
+
+async function loadTopVideos() {
+  const requestId = ++state.topRequestId;
+  const ids = selectedAccounts().map((account) => account.id);
+  const params = new URLSearchParams({ platforms: state.topPlatform, limit: "8" });
+  if (ids.length) params.set("accounts", ids.join(","));
+  try {
+    const payload = await api(`/top-videos?${params.toString()}`);
+    if (requestId !== state.topRequestId) return;
+    state.topVideos = payload;
+    state.topError = null;
+  } catch (error) {
+    if (requestId !== state.topRequestId) return;
+    state.topError = error.message;
+  }
+  renderTopVideos();
 }
 
 function renderAccountFilters() {
@@ -644,12 +722,14 @@ function renderAll() {
   renderKpis();
   renderTable();
   renderMedia();
+  renderTopVideos();
   renderLastUpdated();
   drawChart();
 }
 
 async function loadDashboard() {
   const requestId = ++state.metricsRequestId;
+  void loadTopVideos();
   const ids = selectedAccounts().map((account) => account.id);
   if (!ids.length) {
     state.metricsError = null;
@@ -752,6 +832,7 @@ async function bootstrap() {
   } catch (error) {
     state.metricsError = error.message;
     state.mediaError = error.message;
+    state.topError = error.message;
     state.metrics = null;
     state.media = null;
     state.metricsStatus = "error";
@@ -827,6 +908,18 @@ elements.platformFilter.addEventListener("click", (event) => {
     item.setAttribute("aria-pressed", String(active));
   });
   void loadDashboard();
+});
+
+elements.topPlatformFilter.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-top-platform]");
+  if (!button) return;
+  state.topPlatform = button.dataset.topPlatform;
+  elements.topPlatformFilter.querySelectorAll("button").forEach((item) => {
+    const active = item === button;
+    item.classList.toggle("active", active);
+    item.setAttribute("aria-pressed", String(active));
+  });
+  void loadTopVideos();
 });
 
 elements.accountFilter.addEventListener("click", (event) => {

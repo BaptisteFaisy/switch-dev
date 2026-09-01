@@ -138,6 +138,9 @@ services:
     environment:
       PORT: "8090"
       SOCIAL_DATA_DIR: /data
+      # Événements du pont local (youtube-scraper, tiktok-views-api, …) :
+      # lus en lecture seule pour alimenter la section « Meilleures vidéos ».
+      SOCIAL_BRIDGE_DIR: ${SWITCH_SOCIAL_BRIDGE_DIR:-/data/bridge}
       SOCIAL_TIMEZONE: ${SOCIAL_TIMEZONE:-Europe/Paris}
       SOCIAL_DEMO_MODE: "false"
       SOCIAL_DEMO_SEED: "false"
@@ -146,6 +149,9 @@ services:
       - "8090"
     volumes:
       - social-data:/data
+      # Dossier hôte E:\switch-data\social\bridge (défaut du pont) monté en
+      # lecture seule par-dessus le volume de données.
+      - ${SWITCH_SOCIAL_BRIDGE_DIR:-E:/switch-data/social/bridge}:/data/bridge:ro
     read_only: true
     tmpfs:
       - /tmp:size=16m,mode=1777

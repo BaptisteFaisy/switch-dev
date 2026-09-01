@@ -7436,7 +7436,7 @@ const setActiveView = (view: AppView) => {
     forum: "Forum communautaire",
     messaging: "Messagerie privée",
     tiktok: "Comptes émetteurs TikTok",
-    social: "Réseaux sociaux — vues Instagram et TikTok",
+    social: "Réseaux sociaux — vues et meilleures vidéos (IG, TikTok, YouTube)",
     devices: "Appareils USB Android et iOS",
     android: "Contrôle Android USB",
     design: "Espace Design",
@@ -25656,7 +25656,7 @@ const renderChatFirstShell = () => {
             <span class="chat-context-icon"><i data-lucide="bar-chart-3"></i></span><span class="chat-context-copy"><strong>Stats</strong><small>Usage et activité</small></span>
           </button>
           ${isRemoteMode() ? `<button type="button" id="socialToggle" class="${activeView === "social" ? "active" : ""}" title="Vues quotidiennes des comptes Instagram et TikTok" ${activeView === "social" ? 'aria-current="page"' : ""}>
-            <span class="chat-context-icon"><i data-lucide="clapperboard"></i></span><span class="chat-context-copy"><strong>Réseaux sociaux</strong><small>Vues par jour · IG & TikTok</small></span>
+            <span class="chat-context-icon"><i data-lucide="clapperboard"></i></span><span class="chat-context-copy"><strong>Réseaux sociaux</strong><small>Vues & top vidéos · IG · TikTok · YouTube</small></span>
           </button>` : ""}
           ${isRemoteMode() ? `<button type="button" id="trackingToggle" class="${activeView === "tracking" ? "active" : ""}" title="Comptes, tracking et soldes Duello" ${activeView === "tracking" ? 'aria-current="page"' : ""}>
             <span class="chat-context-icon"><i data-lucide="route"></i></span><span class="chat-context-copy"><strong>Tracking</strong><small>Comptes · clics · soldes</small></span>
@@ -25972,7 +25972,7 @@ const renderLegacyTerminalShell = () => {
               <i data-lucide="bar-chart-3"></i>
               <span>Stats</span>
             </button>
-            ${isRemoteMode() ? `<button id="socialToggle" class="tool-button ${activeView === "social" ? "primary" : ""}" title="Vues Instagram et TikTok">
+            ${isRemoteMode() ? `<button id="socialToggle" class="tool-button ${activeView === "social" ? "primary" : ""}" title="Vues et meilleures vidéos Instagram, TikTok et YouTube">
               <i data-lucide="clapperboard"></i>
               <span>Social</span>
             </button>` : ""}

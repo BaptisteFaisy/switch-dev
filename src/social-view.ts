@@ -41,7 +41,7 @@ const escapeHtml = (value: string): string =>
 const createFrame = (): HTMLIFrameElement => {
   const iframe = document.createElement("iframe");
   iframe.className = "social-dashboard-frame";
-  iframe.title = "Réseaux sociaux — vues Instagram et TikTok";
+  iframe.title = "Réseaux sociaux — vues et meilleures vidéos Instagram, TikTok et YouTube";
   iframe.src = frameUrl;
   iframe.setAttribute("sandbox", FRAME_SANDBOX);
   iframe.setAttribute("loading", "eager");
@@ -132,7 +132,7 @@ export const renderSocialPanel = ({ remoteMode }: SocialPanelOptions): string =>
     return renderStatusCard(
       "server",
       "Connexion au serveur requise",
-      "L'onglet Réseaux sociaux lit les vues Instagram et TikTok depuis le dashboard Social Analytics du serveur Switch. Reconnectez l'application à un serveur pour l'utiliser.",
+      "L'onglet Réseaux sociaux lit les vues et les meilleures vidéos Instagram, TikTok et YouTube depuis le dashboard Social Analytics du serveur Switch. Reconnectez l'application à un serveur pour l'utiliser.",
       false,
       false,
     );

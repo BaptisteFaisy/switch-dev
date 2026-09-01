@@ -722,9 +722,11 @@ acces a l'ecran de cette machine pour la connexion ou les questions manuelles.
 ### Dashboard Instagram et TikTok (développement)
 
 La pile locale peut ajouter un dashboard **Réseaux sociaux** qui connecte les
-comptes via les OAuth officiels Instagram et TikTok, puis trace les vues par jour
-et par compte sur un graphique 2D. Le module reste masqué si son sidecar n'est pas
-disponible et n'est câblé que dans `compose.yaml`, réservé au développement.
+comptes via les OAuth officiels Instagram et TikTok, trace les vues par jour
+et par compte sur un graphique 2D, et classe les **meilleures vidéos par vues**
+(Instagram, TikTok et YouTube via le pont local `youtube-views-api`). Le module
+reste masqué si son sidecar n'est pas disponible et n'est câblé que dans
+`compose.yaml`, réservé au développement.
 
 La configuration des secrets, des URI de retour et la sémantique des métriques
 sont décrites dans [`social-analytics/README.md`](social-analytics/README.md).

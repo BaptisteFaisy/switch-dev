@@ -103,6 +103,24 @@
         </footer>
       </section>
 
+      <section class="top-section" id="topSection" aria-labelledby="topTitle">
+        <header class="card-head">
+          <div>
+            <span class="eyebrow">MEILLEURES VIDÉOS</span>
+            <h2 id="topTitle">Top des vidéos par vues</h2>
+          </div>
+          <div class="segmented top-filters" id="topPlatformFilter" role="group" aria-label="Plateforme des meilleures vidéos">
+            <button class="active" data-top-platform="all" type="button" aria-pressed="true">Toutes</button>
+            <button data-top-platform="tiktok" type="button" aria-pressed="false">TikTok</button>
+            <button data-top-platform="instagram" type="button" aria-pressed="false">Instagram</button>
+            <button data-top-platform="youtube" type="button" aria-pressed="false">YouTube</button>
+          </div>
+        </header>
+        <p class="media-summary" id="topSummary">Chargement des meilleures vidéos…</p>
+        <div class="top-grid" id="topGrid" aria-live="polite"></div>
+        <p class="media-note">Classement par compteur de vues exact le plus récent. Instagram et TikTok utilisent les compteurs officiels des comptes connectés ; YouTube (et tout événement du pont local) provient du téléchargement des compteurs publics via yt-dlp.</p>
+      </section>
+
       <section class="data-table-card" id="dataTableCard" hidden aria-labelledby="dataTableTitle">
         <header class="card-head">
           <div><span class="eyebrow">DONNÉES ACCESSIBLES</span><h2 id="dataTableTitle">Détail quotidien</h2></div>

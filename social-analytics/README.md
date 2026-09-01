@@ -15,10 +15,47 @@ et ouvre automatiquement l'onglet au retour d'un OAuth Instagram/TikTok
 (`public/social-loader.js`) qui ouvrait le dashboard en dialogue a été
 remplacé par cet onglet.
 
+## Meilleures vidéos (top par vues) et YouTube
+
+La section **« Meilleures vidéos »** classe les vidéos par **compteur de vues
+cumulatif exact le plus récent** :
+
+- **Instagram et TikTok** : les Reels/vidéos des comptes connectés (store
+  officiel, même source que « Vues par Reel et vidéo TikTok »).
+- **YouTube** : alimenté par le **pont local** `youtube-views-api` (yt-dlp,
+  sans clé API), qui écrit des événements JSON `switch.social.media_views/1`
+  dans le dossier `bridge/` de Switch (défaut
+  `E:\switch-data\social\bridge`). Les événements des autres ponts
+  (`tiktok-views-api`, …) sont aussi lus ; en cas de doublon, le compteur
+  officiel du store prime.
+
+Côté serveur, le dossier des événements se configure via `SOCIAL_BRIDGE_DIR`
+(défaut `/data/bridge`). `compose.yaml` le monte en lecture seule depuis
+l'hôte :
+
+```yaml
+volumes:
+  - ${SWITCH_SOCIAL_BRIDGE_DIR:-E:/switch-data/social/bridge}:/data/bridge:ro
+```
+
+Pour produire un événement YouTube :
+
+```bash
+curl -X POST "http://127.0.0.1:8788/v1/switch/bridge/noastudio"
+```
+
+puis « Actualiser » dans le dashboard. L'endpoint de lecture est
+`GET /api/social/top-videos?platforms=all|tiktok|instagram|youtube&limit=8`.
+Optionnellement `accounts=<ids>` restreint la partie officielle aux comptes
+sélectionnés (le pont reste global).
+
 ## Configuration locale
 
 1. Copier `social-analytics/social.env.example` vers
    `social-analytics/social.env`.
+   - Optionnel : `SOCIAL_BRIDGE_DIR` y est déjà défini (`/data/bridge`) ; si
+     vous ne voulez pas monter le dossier hôte, retirez la variable et le
+     volume `SWITCH_SOCIAL_BRIDGE_DIR` de `compose.yaml`.
 2. Copier `social-gateway/gateway.env.example` vers
    `social-gateway/gateway.env`.
 3. Générer une valeur aléatoire d'au moins 32 octets pour `SOCIAL_PROXY_KEY` et

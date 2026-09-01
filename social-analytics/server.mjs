@@ -8,7 +8,7 @@ import {
   randomUUID,
   timingSafeEqual,
 } from "node:crypto";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createCivilTime } from "./time.mjs";
@@ -41,12 +41,13 @@ const syncIntervalMilliseconds = Math.max(
 ) * 60 * 1_000;
 const scheduledSyncEnabled = (process.env.SOCIAL_SCHEDULED_SYNC_ENABLED ?? "true")
   .toLowerCase() !== "false";
-const {
-  dayKey,
-  shiftedDayKey,
-  dateKeys,
-  unixDayBoundary,
-} = createCivilTime(timezone);
+const bridgeDir = process.env.SOCIAL_BRIDGE_DIR?.trim()
+  || path.join(dataDir, "bridge");
+const bridgePlatformBySource = {
+  "youtube-scraper": "youtube",
+  "tiktok-views-api": "tiktok",
+  "instagram-views-api": "instagram",
+};
 
 if (!socialProxyKey) {
   throw new Error("SOCIAL_PROXY_KEY est requis");
@@ -1475,12 +1476,78 @@ function configPayload(request, user) {
         scope: "TikTok Login Kit et Display API v2 · vidéos publiques",
         authorizeHost: new URL(providerConfiguration.tiktok.authorizeUrl).hostname,
       },
+      youtube: {
+        configured: true,
+        connection: "bridge-download",
+        scope: "Chaînes publiques via le pont local (yt-dlp + événements JSON)",
+        authorizeHost: null,
+      },
     },
     metricNotes: {
       instagram: "Les vues journalières réelles nécessitent un compte professionnel et l’accès Insights.",
       tiktok: "Les vues vidéo sont cumulatives ; les vues journalières exigent deux snapshots quotidiens adjacents.",
     },
   };
+}
+
+function bridgeUploadDateToIso(value) {
+  if (typeof value !== "string") return null;
+  const match = value.match(/^(\d{4})(\d{2})(\d{2})$/);
+  if (!match) return null;
+  const parsed = new Date(`${match[1]}-${match[2]}-${match[3]}T12:00:00.000Z`);
+  return Number.isFinite(parsed.getTime()) ? parsed.toISOString() : null;
+}
+
+const bridgeCache = { loadedAt: 0, events: null };
+
+/**
+ * Lit les événements JSON immuables du pont local (`media-views-*.json`,
+ * schéma switch.social.media_views/1) écrits par les services hôte
+ * (youtube-scraper, tiktok-views-api, …). Ne garde que l'événement le plus
+ * récent par plateforme+compte. Cache en mémoire 60 s.
+ */
+async function loadBridgeEvents() {
+  const now = Date.now();
+  if (bridgeCache.events && now - bridgeCache.loadedAt < 60_000) {
+    return bridgeCache.events;
+  }
+  const latestByAccount = new Map();
+  let names = [];
+  try {
+    names = await readdir(bridgeDir);
+  } catch {
+    bridgeCache.events = latestByAccount;
+    bridgeCache.loadedAt = now;
+    return latestByAccount;
+  }
+  for (const name of names) {
+    if (!name.startsWith("media-views-") || !name.endsWith(".json")) continue;
+    let event;
+    try {
+      event = JSON.parse(await readFile(path.join(bridgeDir, name), "utf8"));
+    } catch {
+      continue;
+    }
+    if (event?.schema !== "switch.social.media_views/1" || !Array.isArray(event.videos)) continue;
+    const source = String(event.source ?? "");
+    const platform = bridgePlatformBySource[source] || event?.account?.platform;
+    if (!["instagram", "tiktok", "youtube"].includes(platform)) continue;
+    const handle = String(event.account?.handle ?? "").trim().toLowerCase();
+    if (!handle) continue;
+    const key = `${platform}:${handle}`;
+    const previous = latestByAccount.get(key);
+    if (
+      previous
+      && String(previous.event.generatedAt ?? "")
+        .localeCompare(String(event.generatedAt ?? "")) > 0
+    ) {
+      continue;
+    }
+    latestByAccount.set(key, { platform, handle, event });
+  }
+  bridgeCache.events = latestByAccount;
+  bridgeCache.loadedAt = now;
+  return latestByAccount;
 }
 
 async function handleApi(request, response, url) {
@@ -1781,6 +1848,131 @@ async function handleApi(request, response, url) {
     return;
   }
 
+  if (request.method === "GET" && route === "/top-videos") {
+    const requestedPlatforms = new Set(
+      (url.searchParams.get("platforms") ?? "all")
+        .split(",")
+        .map((value) => value.trim())
+        .filter(Boolean),
+    );
+    const platformsFilter = requestedPlatforms.has("all")
+      ? null
+      : requestedPlatforms;
+    const limit = Math.max(1, Math.min(20, Number.parseInt(
+      url.searchParams.get("limit") ?? "8",
+      10,
+    ) || 8));
+    const requestedAccountIds = new Set(
+      (url.searchParams.get("accounts") ?? "")
+        .split(",")
+        .map((value) => value.trim())
+        .filter(Boolean),
+    );
+    const officialEntries = await mutateStore((store) => {
+      ensureDemoSeed(store, user.id);
+      const accounts = store.accounts.filter((account) =>
+        account.ownerUserId === user.id
+        && accountIsVisible(account)
+        && (!platformsFilter || platformsFilter.has(account.platform))
+        && (!requestedAccountIds.size || requestedAccountIds.has(account.id)),
+      );
+      const accountIds = new Set(accounts.map((account) => account.id));
+      const byId = new Map(accounts.map((account) => [account.id, account]));
+      const media = store.media.filter((item) =>
+        item.ownerUserId === user.id
+        && accountIds.has(item.accountId)
+        && ["instagram", "tiktok"].includes(item.platform),
+      );
+      const mediaIds = new Set(media.map((item) => item.id));
+      const latestByMedia = new Map();
+      store.mediaSnapshots.forEach((snapshot) => {
+        if (
+          snapshot.ownerUserId !== user.id
+          || !accountIds.has(snapshot.accountId)
+          || !mediaIds.has(snapshot.mediaId)
+          || !/^\d{4}-\d{2}-\d{2}$/.test(snapshot.date)
+          || normalizeCumulativeViews(snapshot.views) == null
+        ) {
+          return;
+        }
+        const previous = latestByMedia.get(snapshot.mediaId);
+        if (
+          !previous
+          || String(snapshot.date).localeCompare(String(previous.date)) > 0
+          || (
+            snapshot.date === previous.date
+            && String(snapshot.capturedAt ?? "")
+              .localeCompare(String(previous.capturedAt ?? "")) > 0
+          )
+        ) {
+          latestByMedia.set(snapshot.mediaId, snapshot);
+        }
+      });
+      const entries = [];
+      media.forEach((item) => {
+        const account = byId.get(item.accountId);
+        const latest = latestByMedia.get(item.id) ?? null;
+        const views = latest ? normalizeCumulativeViews(latest.views) : null;
+        if (views == null) return;
+        entries.push({
+          platform: item.platform,
+          accountHandle: account?.handle ?? "",
+          accountDisplayName: account?.displayName ?? "",
+          externalId: sanitizeText(String(item.externalMediaId ?? ""), 128),
+          title: sanitizeText(item.title, 240),
+          views,
+          thumbnailUrl: sanitizeHttpUrl(item.thumbnailUrl),
+          permalink: sanitizeHttpUrl(item.permalink),
+          publishedAt: normalizePublishedAt(item.publishedAt),
+          source: "official",
+        });
+      });
+      return entries;
+    });
+    // Fusion avec les événements du pont local (YouTube et autres plateformes
+    // publiques) : le compteur officiel prime en cas de doublon.
+    const byKey = new Map();
+    officialEntries.forEach((entry) => {
+      byKey.set(`${entry.platform}:${entry.externalId}`, entry);
+    });
+    const bridgeAccounts = await loadBridgeEvents();
+    for (const { platform, handle, event } of bridgeAccounts.values()) {
+      if (platformsFilter && !platformsFilter.has(platform)) continue;
+      for (const video of event.videos) {
+        const externalId = sanitizeText(String(video?.id ?? ""), 128);
+        if (!externalId) continue;
+        const key = `${platform}:${externalId}`;
+        if (byKey.has(key)) continue;
+        const views = normalizeCumulativeViews(video?.views);
+        if (views == null) continue;
+        byKey.set(key, {
+          platform,
+          accountHandle: handle,
+          accountDisplayName: handle,
+          externalId,
+          title: sanitizeText(video?.title ?? video?.desc, 240)
+            || (platform === "youtube" ? "Vidéo YouTube" : "Vidéo sans titre"),
+          views,
+          thumbnailUrl: sanitizeHttpUrl(video?.thumbnail ?? video?.thumbnailUrl),
+          permalink: sanitizeHttpUrl(video?.url),
+          publishedAt: bridgeUploadDateToIso(video?.uploadDate),
+          source: String(event.source ?? "bridge"),
+        });
+      }
+    }
+    const items = [...byKey.values()]
+      .filter((entry) => Number.isFinite(entry.views))
+      .sort((left, right) => (right.views ?? 0) - (left.views ?? 0))
+      .slice(0, limit);
+    sendJson(response, 200, {
+      ok: true,
+      platforms: [...new Set(items.map((item) => item.platform))],
+      items,
+      generatedAt: new Date().toISOString(),
+    });
+    return;
+  }
+
   if (request.method === "POST" && route === "/sync") {
     requireCsrf(request, user);
     const liveAccounts = await mutateStore((store) => {
@@ -1949,7 +2141,7 @@ async function serveStatic(response, pathname) {
     "content-type": contentType,
     "content-length": body.length,
     "content-security-policy": pathname.endsWith("index.html") || pathname === "/social/"
-      ? "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'self'; base-uri 'self'; form-action 'self'"
+      ? "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: https:; connect-src 'self'; frame-ancestors 'self'; base-uri 'self'; form-action 'self'"
       : "default-src 'none'",
   }));
   response.end(body);
