@@ -48,11 +48,18 @@ const dynamicEntryChunk = (): Plugin => ({
     ].join("");
     return {
       html: html.replace(entry[0], bootstrap),
-      tags: [{
-        tag: "meta",
-        attrs: { name: "cst-build-id", content: buildId },
-        injectTo: "head-prepend",
-      }],
+      tags: [
+        {
+          tag: "meta",
+          attrs: { name: "cst-build-id", content: buildId },
+          injectTo: "head-prepend",
+        },
+        {
+          tag: "meta",
+          attrs: { name: "cst-build-commit", content: buildCommit },
+          injectTo: "head-prepend",
+        },
+      ],
     };
   },
 });

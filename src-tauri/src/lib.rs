@@ -31,6 +31,7 @@ mod pool;
 mod private_messages;
 mod provider;
 mod resource_profile;
+mod release_diagnostics;
 mod runtime_sync;
 mod security;
 pub mod server;

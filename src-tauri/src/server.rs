@@ -68,6 +68,7 @@ use crate::{
         PrivateMessageImageRequest, PrivateMessageManager, PrivateMessageUser,
         MAX_PRIVATE_MESSAGE_REQUEST_BYTES,
     },
+    release_diagnostics::ReleaseDiagnostics,
     runtime_sync::{RuntimeSync, RuntimeSyncTopic},
     settings::{self, AccountProfile, AppSettings, Provider},
     telegram_notifications::{
@@ -252,6 +253,7 @@ pub struct ServerConfig {
 #[derive(Clone)]
 struct ServerState {
     config: ServerConfig,
+    release: ReleaseDiagnostics,
     auth: AuthManager,
     terminals: RemoteTerminalManager,
     chat: ChatTurnManager,
@@ -382,6 +384,7 @@ struct HealthResponse {
     public_base_url: String,
     version: &'static str,
     commit: &'static str,
+    release: ReleaseDiagnostics,
     ready: bool,
     draining: bool,
     active_terminals: usize,
@@ -403,6 +406,7 @@ struct LivenessResponse {
     node_id: String,
     version: &'static str,
     commit: &'static str,
+    release: ReleaseDiagnostics,
     ready: bool,
     draining: bool,
     active_terminals: usize,
@@ -1885,6 +1889,7 @@ pub async fn run(config: ServerConfig) -> Result<(), String> {
         .with_goal_tools(chat_tool_capabilities.clone(), config.chat_tools_mcp_url()?);
     let state = Arc::new(ServerState {
         config: config.clone(),
+        release: ReleaseDiagnostics::from_static_dir(&config.static_dir),
         auth: user_auth.clone(),
         terminals,
         chat,
@@ -3210,6 +3215,7 @@ async fn api_healthz(State(state): State<Arc<ServerState>>) -> Response {
         node_id: state.config.node_id.clone(),
         version: VERSION,
         commit: COMMIT,
+        release: state.release.clone(),
         // `ready` = pret a accepter de NOUVEAUX terminaux. Un noeud en drain se
         // declare non pret (semantique readiness type k8s) tout en restant
         // vivant pour ses sessions en cours.
@@ -3500,6 +3506,7 @@ async fn api_health(State(state): State<Arc<ServerState>>, headers: HeaderMap) -
             public_base_url: state.config.public_base_url.clone(),
             version: VERSION,
             commit: COMMIT,
+            release: state.release.clone(),
             ready: !draining,
             draining,
             active_terminals: state.terminals.active_count(),
