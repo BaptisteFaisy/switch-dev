@@ -9,7 +9,7 @@ const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 test("le dashboard social vit dans un onglet natif, plus dans un loader injecté", async () => {
   const index = await readFile(path.join(root, "index.html"), "utf8");
   const main = await readFile(path.join(root, "src", "main.ts"), "utf8");
-const types = await readFile(path.join(root, "src", "types.ts"), "utf8");
+const types = await readFile(path.join(root, "src", "main.ts"), "utf8");
 
   assert.doesNotMatch(index, /social-loader\.js/);
   assert.match(types, /type AppView =[^;]*\| "social"/s);
