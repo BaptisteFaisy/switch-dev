@@ -91,9 +91,23 @@ Le nœud accueille plusieurs chats en parallèle (des agents `codex.exe` et le b
 - Seul `start-switch-development-runtime.ps1` peut enregistrer le candidat après avoir vérifié le binaire, le `dist`, l'index réellement servi, le commit backend et `/healthz`. Une release n'est acceptée qu'après `RecordRuntime` réussi.
 - Le verrou VPS reste distinct et autoritaire pour la production. La copie locale de son état dans `docs/operations/azure-vps-release-floor.json` est informative et ne permet aucune synchronisation ni aucun déploiement.
 
-# Plan de montée à 10 000 agents
+# Plan de montée à 10 000 workers
 
-- Le plan fondé sur l'architecture et la release Switch développement actuelles se trouve dans `docs/architecture/PLAN-10000-AGENTS-SWITCH-DEV-ACTUEL.md`.
+- Le plan pour porter `workerCount` à 10 000 dans une même orchestration, fondé sur l'architecture et la release Switch développement actuelles, se trouve dans `docs/architecture/PLAN-10000-AGENTS-SWITCH-DEV-ACTUEL.md`.
 - Son chemin absolu sur le SSD est `E:\AppsData\SwitchDevelopment\app\docs\architecture\PLAN-10000-AGENTS-SWITCH-DEV-ACTUEL.md`.
 - Avant toute implémentation liée à cette montée en charge, relire ce plan et vérifier à nouveau la baseline active ; les limites, hashes et métriques observés dans le document sont datés et ne remplacent pas les contrôles de runtime.
 - Ce plan concerne exclusivement Switch développement et n'autorise aucune action sur le VPS Azure.
+
+# PowerShell : contournement du stub sandbox (PSModulePath)
+
+- Symptôme : sous PowerShell 5.1, `Get-FileHash` lève `CommandNotFoundException` (« Le terme Get-FileHash n'est pas reconnu ») alors que la version PowerShell est correcte. Impact direct : `tests/switch-development-dist-inventory.test.ps1`, le module `scripts/switch-development-dist-inventory.psm1` et donc le verrou anti-régression (`scripts/switch-development-release-gate.ps1`) échouent dès qu'un hash est calculé.
+- Cause : le sandbox Freebuff/Codex injecte `%USERPROFILE%\.cache\codex-runtimes\codex-primary-runtime\dependencies\native\powershell\Modules` dans `PSModulePath`. Le module `Microsoft.PowerShell.Utility` de ce dossier ne contient qu'un `Microsoft.PowerShell.Utility.psd1` sans son `.psm1` ; or en PowerShell 5.1, `Get-FileHash` est défini dans ce `.psm1`. Le stub masque le vrai module système (`C:\WINDOWS\system32\WindowsPowerShell\v1.0\Modules\Microsoft.PowerShell.Utility`, qui contient bien les deux fichiers).
+- Depuis le correctif intégré à `scripts/switch-development-dist-inventory.psm1`, tout consommateur de ce module se soigne automatiquement : à l'import, il remet les dossiers modules Windows PowerShell en tête de `PSModulePath` (processus uniquement, idempotent). `switch-development-release-gate.ps1` et `start-switch-development-runtime.ps1` l'importent — le gate et le runtime sont donc couverts sans intervention.
+- Tous les autres scripts du dépôt qui calculent des hashes (`switch-build-source-guard.ps1`, `build-android-apk.ps1`, `deploy-vps.ps1`, `deploy-vps-ansible.ps1`, `deploy-vps-frontend.ps1`, `measure-server-idle-resources.ps1`, `setup-local-voice.ps1`, `start-mass-subagents-development.ps1`, `update-node.ps1`) passent par le même correctif via le helper partagé `scripts/switch-development-ensure-system-module-path.ps1`, sourcé en tête de script (`& (Join-Path $PSScriptRoot 'switch-development-ensure-system-module-path.ps1')`).
+- La procédure manuelle ne sert plus que de secours pour un script tiers ou un one-liner. En bash :
+  ```bash
+  export PSModulePath='C:\Users\jeanp\Documents\WindowsPowerShell\Modules;C:\Program Files\WindowsPowerShell\Modules;C:\WINDOWS\system32\WindowsPowerShell\v1.0\Modules'
+  powershell -NoProfile -ExecutionPolicy Bypass -File tests/switch-development-dist-inventory.test.ps1
+  ```
+  En PowerShell : `$env:PSModulePath = 'C:\Users\jeanp\Documents\WindowsPowerShell\Modules;C:\Program Files\WindowsPowerShell\Modules;C:\WINDOWS\system32\WindowsPowerShell\v1.0\Modules'` avant d'importer le module.
+- Vérification rapide : `powershell -NoProfile -Command '(Get-Command Get-FileHash) -ne $null'` doit afficher `True`.
